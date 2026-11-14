@@ -1,33 +1,108 @@
 name: Release
 
-# Push a tag like v0.2.0 to build installers for every platform and attach them
-# to a draft GitHub release. Run manually to build installers without a release.
+# Builds installers for macOS (Apple Silicon and Intel), Linux and Windows.
+#
+# - Push to main: after CI passes, the packages replace the assets of the rolling
+#   "Latest main build" pre-release (tag `main-build`).
+# - Push a vX.Y.Z tag: the packages go into a draft release for that version,
+#   with the matching CHANGELOG.md section as release notes.
+# - Manual run: the packages are only kept as workflow artifacts.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+# A newer main build supersedes an older one; version releases always run to completion.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: release-${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' }}
 
 env:
   CARGO_TERM_COLOR: always
+  MAIN_BUILD_TAG: main-build
 
 jobs:
-  check-version:
-    name: Check version
+  prepare:
+    name: Prepare release
+    # Main builds only run for successful CI runs of pushes, never for pull requests.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
     steps:
       - uses: actions/checkout@v7
-      - name: Versions match each other and the tag
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Check versions
         run: node .github/scripts/check-version.mjs "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+
+      - name: Create or refresh the release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          release_id_for() {
+            # The releases list includes drafts, which the by-tag endpoint does not.
+            gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"$1\") | .id" | head -n1
+          }
+
+          case "$EVENT" in
+            workflow_run)
+              # Replace the rolling pre-release so its tag and assets match this commit.
+              gh release delete "$MAIN_BUILD_TAG" --cleanup-tag --yes || true
+              {
+                echo "Automated build of \`main\` at ${SHA:0:7}. Not a stable release: packages are replaced on every push to \`main\`."
+                echo
+                if notes=$(node .github/scripts/changelog-section.mjs Unreleased); then
+                  echo "## Unreleased changes"
+                  echo
+                  echo "$notes"
+                fi
+              } > notes.md
+              gh release create "$MAIN_BUILD_TAG" --target "$SHA" --prerelease --latest=false \
+                --title "Latest main build" --notes-file notes.md
+              echo "release_id=$(release_id_for "$MAIN_BUILD_TAG")" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              id=$(release_id_for "$TAG")
+              if [ -z "$id" ]; then
+                args=(--draft --verify-tag --title "grit $TAG")
+                [[ "$TAG" == *-* ]] && args+=(--prerelease)
+                if node .github/scripts/changelog-section.mjs "${TAG#v}" > notes.md; then
+                  args+=(--notes-file notes.md)
+                else
+                  echo "::warning::No CHANGELOG.md section for ${TAG#v}; using generated notes"
+                  args+=(--generate-notes)
+                fi
+                gh release create "$TAG" "${args[@]}"
+                id=$(release_id_for "$TAG")
+              fi
+              echo "release_id=$id" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Manual run: packages are uploaded as workflow artifacts only."
+              ;;
+          esac
 
   build:
     name: Build (${{ matrix.name }})
-    needs: check-version
+    needs: prepare
     permissions:
       contents: write
     strategy:
@@ -50,6 +125,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -74,10 +151,7 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Code signing: add these repository secrets to sign the installers.
-          # macOS: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-          #        APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
-          # Updater: TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          # Code signing: add these repository secrets to sign the macOS packages.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -86,11 +160,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: --target ${{ matrix.target }}
-          # Without a tag (manual run) nothing is released; installers are kept as workflow artifacts.
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: grit ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generateReleaseNotes: true
+          # Empty for manual runs: nothing is uploaded to a release.
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           uploadWorkflowArtifacts: true
           retryAttempts: 1

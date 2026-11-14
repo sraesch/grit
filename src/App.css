@@ -14,6 +14,14 @@
   --del-text: #c62828;
   --hunk-bg: #eef3fc;
   --danger: #c62828;
+  /* grit brand (logo) */
+  --brand-navy: #0d1732;
+  --brand-mint: #18ffbf;
+  /* Light theme: dark logo tile */
+  --logo-bg: var(--brand-navy);
+  --logo-line: var(--brand-mint);
+  --logo-head-fill: #ffffff;
+  --logo-head-stroke: #ffffff;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
   font-size: 13px;
@@ -38,6 +46,11 @@
     --del-text: #f08080;
     --hunk-bg: #23304a;
     --danger: #f07070;
+    /* Dark theme: light logo tile */
+    --logo-bg: #ffffff;
+    --logo-line: var(--brand-navy);
+    --logo-head-fill: var(--brand-mint);
+    --logo-head-stroke: var(--brand-navy);
     color-scheme: dark;
   }
 }
@@ -193,7 +206,39 @@ button.small {
 }
 .welcome h1 {
   color: var(--text);
-  margin: 0;
+  margin: 0 0 8px;
+}
+
+/* Logo */
+
+.logo-tile {
+  display: block;
+  flex-shrink: 0;
+}
+.logo-bg {
+  fill: var(--logo-bg);
+}
+.logo-line {
+  stroke: var(--logo-line);
+}
+.logo-commit {
+  fill: var(--logo-line);
+}
+.logo-head {
+  fill: var(--logo-head-fill);
+  stroke: var(--logo-head-stroke);
+}
+.logo-lockup {
+  display: inline-flex;
+  align-items: center;
+  font-family: "Nunito Sans", system-ui, sans-serif;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+.toolbar .logo-tile {
+  margin-right: 2px;
 }
 
 .main {

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- grit app icon, direction C "Fork r": a lowercase r drawn as a branch forking from a commit.
+       Master for `npx tauri icon`. The 360x360 design tile is scaled to 824px with a 100px margin,
+       matching the macOS icon grid. -->
+  <g transform="translate(100 100) scale(2.2888889)">
+    <rect width="360" height="360" rx="80" fill="#0d1732"/>
+    <path d="M138 93 L138 248" fill="none" stroke="#18ffbf" stroke-width="34" stroke-linecap="round"/>
+    <path d="M138 176 A70 70 0 0 1 208 106 L222 106" fill="none" stroke="#18ffbf" stroke-width="34"/>
+    <circle cx="138" cy="254" r="30" fill="#18ffbf"/>
+    <circle cx="222" cy="106" r="30" fill="#ffffff"/>
+  </g>
+</svg>

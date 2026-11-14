@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic refresh when the working tree or repository changes
 - Resizable panes, light and dark themes, and reopening the last repository on start
 - CI on GitHub Actions: frontend typecheck, tests and build; Rust formatting, clippy, tests and app builds on Linux, macOS and Windows
-- Release workflow that builds installers for macOS, Linux and Windows into a draft GitHub release when a `v*` tag is pushed
+- Release workflow that builds installers for macOS, Linux and Windows into a draft GitHub release when a `v*` tag is pushed, using the changelog section as release notes
+- Rolling "Latest main build" pre-release with installers for every platform, rebuilt after each successful CI run on `main`
 - Dependabot updates for npm, Cargo and GitHub Actions
 - Frontend unit and component tests (Vitest) and backend tests against real git repositories
+- MIT license
+- App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 
 [Unreleased]: https://github.com/sraesch/grit/commits/develop

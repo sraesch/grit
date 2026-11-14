@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/app-icon.svg" width="128" height="128" alt="grit logo: a lowercase r drawn as a branch forking from a commit">
+</p>
+
 # grit
 
 A cross-platform (Windows, macOS, Linux) interactive Git client built with Tauri 2, Rust and React.
@@ -28,6 +32,10 @@ npm run tauri dev               # run the app
 npm run tauri build             # build installers for the current OS
 ```
 
+On Linux with Wayland (e.g. Ubuntu/GNOME), the dock only shows an app's icon if a matching `.desktop` file is
+installed. Installed packages include one; for `npm run tauri dev`, run `scripts/install-linux-dev-desktop-entry.sh`
+once (`--uninstall` removes it).
+
 Keep the Tauri Rust crates and `@tauri-apps/*` npm packages on the same minor version: when updating,
 run `cargo update` in `src-tauri` and update the npm packages together (`npx tauri info` shows both sides).
 
@@ -52,9 +60,14 @@ GitHub Actions workflows live in `.github/workflows/`:
   - Frontend: typecheck, tests with coverage, production build
   - Rust: `cargo fmt --check` and `clippy -D warnings`
   - Rust tests plus a full app build on Linux, macOS and Windows
-- **Release** (`release.yml`): pushing a `v*` tag checks that the tag matches the app version, builds installers for
-  macOS (Apple Silicon and Intel), Linux (`.deb`, `.rpm`, AppImage) and Windows (`.msi`, NSIS `.exe`), and attaches
-  them to a **draft** GitHub release. Running it manually builds installers as workflow artifacts without releasing.
+- **Release** (`release.yml`): builds installers for macOS (Apple Silicon and Intel), Linux (`.deb`, `.rpm`,
+  AppImage) and Windows (`.msi`, NSIS `.exe`):
+  - **Every push to `main`**: once CI passes for that commit, the installers are published to the rolling
+    **[Latest main build](https://github.com/sraesch/grit/releases/tag/main-build)** pre-release, which is replaced on
+    every push. It is a pre-release, so GitHub's "latest release" keeps pointing to the newest stable version.
+  - **`v*` tags**: checks that the tag matches the app version and attaches the installers to a **draft** release,
+    with that version's [changelog](CHANGELOG.md) section as release notes.
+  - **Manual run** (Actions › Release › Run workflow): installers are kept as workflow artifacts only.
 - **Dependabot** (`.github/dependabot.yml`): weekly update PRs for npm, Cargo and the workflow actions.
 
 ### Making a release
@@ -68,3 +81,7 @@ GitHub Actions workflows live in `.github/workflows/`:
 
 Installers are unsigned until signing secrets are configured (see the comments in `release.yml`), so macOS
 Gatekeeper and Windows SmartScreen will warn on first launch.
+
+## License
+
+[MIT](LICENSE) © 2026 Sascha Raesch

@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Branches, errorMessage, LogEntry, RepoChanged, RepoInfo, Status } from "./api";
 import { ChangesView } from "./components/ChangesView";
 import { HistoryView } from "./components/HistoryView";
+import { LogoLockup, LogoTile } from "./components/Logo";
 import { Sidebar, View } from "./components/Sidebar";
 import { Split } from "./components/Split";
+import "@fontsource/nunito-sans/latin-900.css";
 import "./App.css";
 
 const LAST_REPO_KEY = "lastRepo";
@@ -117,6 +119,7 @@ function App() {
   return (
     <div className="app">
       <header className="toolbar">
+        <LogoTile size={22} label="grit" />
         <button onClick={chooseRepo}>Open…</button>
         {repo && (
           <>
@@ -158,7 +161,7 @@ function App() {
         </Split>
       ) : (
         <div className="welcome">
-          <h1>grit</h1>
+          <LogoLockup size={56} as="h1" />
           <p>Open a local repository to see its changes and history.</p>
           <button className="primary" onClick={chooseRepo}>
             Open repository…
