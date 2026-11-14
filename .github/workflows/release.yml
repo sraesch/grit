@@ -61,6 +61,11 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
               --jq ".[] | select(.tag_name == \"$1\") | .id" | head -n1
           }
+          # Creates a release and prints its id. The id comes from the response because a
+          # release only shows up in the releases list some time after it was created.
+          create_release() {
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases" --jq .id "$@"
+          }
 
           case "$EVENT" in
             workflow_run)
@@ -75,24 +80,24 @@ jobs:
                   echo "$notes"
                 fi
               } > notes.md
-              gh release create "$MAIN_BUILD_TAG" --target "$SHA" --prerelease --latest=false \
-                --title "Latest main build" --notes-file notes.md
-              echo "release_id=$(release_id_for "$MAIN_BUILD_TAG")" >> "$GITHUB_OUTPUT"
+              id=$(create_release -f tag_name="$MAIN_BUILD_TAG" -f target_commitish="$SHA" \
+                -f name="Latest main build" -F body=@notes.md -F prerelease=true -f make_latest=false)
+              echo "release_id=$id" >> "$GITHUB_OUTPUT"
               ;;
             push)
               id=$(release_id_for "$TAG")
               if [ -z "$id" ]; then
-                args=(--draft --verify-tag --title "grit $TAG")
-                [[ "$TAG" == *-* ]] && args+=(--prerelease)
+                args=(-f tag_name="$TAG" -f name="grit $TAG" -F draft=true)
+                [[ "$TAG" == *-* ]] && args+=(-F prerelease=true)
                 if node .github/scripts/changelog-section.mjs "${TAG#v}" > notes.md; then
-                  args+=(--notes-file notes.md)
+                  args+=(-F body=@notes.md)
                 else
                   echo "::warning::No CHANGELOG.md section for ${TAG#v}; using generated notes"
-                  args+=(--generate-notes)
+                  args+=(-F generate_release_notes=true)
                 fi
-                gh release create "$TAG" "${args[@]}"
-                id=$(release_id_for "$TAG")
+                id=$(create_release "${args[@]}")
               fi
+              [ -n "$id" ] || { echo "::error::Could not find or create the release for $TAG"; exit 1; }
               echo "release_id=$id" >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -148,16 +153,34 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v1
+      # Code signing: add these repository secrets to sign the macOS packages. They are only
+      # exported when a certificate is configured: Tauri treats a set-but-empty
+      # APPLE_CERTIFICATE as a certificate to import, which fails the build.
+      - name: Configure macOS code signing
+        if: runner.os == 'macOS'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Code signing: add these repository secrets to sign the macOS packages.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No APPLE_CERTIFICATE secret; building unsigned macOS packages."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!name}"
+            [ -z "$value" ] && continue
+            delimiter="EOF_$RANDOM$RANDOM"
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "$value" "$delimiter" >> "$GITHUB_ENV"
+          done
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: --target ${{ matrix.target }}
           # Empty for manual runs: nothing is uploaded to a release.
