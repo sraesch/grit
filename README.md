@@ -2,6 +2,8 @@
 
 A cross-platform (Windows, macOS, Linux) interactive Git client built with Tauri 2, Rust and React.
 
+See the [changelog](CHANGELOG.md) for what changed in each release.
+
 ## Features
 
 - **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button or double-click), stage/unstage all, commit and amend (Ctrl/Cmd+Enter)
@@ -59,8 +61,10 @@ GitHub Actions workflows live in `.github/workflows/`:
 
 1. Set the same version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`
    (`node .github/scripts/check-version.mjs` verifies them).
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. Review the draft release on GitHub and publish it.
+2. In [CHANGELOG.md](CHANGELOG.md), rename the `[Unreleased]` section to the new version and date
+   (e.g. `## [0.2.0] - 2026-12-01`), start a fresh empty `[Unreleased]` section, and update the links at the bottom.
+3. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+4. Review the draft release on GitHub and publish it.
 
 Installers are unsigned until signing secrets are configured (see the comments in `release.yml`), so macOS
 Gatekeeper and Windows SmartScreen will warn on first launch.

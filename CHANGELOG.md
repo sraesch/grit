@@ -1,0 +1,25 @@
+# Changelog
+
+All notable changes to grit are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Local changes view: unstaged, staged and conflicted files with a per-file diff
+- Stage and unstage files by button or double-click, and stage or unstage everything at once
+- Commit and amend, with Ctrl/Cmd+Enter to commit
+- History view: virtualized commit list with branch graph, branch and tag badges, and keyboard navigation
+- Commit details with message, author, parents, changed files (including renames) and per-file diffs
+- Sidebar with local branches (ahead/behind counts), remotes and tags; double-click a local branch to check it out
+- Automatic refresh when the working tree or repository changes
+- Resizable panes, light and dark themes, and reopening the last repository on start
+- CI on GitHub Actions: frontend typecheck, tests and build; Rust formatting, clippy, tests and app builds on Linux, macOS and Windows
+- Release workflow that builds installers for macOS, Linux and Windows into a draft GitHub release when a `v*` tag is pushed
+- Dependabot updates for npm, Cargo and GitHub Actions
+- Frontend unit and component tests (Vitest) and backend tests against real git repositories
+
+[Unreleased]: https://github.com/sraesch/grit/commits/develop
