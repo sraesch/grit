@@ -80,7 +80,12 @@ pub fn layout<'a>(commits: impl Iterator<Item = (&'a str, &'a [String])>) -> Vec
         for (i, lane) in lanes.iter().enumerate() {
             if let Some(lane) = lane {
                 let to = if lane.sha == sha { col } else { i };
-                segments.push(Segment { from: i, to, half: Half::Top, color: lane.color });
+                segments.push(Segment {
+                    from: i,
+                    to,
+                    half: Half::Top,
+                    color: lane.color,
+                });
             }
         }
         let width_before = lanes.len();
@@ -93,7 +98,10 @@ pub fn layout<'a>(commits: impl Iterator<Item = (&'a str, &'a [String])>) -> Vec
         let mut new_lanes = Vec::new();
         let mut merge_into_existing = Vec::new();
         if let Some(first) = parents.first() {
-            lanes[col] = Some(Lane { sha: first.clone(), color });
+            lanes[col] = Some(Lane {
+                sha: first.clone(),
+                color,
+            });
         }
         for parent in parents.iter().skip(1) {
             let existing = lanes.iter().position(|l| l.as_ref().is_some_and(|l| &l.sha == parent));
@@ -101,7 +109,10 @@ pub fn layout<'a>(commits: impl Iterator<Item = (&'a str, &'a [String])>) -> Vec
                 Some(i) => merge_into_existing.push(i),
                 None => {
                     let i = free_slot(&mut lanes);
-                    lanes[i] = Some(Lane { sha: parent.clone(), color: next_color });
+                    lanes[i] = Some(Lane {
+                        sha: parent.clone(),
+                        color: next_color,
+                    });
                     next_color += 1;
                     new_lanes.push(i);
                 }
@@ -112,12 +123,22 @@ pub fn layout<'a>(commits: impl Iterator<Item = (&'a str, &'a [String])>) -> Vec
         for (i, lane) in lanes.iter().enumerate() {
             if let Some(lane) = lane {
                 let from = if i == col || new_lanes.contains(&i) { col } else { i };
-                segments.push(Segment { from, to: i, half: Half::Bottom, color: lane.color });
+                segments.push(Segment {
+                    from,
+                    to: i,
+                    half: Half::Bottom,
+                    color: lane.color,
+                });
             }
         }
         for &i in &merge_into_existing {
             let color = lanes[i].as_ref().unwrap().color;
-            segments.push(Segment { from: col, to: i, half: Half::Bottom, color });
+            segments.push(Segment {
+                from: col,
+                to: i,
+                half: Half::Bottom,
+                color,
+            });
         }
 
         let width = width_before.max(lanes.len()).max(col + 1);
@@ -125,7 +146,12 @@ pub fn layout<'a>(commits: impl Iterator<Item = (&'a str, &'a [String])>) -> Vec
             lanes.pop();
         }
 
-        rows.push(GraphRow { col, color, width, segments });
+        rows.push(GraphRow {
+            col,
+            color,
+            width,
+            segments,
+        });
     }
     rows
 }
@@ -152,18 +178,101 @@ mod tests {
     #[test]
     fn merge_opens_and_closes_a_lane() {
         // m merges b2 into a2; both branch off a1.
-        let rows = run(&[
-            ("m", &["a2", "b2"]),
-            ("b2", &["a1"]),
-            ("a2", &["a1"]),
-            ("a1", &[]),
-        ]);
+        let rows = run(&[("m", &["a2", "b2"]), ("b2", &["a1"]), ("a2", &["a1"]), ("a1", &[])]);
         assert_eq!(rows[0].col, 0);
-        assert!(rows[0].segments.contains(&Segment { from: 0, to: 1, half: Half::Bottom, color: rows[1].color }));
+        assert!(rows[0].segments.contains(&Segment {
+            from: 0,
+            to: 1,
+            half: Half::Bottom,
+            color: rows[1].color
+        }));
         assert_eq!(rows[1].col, 1);
         assert_eq!(rows[2].col, 0);
         // a1 is expected by both lanes, so both converge into it.
         assert_eq!(rows[3].col, 0);
-        assert!(rows[3].segments.iter().any(|s| s.from == 1 && s.to == 0 && s.half == Half::Top));
+        assert!(
+            rows[3]
+                .segments
+                .iter()
+                .any(|s| s.from == 1 && s.to == 0 && s.half == Half::Top)
+        );
+    }
+
+    #[test]
+    fn sibling_branch_tips_get_their_own_lanes_and_converge() {
+        let rows = run(&[("b", &["a"]), ("c", &["a"]), ("a", &[])]);
+        assert_eq!((rows[0].col, rows[1].col, rows[2].col), (0, 1, 0));
+        assert_ne!(rows[0].color, rows[1].color);
+        // c starts a new lane, so nothing enters its row from above.
+        assert!(!rows[1].segments.iter().any(|s| s.half == Half::Top && s.to == 1));
+        assert!(
+            rows[2]
+                .segments
+                .iter()
+                .any(|s| s.half == Half::Top && s.from == 1 && s.to == 0)
+        );
+        assert_eq!(rows[2].width, 2);
+    }
+
+    #[test]
+    fn first_parent_keeps_the_branch_color() {
+        let rows = run(&[("c", &["b"]), ("b", &["a"]), ("a", &[])]);
+        assert!(rows.iter().all(|r| r.color == rows[0].color));
+    }
+
+    #[test]
+    fn octopus_merge_opens_one_lane_per_extra_parent() {
+        let rows = run(&[
+            ("m", &["a", "b", "c"]),
+            ("a", &["r"]),
+            ("b", &["r"]),
+            ("c", &["r"]),
+            ("r", &[]),
+        ]);
+        let merge_lines: Vec<_> = rows[0]
+            .segments
+            .iter()
+            .filter(|s| s.half == Half::Bottom && s.from == 0)
+            .map(|s| s.to)
+            .collect();
+        assert_eq!(merge_lines, vec![0, 1, 2]);
+        assert_eq!(rows[0].width, 3);
+        assert_eq!((rows[1].col, rows[2].col, rows[3].col, rows[4].col), (0, 1, 2, 0));
+    }
+
+    #[test]
+    fn merging_an_already_expected_parent_reuses_its_lane() {
+        // x and m are both tips; m merges x's parent p, which already has a lane.
+        let rows = run(&[("x", &["p"]), ("m", &["q", "p"]), ("p", &["q"]), ("q", &[])]);
+        assert_eq!(rows[1].col, 1);
+        // The merge line goes into lane 0 (p's lane) instead of opening a third lane.
+        assert!(
+            rows[1]
+                .segments
+                .iter()
+                .any(|s| s.half == Half::Bottom && s.from == 1 && s.to == 0)
+        );
+        assert!(rows.iter().all(|r| r.width <= 2));
+    }
+
+    #[test]
+    fn freed_lanes_are_reused() {
+        // Two short-lived side branches one after another should not widen the graph.
+        let rows = run(&[
+            ("m2", &["a3", "s2"]),
+            ("s2", &["a2"]),
+            ("a3", &["a2"]),
+            ("a2", &["a1", "s1"]),
+            ("s1", &["a1"]),
+            ("a1", &[]),
+        ]);
+        assert!(rows.iter().all(|r| r.width <= 2), "{rows:?}");
+        assert_eq!(rows[1].col, 1);
+        assert_eq!(rows[4].col, 1);
+    }
+
+    #[test]
+    fn empty_history_has_no_rows() {
+        assert!(run(&[]).is_empty());
     }
 }

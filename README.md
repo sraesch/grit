@@ -23,9 +23,44 @@ Prerequisites: Node.js, Rust, git, and the [Tauri prerequisites](https://tauri.a
 ```sh
 npm install
 npm run tauri dev               # run the app
-cd src-tauri && cargo test      # backend tests
 npm run tauri build             # build installers for the current OS
 ```
 
 Keep the Tauri Rust crates and `@tauri-apps/*` npm packages on the same minor version: when updating,
 run `cargo update` in `src-tauri` and update the npm packages together (`npx tauri info` shows both sides).
+
+## Tests
+
+```sh
+npm test                        # frontend unit and component tests (Vitest + Testing Library)
+npm run coverage                # same, with a coverage report in coverage/
+npm run typecheck               # TypeScript
+cd src-tauri && cargo test      # backend: parsers, graph layout, watcher, real-repository tests
+cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+```
+
+- Frontend tests mock the Tauri backend (`src/test/tauri.ts`), so they run in plain Node without the app.
+- Backend tests create throwaway git repositories in the system temp dir and run the real `git` binary.
+
+## CI/CD
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+- **CI** (`ci.yml`): runs on pushes to `main`/`develop` and on pull requests:
+  - Frontend: typecheck, tests with coverage, production build
+  - Rust: `cargo fmt --check` and `clippy -D warnings`
+  - Rust tests plus a full app build on Linux, macOS and Windows
+- **Release** (`release.yml`): pushing a `v*` tag checks that the tag matches the app version, builds installers for
+  macOS (Apple Silicon and Intel), Linux (`.deb`, `.rpm`, AppImage) and Windows (`.msi`, NSIS `.exe`), and attaches
+  them to a **draft** GitHub release. Running it manually builds installers as workflow artifacts without releasing.
+- **Dependabot** (`.github/dependabot.yml`): weekly update PRs for npm, Cargo and the workflow actions.
+
+### Making a release
+
+1. Set the same version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`
+   (`node .github/scripts/check-version.mjs` verifies them).
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+3. Review the draft release on GitHub and publish it.
+
+Installers are unsigned until signing secrets are configured (see the comments in `release.yml`), so macOS
+Gatekeeper and Windows SmartScreen will warn on first launch.

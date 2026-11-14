@@ -43,3 +43,11 @@ export const LANE_COLORS = [
 export function laneColor(index: number): string {
   return LANE_COLORS[index % LANE_COLORS.length];
 }
+
+/** Turns `%(upstream:track)` output like "[ahead 1, behind 2]" into "↑1 ↓2". */
+export function formatTrack(track: string): string {
+  if (track === "[gone]") return "gone";
+  const ahead = /ahead (\d+)/.exec(track)?.[1];
+  const behind = /behind (\d+)/.exec(track)?.[1];
+  return [ahead && `↑${ahead}`, behind && `↓${behind}`].filter(Boolean).join(" ");
+}

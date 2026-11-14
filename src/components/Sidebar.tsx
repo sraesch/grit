@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Branch, Branches } from "../api";
+import { formatTrack } from "../util";
 
 export type View = "changes" | "history";
 
@@ -47,13 +48,6 @@ function BranchGroup({
       )}
     </div>
   );
-}
-
-function formatTrack(track: string): string {
-  if (track === "[gone]") return "gone";
-  const ahead = /ahead (\d+)/.exec(track)?.[1];
-  const behind = /behind (\d+)/.exec(track)?.[1];
-  return [ahead && `↑${ahead}`, behind && `↓${behind}`].filter(Boolean).join(" ");
 }
 
 export function Sidebar({ view, onView, changeCount, branches, onCheckout }: SidebarProps) {

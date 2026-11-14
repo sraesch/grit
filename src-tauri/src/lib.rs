@@ -11,7 +11,9 @@ use watcher::WatchState;
 
 /// Runs blocking git work off the async runtime so the UI never stalls.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> GitResult<T> + Send + 'static) -> GitResult<T> {
-    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
