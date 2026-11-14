@@ -158,7 +158,7 @@ function App() {
         </Split>
       ) : (
         <div className="welcome">
-          <h1>Git Utils</h1>
+          <h1>grit</h1>
           <p>Open a local repository to see its changes and history.</p>
           <button className="primary" onClick={chooseRepo}>
             Open repository…

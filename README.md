@@ -1,4 +1,4 @@
-# Git Utils
+# grit
 
 A cross-platform (Windows, macOS, Linux) interactive Git client built with Tauri 2, Rust and React.
 

@@ -511,7 +511,7 @@ mod tests {
     /// End-to-end check against a real repository in a temp dir.
     #[test]
     fn real_repository_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("git-utils-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("grit-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let sh = |args: &[&str]| run(&dir, args).unwrap();
