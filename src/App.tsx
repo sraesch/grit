@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Branches, errorMessage, LogEntry, RepoChanged, RepoInfo, Status } from "./api";
+import { AboutDialog } from "./components/AboutDialog";
 import { ChangesView } from "./components/ChangesView";
 import { HistoryView } from "./components/HistoryView";
 import { LogoLockup, LogoTile } from "./components/Logo";
@@ -27,9 +28,11 @@ function App() {
   const [log, setLog] = useState<LogEntry[] | null>(null);
   const [branches, setBranches] = useState<Branches | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const repoRef = useRef<string | null>(null);
 
   const onError = useCallback((message: string) => setError(message), []);
+  const closeAbout = useCallback(() => setAboutOpen(false), []);
 
   const refreshStatus = useCallback(async () => {
     const root = repoRef.current;
@@ -133,12 +136,17 @@ function App() {
                 </span>
               )}
             </div>
-            <div className="spacer" />
-            <button onClick={refreshAll} title="Refresh">
-              ⟳ Refresh
-            </button>
           </>
         )}
+        <div className="spacer" />
+        {repo && (
+          <button onClick={refreshAll} title="Refresh">
+            ⟳ Refresh
+          </button>
+        )}
+        <button onClick={() => setAboutOpen(true)} title="About grit">
+          About
+        </button>
       </header>
 
       {error && (
@@ -168,6 +176,8 @@ function App() {
           </button>
         </div>
       )}
+
+      {aboutOpen && <AboutDialog onClose={closeAbout} />}
     </div>
   );
 }

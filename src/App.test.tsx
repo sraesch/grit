@@ -73,6 +73,16 @@ describe("App", () => {
     expect(await screen.findByText("b.txt")).toBeInTheDocument();
   });
 
+  it("opens and closes the About dialog", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "About" }));
+    expect(screen.getByRole("dialog", { name: "About grit" })).toHaveTextContent(`Version ${__APP_VERSION__}`);
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "About" })).toHaveFocus();
+  });
+
   it("shows backend errors and lets the user dismiss them", async () => {
     mockBackend(invokeMock, {
       open_repo: () => {
