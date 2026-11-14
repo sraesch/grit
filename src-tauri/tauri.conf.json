@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Git Utils",
+  "productName": "grit",
   "version": "0.1.0",
-  "identifier": "io.gitutils.app",
+  "identifier": "io.grit.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Git Utils",
+        "title": "grit",
         "width": 1320,
         "height": 840,
         "minWidth": 900,
@@ -32,6 +32,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "copyright": "Copyright (c) 2026 Sascha Raesch",
+    "license": "MIT",
+    "licenseFile": "../LICENSE"
   }
 }

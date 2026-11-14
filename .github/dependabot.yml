@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Tauri's Rust crates and npm packages must stay on the same minor version.
+  # Both ecosystems group Tauri updates so they arrive as one PR each; the CI
+  # app build fails if only one side is merged.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      tauri:
+        patterns: ["@tauri-apps/*"]
+      dev-dependencies:
+        dependency-type: development
+        exclude-patterns: ["@tauri-apps/*"]
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      tauri:
+        patterns: ["tauri", "tauri-*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

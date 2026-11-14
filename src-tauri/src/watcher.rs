@@ -55,15 +55,65 @@ pub fn watch(app: AppHandle, root: &str, git_dir: &str) -> Result<Debouncer<Reco
             classify(&event.path, &git_dir_for_cb, &mut changes);
         }
         if changes.worktree || changes.refs {
-            let _ = app.emit("repo-changed", RepoChanged { worktree: changes.worktree, refs: changes.refs });
+            let _ = app.emit(
+                "repo-changed",
+                RepoChanged {
+                    worktree: changes.worktree,
+                    refs: changes.refs,
+                },
+            );
         }
     })
     .map_err(|e| e.to_string())?;
 
-    debouncer.watcher().watch(&root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
+    debouncer
+        .watcher()
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
     if !git_dir.starts_with(&root) {
         // Linked worktrees and submodules keep their git dir elsewhere.
-        debouncer.watcher().watch(&git_dir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
+        debouncer
+            .watcher()
+            .watch(&git_dir, RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
     }
     Ok(debouncer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn classify_one(path: &str) -> (bool, bool) {
+        let git_dir = Path::new("/repo/.git");
+        let mut changes = Changes::default();
+        classify(Path::new(path), git_dir, &mut changes);
+        (changes.worktree, changes.refs)
+    }
+
+    #[test]
+    fn working_tree_files_refresh_status_only() {
+        assert_eq!(classify_one("/repo/src/main.rs"), (true, false));
+    }
+
+    #[test]
+    fn index_changes_refresh_status_only() {
+        assert_eq!(classify_one("/repo/.git/index"), (true, false));
+        assert_eq!(classify_one("/repo/.git/MERGE_HEAD"), (true, false));
+    }
+
+    #[test]
+    fn ref_changes_refresh_history() {
+        assert_eq!(classify_one("/repo/.git/HEAD"), (true, true));
+        assert_eq!(classify_one("/repo/.git/refs/heads/main"), (true, true));
+        assert_eq!(classify_one("/repo/.git/packed-refs"), (true, true));
+    }
+
+    #[test]
+    fn noisy_git_internals_are_ignored() {
+        assert_eq!(classify_one("/repo/.git/objects/ab/cdef"), (false, false));
+        assert_eq!(classify_one("/repo/.git/logs/HEAD"), (false, false));
+        assert_eq!(classify_one("/repo/.git/index.lock"), (false, false));
+        assert_eq!(classify_one("/repo/.git/refs/heads/main.lock"), (false, false));
+    }
 }

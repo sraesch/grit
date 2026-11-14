@@ -124,7 +124,10 @@ pub struct Status {
 }
 
 pub fn status(repo: &Path) -> GitResult<Status> {
-    let out = run(repo, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])?;
+    let out = run(
+        repo,
+        &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
+    )?;
     Ok(parse_status(&out))
 }
 
@@ -162,13 +165,21 @@ fn parse_status(out: &str) -> Status {
                 let xy = fields[1].as_bytes();
                 let path = fields[field_count - 1].to_string();
                 // Renames/copies carry the original path in the next NUL-separated token.
-                let orig_path = if kind == b'2' { entries.next().map(String::from) } else { None };
+                let orig_path = if kind == b'2' {
+                    entries.next().map(String::from)
+                } else {
+                    None
+                };
                 push_xy(&mut st, xy, path, orig_path);
             }
             b'u' => {
                 let fields: Vec<&str> = entry.splitn(11, ' ').collect();
                 if let Some(path) = fields.get(10) {
-                    st.conflicted.push(FileChange { path: path.to_string(), orig_path: None, status: "U".into() });
+                    st.conflicted.push(FileChange {
+                        path: path.to_string(),
+                        orig_path: None,
+                        status: "U".into(),
+                    });
                 }
             }
             b'?' => st.unstaged.push(FileChange {
@@ -187,7 +198,11 @@ fn push_xy(st: &mut Status, xy: &[u8], path: String, orig_path: Option<String>) 
     if x != b'.' {
         st.staged.push(FileChange {
             path: path.clone(),
-            orig_path: if matches!(x, b'R' | b'C') { orig_path.clone() } else { None },
+            orig_path: if matches!(x, b'R' | b'C') {
+                orig_path.clone()
+            } else {
+                None
+            },
             status: (x as char).to_string(),
         });
     }
@@ -287,16 +302,32 @@ fn parse_decorations(d: &str) -> Vec<RefLabel> {
         };
         let full = full.strip_prefix("tag: ").unwrap_or(full);
         let label = if full == "HEAD" {
-            RefLabel { name: "HEAD".into(), kind: "head".into(), current: true }
+            RefLabel {
+                name: "HEAD".into(),
+                kind: "head".into(),
+                current: true,
+            }
         } else if let Some(n) = full.strip_prefix("refs/heads/") {
-            RefLabel { name: n.into(), kind: "local".into(), current }
+            RefLabel {
+                name: n.into(),
+                kind: "local".into(),
+                current,
+            }
         } else if let Some(n) = full.strip_prefix("refs/remotes/") {
             if n.ends_with("/HEAD") {
                 continue;
             }
-            RefLabel { name: n.into(), kind: "remote".into(), current: false }
+            RefLabel {
+                name: n.into(),
+                kind: "remote".into(),
+                current: false,
+            }
         } else if let Some(n) = full.strip_prefix("refs/tags/") {
-            RefLabel { name: n.into(), kind: "tag".into(), current: false }
+            RefLabel {
+                name: n.into(),
+                kind: "tag".into(),
+                current: false,
+            }
         } else {
             continue; // stash and other refs are not shown as labels
         };
@@ -323,7 +354,13 @@ pub struct CommitDetails {
 pub fn commit_details(repo: &Path, sha: &str) -> GitResult<CommitDetails> {
     let out = run(
         repo,
-        &["show", "-s", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1f%B", sha, "--"],
+        &[
+            "show",
+            "-s",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1f%B",
+            sha,
+            "--",
+        ],
     )?;
     let f: Vec<&str> = out.splitn(9, FIELD_SEP).collect();
     if f.len() < 9 {
@@ -334,7 +371,19 @@ pub fn commit_details(repo: &Path, sha: &str) -> GitResult<CommitDetails> {
     // Merge commits are shown relative to their first parent, like most GUI clients do.
     let files_out = match parents.first() {
         Some(parent) => run(repo, &["diff", "--name-status", "-z", "-M", parent, sha, "--"])?,
-        None => run(repo, &["diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-z", "-M", sha])?,
+        None => run(
+            repo,
+            &[
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "--name-status",
+                "-z",
+                "-M",
+                sha,
+            ],
+        )?,
     };
 
     Ok(CommitDetails {
@@ -358,10 +407,20 @@ fn parse_name_status(out: &str) -> Vec<FileChange> {
     while let Some(code) = tokens.next() {
         let status = code.chars().next().unwrap_or('M');
         if matches!(status, 'R' | 'C') {
-            let (Some(old), Some(new)) = (tokens.next(), tokens.next()) else { break };
-            files.push(FileChange { path: new.into(), orig_path: Some(old.into()), status: status.to_string() });
+            let (Some(old), Some(new)) = (tokens.next(), tokens.next()) else {
+                break;
+            };
+            files.push(FileChange {
+                path: new.into(),
+                orig_path: Some(old.into()),
+                status: status.to_string(),
+            });
         } else if let Some(path) = tokens.next() {
-            files.push(FileChange { path: path.into(), orig_path: None, status: status.to_string() });
+            files.push(FileChange {
+                path: path.into(),
+                orig_path: None,
+                status: status.to_string(),
+            });
         }
     }
     files
@@ -479,7 +538,11 @@ pub fn stage_all(repo: &Path) -> GitResult<()> {
 }
 
 pub fn unstage(repo: &Path, paths: &[String]) -> GitResult<()> {
-    let mut args = if has_head(repo) { vec!["reset", "-q", "HEAD", "--"] } else { vec!["rm", "--cached", "-q", "-r", "--"] };
+    let mut args = if has_head(repo) {
+        vec!["reset", "-q", "HEAD", "--"]
+    } else {
+        vec!["rm", "--cached", "-q", "-r", "--"]
+    };
     args.extend(paths.iter().map(String::as_str));
     run(repo, &args).map(drop)
 }
@@ -506,19 +569,243 @@ pub fn checkout(repo: &Path, branch: &str) -> GitResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    /// A throwaway repository in the system temp dir, removed on drop.
+    struct TestRepo {
+        dir: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("grit-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let repo = TestRepo { dir };
+            repo.git(&["init", "-q", "-b", "main"]);
+            repo.configure();
+            repo
+        }
+
+        /// Local config so tests never depend on the machine's global git config.
+        fn configure(&self) {
+            for (key, value) in [
+                ("user.name", "Test"),
+                ("user.email", "test@example.com"),
+                ("commit.gpgsign", "false"),
+                ("tag.gpgsign", "false"),
+                ("core.autocrlf", "false"),
+                ("core.hooksPath", "/dev/null"),
+                ("merge.conflictStyle", "merge"),
+            ] {
+                self.git(&["config", key, value]);
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            run(&self.dir, args).unwrap_or_else(|e| panic!("git {}: {e}", args.join(" ")))
+        }
+
+        fn write(&self, path: &str, content: &str) {
+            let full = self.dir.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, content).unwrap();
+        }
+
+        fn commit_all(&self, message: &str) -> String {
+            stage_all(&self.dir).unwrap();
+            commit(&self.dir, message, false).unwrap();
+            self.git(&["rev-parse", "HEAD"]).trim().to_string()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn open_repo_finds_the_root_from_a_subdirectory() {
+        let repo = TestRepo::new("open");
+        repo.write("nested/deep/file.txt", "x\n");
+        let info = open_repo(&repo.dir.join("nested/deep")).unwrap();
+        let root = dunce::canonicalize(&info.root).unwrap();
+        assert_eq!(root, dunce::canonicalize(&repo.dir).unwrap());
+        assert_eq!(info.name, repo.dir.file_name().unwrap().to_string_lossy());
+        assert!(info.git_dir.ends_with(".git"));
+    }
+
+    #[test]
+    fn open_repo_rejects_plain_directories() {
+        let dir = std::env::temp_dir().join(format!("grit-test-{}-plain", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Assumes the system temp dir is not itself inside a git repository.
+        let err = open_repo(&dir).err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.unwrap().contains("not inside a git repository"));
+    }
+
+    #[test]
+    fn unstage_all_works_before_the_first_commit() {
+        let repo = TestRepo::new("unborn");
+        repo.write("a.txt", "a\n");
+        repo.write("dir/b.txt", "b\n");
+        stage_all(&repo.dir).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().staged.len(), 2);
+        unstage_all(&repo.dir).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.staged.is_empty());
+        assert_eq!(st.unstaged.len(), 2);
+        assert!(branches(&repo.dir).unwrap().local.is_empty());
+    }
+
+    #[test]
+    fn handles_spaces_and_unicode_in_paths() {
+        let repo = TestRepo::new("unicode");
+        repo.commit_all_initial();
+        let name = "dir with space/ünïcödé 文件.txt";
+        repo.write(name, "hello\n");
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.unstaged[0].path, name);
+        assert!(working_diff(&repo.dir, name, false, true).unwrap().contains("+hello"));
+        stage(&repo.dir, &[name.to_string()]).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged[0].path, name);
+        assert_eq!(st.staged[0].status, "A");
+        let sha = repo.commit_all("unicode");
+        assert_eq!(commit_details(&repo.dir, &sha).unwrap().files[0].path, name);
+    }
+
+    #[test]
+    fn reports_deletions_on_both_sides() {
+        let repo = TestRepo::new("delete");
+        repo.write("gone.txt", "bye\n");
+        repo.commit_all("add");
+        std::fs::remove_file(repo.dir.join("gone.txt")).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().unstaged[0].status, "D");
+        stage(&repo.dir, &["gone.txt".into()]).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged[0].status, "D");
+        assert!(
+            working_diff(&repo.dir, "gone.txt", true, false)
+                .unwrap()
+                .contains("-bye")
+        );
+    }
+
+    #[test]
+    fn detects_merge_conflicts() {
+        let repo = TestRepo::new("conflict");
+        repo.write("f.txt", "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", "theirs\n");
+        repo.commit_all("theirs");
+        checkout(&repo.dir, "main").unwrap();
+        repo.write("f.txt", "ours\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.conflicted.len(), 1);
+        assert_eq!(st.conflicted[0].path, "f.txt");
+        assert!(
+            working_diff(&repo.dir, "f.txt", false, false)
+                .unwrap()
+                .contains("<<<<<<<")
+        );
+
+        // Resolving and staging moves the file out of the conflict list.
+        repo.write("f.txt", "resolved\n");
+        stage(&repo.dir, &["f.txt".into()]).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.conflicted.is_empty());
+        assert_eq!(st.staged.len(), 1);
+    }
+
+    #[test]
+    fn shows_detached_head() {
+        let repo = TestRepo::new("detached");
+        let first = repo.commit_all_initial();
+        repo.write("b.txt", "b\n");
+        repo.commit_all("second");
+        repo.git(&["switch", "-q", "--detach", &first]);
+
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.branch, None);
+        let entries = log(&repo.dir, 10).unwrap();
+        // Both commits stay visible because the branch still points at the second one.
+        assert_eq!(entries.len(), 2);
+        let head = entries.iter().find(|e| e.sha == first).unwrap();
+        assert!(head.refs.iter().any(|r| r.kind == "head" && r.current));
+        assert!(entries[0].refs.iter().any(|r| r.name == "main" && !r.current));
+    }
+
+    #[test]
+    fn tracks_upstream_ahead_and_behind() {
+        let origin = TestRepo::new("origin");
+        origin.commit_all_initial();
+        let clone_dir = std::env::temp_dir().join(format!("grit-test-{}-clone", std::process::id()));
+        let _ = std::fs::remove_dir_all(&clone_dir);
+        run(
+            &std::env::temp_dir(),
+            &[
+                "clone",
+                "-q",
+                &origin.dir.to_string_lossy(),
+                &clone_dir.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        let clone = TestRepo { dir: clone_dir };
+        clone.configure();
+
+        clone.write("local.txt", "l\n");
+        clone.commit_all("local");
+        origin.write("remote.txt", "r\n");
+        origin.commit_all("remote");
+        clone.git(&["fetch", "-q"]);
+
+        let st = status(&clone.dir).unwrap();
+        assert_eq!(st.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((st.ahead, st.behind), (1, 1));
+        let b = branches(&clone.dir).unwrap();
+        assert_eq!(b.local[0].track.as_deref(), Some("[ahead 1, behind 1]"));
+        assert!(b.remote.iter().any(|r| r.name == "origin/main"));
+        assert!(b.remote.iter().all(|r| !r.name.ends_with("/HEAD")));
+        // History includes the fetched remote commit.
+        let subjects: Vec<_> = log(&clone.dir, 10).unwrap().into_iter().map(|e| e.subject).collect();
+        assert!(subjects.contains(&"remote".to_string()), "{subjects:?}");
+    }
+
+    #[test]
+    fn surfaces_git_errors() {
+        let repo = TestRepo::new("errors");
+        repo.commit_all_initial();
+        assert!(checkout(&repo.dir, "does-not-exist").is_err());
+        let err = commit(&repo.dir, "nothing staged", false).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(commit_details(&repo.dir, "0000000000000000000000000000000000000000").is_err());
+    }
+
+    impl TestRepo {
+        fn commit_all_initial(&self) -> String {
+            self.write("README.md", "# test\n");
+            self.commit_all("initial")
+        }
+    }
 
     /// End-to-end check against a real repository in a temp dir.
     #[test]
     fn real_repository_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("git-utils-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let sh = |args: &[&str]| run(&dir, args).unwrap();
-        sh(&["init", "-q", "-b", "main"]);
-        sh(&["config", "user.name", "Test"]);
-        sh(&["config", "user.email", "test@example.com"]);
-        sh(&["config", "commit.gpgsign", "false"]);
+        let repo = TestRepo::new("roundtrip");
+        let dir = repo.dir.clone();
+        let sh = |args: &[&str]| repo.git(args);
 
         // Unborn branch: status, staging and unstaging must all work before the first commit.
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
@@ -545,10 +832,17 @@ mod tests {
         let entries = log(&dir, 100).unwrap();
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].parents.len(), 2);
-        let refs: Vec<_> = entries[0].refs.iter().map(|r| (r.name.as_str(), r.kind.as_str(), r.current)).collect();
+        let refs: Vec<_> = entries[0]
+            .refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind.as_str(), r.current))
+            .collect();
         assert!(refs.contains(&("main", "local", true)), "{refs:?}");
         assert!(refs.contains(&("v1", "tag", false)), "{refs:?}");
-        assert!(entries.iter().any(|e| e.graph.col == 1), "merge should open a second lane");
+        assert!(
+            entries.iter().any(|e| e.graph.col == 1),
+            "merge should open a second lane"
+        );
 
         let rename = entries.iter().find(|e| e.subject == "rename").unwrap();
         let details = commit_details(&dir, &rename.sha).unwrap();
@@ -558,7 +852,11 @@ mod tests {
         let d = commit_file_diff(&dir, &rename.sha, "b.txt", Some("a.txt")).unwrap();
         assert!(d.contains("rename from a.txt"), "{d}");
         let root = entries.last().unwrap();
-        assert!(commit_file_diff(&dir, &root.sha, "a.txt", None).unwrap().contains("+one"));
+        assert!(
+            commit_file_diff(&dir, &root.sha, "a.txt", None)
+                .unwrap()
+                .contains("+one")
+        );
 
         // Staged vs unstaged modifications and amend.
         std::fs::write(dir.join("c.txt"), "c2\n").unwrap();
@@ -575,8 +873,6 @@ mod tests {
         assert_eq!(b.local.len(), 2);
         assert!(b.local.iter().any(|x| x.name == "main" && x.current));
         assert_eq!(b.tags[0].name, "v1");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -602,9 +898,21 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
 
     #[test]
     fn parses_decorations() {
-        let refs = parse_decorations("HEAD -> refs/heads/main, refs/remotes/origin/main, refs/remotes/origin/HEAD, tag: refs/tags/v1");
-        let names: Vec<_> = refs.iter().map(|r| (r.name.as_str(), r.kind.as_str(), r.current)).collect();
-        assert_eq!(names, vec![("main", "local", true), ("origin/main", "remote", false), ("v1", "tag", false)]);
+        let refs = parse_decorations(
+            "HEAD -> refs/heads/main, refs/remotes/origin/main, refs/remotes/origin/HEAD, tag: refs/tags/v1",
+        );
+        let names: Vec<_> = refs
+            .iter()
+            .map(|r| (r.name.as_str(), r.kind.as_str(), r.current))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("main", "local", true),
+                ("origin/main", "remote", false),
+                ("v1", "tag", false)
+            ]
+        );
     }
 
     #[test]

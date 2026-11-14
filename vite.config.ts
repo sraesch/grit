@@ -1,12 +1,31 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
+import pkg from "./package.json" with { type: "json" };
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react()],
+
+  // Shown in the About dialog. package.json, Cargo.toml and tauri.conf.json carry the same
+  // version (checked in CI by .github/scripts/check-version.mjs).
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
+
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**", "src/main.tsx", "src/vite-env.d.ts"],
+      reporter: ["text", "lcov"],
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
