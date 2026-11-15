@@ -591,8 +591,30 @@ pub fn commit(repo: &Path, message: &str, amend: bool) -> GitResult<()> {
     run_with(repo, &args, Some(message), &[0]).map(drop)
 }
 
+/// Rejects names git would parse as an option instead of a branch.
+fn branch_arg(name: &str) -> GitResult<&str> {
+    if name.is_empty() || name.starts_with('-') {
+        Err(format!("'{name}' is not a valid branch name"))
+    } else {
+        Ok(name)
+    }
+}
+
+/// Switches to an existing local branch. Uncommitted changes are carried over; git refuses
+/// (and reports the files) when they would be overwritten.
 pub fn checkout(repo: &Path, branch: &str) -> GitResult<()> {
-    run(repo, &["switch", branch]).map(drop)
+    run(repo, &["switch", branch_arg(branch)?]).map(drop)
+}
+
+/// Creates a local branch that tracks `remote_branch` (e.g. "origin/feature" → "feature")
+/// and switches to it.
+pub fn checkout_remote(repo: &Path, remote_branch: &str) -> GitResult<()> {
+    run(repo, &["switch", "--track", branch_arg(remote_branch)?]).map(drop)
+}
+
+/// Creates a branch at HEAD and switches to it.
+pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
+    run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
 }
 
 #[cfg(test)]
@@ -905,6 +927,66 @@ mod tests {
         assert_eq!(b.local.len(), 2);
         assert!(b.local.iter().any(|x| x.name == "main" && x.current));
         assert_eq!(b.tags[0].name, "v1");
+    }
+
+    #[test]
+    fn switches_creates_and_tracks_branches() {
+        let origin = TestRepo::new("switch-origin");
+        origin.write("a.txt", "main\n");
+        origin.commit_all("first");
+        origin.git(&["branch", "feature/remote"]);
+
+        let clone = TestRepo {
+            dir: std::env::temp_dir().join(format!("grit-test-{}-switch-clone", std::process::id())),
+        };
+        let _ = std::fs::remove_dir_all(&clone.dir);
+        origin.git(&["clone", "-q", origin.dir.to_str().unwrap(), clone.dir.to_str().unwrap()]);
+        clone.configure();
+
+        // A remote branch becomes a local branch with the remote's name, tracking it.
+        checkout_remote(&clone.dir, "origin/feature/remote").unwrap();
+        let b = branches(&clone.dir).unwrap();
+        let local = b.local.iter().find(|x| x.name == "feature/remote").unwrap();
+        assert!(local.current);
+        assert_eq!(local.upstream.as_deref(), Some("origin/feature/remote"));
+
+        create_branch(&clone.dir, "topic").unwrap();
+        assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("topic"));
+        assert!(
+            create_branch(&clone.dir, "topic")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(create_branch(&clone.dir, "bad..name").is_err());
+
+        checkout(&clone.dir, "main").unwrap();
+        assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("main"));
+
+        // Names that look like options are refused before git sees them.
+        for name in ["-f", "--orphan", ""] {
+            assert!(
+                checkout(&clone.dir, name)
+                    .unwrap_err()
+                    .contains("not a valid branch name")
+            );
+            assert!(create_branch(&clone.dir, name).is_err());
+            assert!(checkout_remote(&clone.dir, name).is_err());
+        }
+    }
+
+    #[test]
+    fn refuses_to_switch_when_local_changes_would_be_lost() {
+        let repo = TestRepo::new("switch-dirty");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("a.txt", "two\n");
+        repo.commit_all("change on other");
+        repo.write("a.txt", "uncommitted\n");
+
+        let err = checkout(&repo.dir, "main").unwrap_err();
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("other"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Branch, Branches } from "../api";
+import { SwitchTarget, targetForRemote } from "../branches";
 import { formatTrack } from "../util";
 
 export type View = "changes" | "history";
@@ -9,18 +10,20 @@ interface SidebarProps {
   onView: (v: View) => void;
   changeCount: number;
   branches: Branches | null;
-  onCheckout: (branch: string) => void;
+  onSwitch: (target: SwitchTarget) => void;
 }
 
 function BranchGroup({
   title,
   items,
   onActivate,
+  activateHint,
   defaultOpen = true,
 }: {
   title: string;
   items: Branch[];
   onActivate?: (b: Branch) => void;
+  activateHint?: string;
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -38,7 +41,12 @@ function BranchGroup({
               key={b.name}
               className={b.current ? "current" : undefined}
               onDoubleClick={() => onActivate?.(b)}
-              title={[b.name, b.upstream && `→ ${b.upstream}`, b.track].filter(Boolean).join("  ")}
+              title={[
+                [b.name, b.upstream && `→ ${b.upstream}`, b.track].filter(Boolean).join("  "),
+                !b.current && activateHint,
+              ]
+                .filter(Boolean)
+                .join("\n")}
             >
               <span className="branch-name">{b.name}</span>
               {b.track && <span className="track">{formatTrack(b.track)}</span>}
@@ -50,7 +58,7 @@ function BranchGroup({
   );
 }
 
-export function Sidebar({ view, onView, changeCount, branches, onCheckout }: SidebarProps) {
+export function Sidebar({ view, onView, changeCount, branches, onSwitch }: SidebarProps) {
   return (
     <nav className="sidebar">
       <div className="nav-items">
@@ -67,9 +75,20 @@ export function Sidebar({ view, onView, changeCount, branches, onCheckout }: Sid
           <BranchGroup
             title="Branches"
             items={branches.local}
-            onActivate={(b) => !b.current && onCheckout(b.name)}
+            onActivate={(b) => !b.current && onSwitch({ kind: "local", name: b.name })}
+            activateHint="Double-click to switch to this branch"
           />
-          <BranchGroup title="Remotes" items={branches.remote} defaultOpen={false} />
+          <BranchGroup
+            title="Remotes"
+            items={branches.remote}
+            onActivate={(b) => {
+              const target = targetForRemote(branches, b);
+              const current = target.kind === "local" && branches.local.some((l) => l.name === target.name && l.current);
+              if (!current) onSwitch(target);
+            }}
+            activateHint="Double-click to switch to a local branch tracking this one"
+            defaultOpen={false}
+          />
           <BranchGroup title="Tags" items={branches.tags} defaultOpen={false} />
         </div>
       )}

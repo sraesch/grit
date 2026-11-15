@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -81,6 +81,82 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "About" })).toHaveFocus();
+  });
+
+  describe("switching branches", () => {
+    let current = "main";
+    const branchList = () => ({
+      local: ["main", "develop"].map((name) => ({ name, sha: "a", current: name === current, upstream: null, track: null })),
+      remote: [{ name: "origin/release", sha: "b", current: false, upstream: null, track: null }],
+      tags: [],
+    });
+
+    beforeEach(() => {
+      current = "main";
+      localStorage.setItem("lastRepo", "/work/demo");
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: current }),
+        get_log: () => [],
+        get_branches: branchList,
+        checkout_branch: ({ branch }) => {
+          current = branch as string;
+        },
+        checkout_remote_branch: () => {
+          current = "release";
+        },
+        create_branch: ({ name }) => {
+          current = name as string;
+        },
+      });
+    });
+
+    it("switches from the branch button and refreshes", async () => {
+      render(<App />);
+      const button = await screen.findByRole("button", { name: /^main/ });
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_branches", { repo: "/work/demo" }));
+      await userEvent.click(button);
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Switch branch" })).getByText("develop"));
+
+      expect(invokeMock).toHaveBeenCalledWith("checkout_branch", { repo: "/work/demo", branch: "develop" });
+      expect(await screen.findByRole("button", { name: /^develop/ })).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("opens with Ctrl+B, tracks remote branches and creates new ones", async () => {
+      render(<App />);
+      await screen.findByRole("button", { name: /^main/ });
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_branches", { repo: "/work/demo" }));
+
+      await userEvent.keyboard("{Control>}b{/Control}");
+      await userEvent.keyboard("release{Enter}");
+      expect(invokeMock).toHaveBeenCalledWith("checkout_remote_branch", { repo: "/work/demo", branch: "origin/release" });
+      expect(await screen.findByRole("button", { name: /^release/ })).toBeInTheDocument();
+
+      await userEvent.keyboard("{Control>}b{/Control}");
+      await userEvent.keyboard("hotfix{Enter}");
+      expect(invokeMock).toHaveBeenCalledWith("create_branch", { repo: "/work/demo", name: "hotfix" });
+      expect(await screen.findByRole("button", { name: /^hotfix/ })).toBeInTheDocument();
+    });
+
+    it("shows why git refused to switch", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main" }),
+        get_log: () => [],
+        get_branches: branchList,
+        checkout_branch: () => {
+          throw "error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt";
+        },
+      });
+      render(<App />);
+      await screen.findByRole("button", { name: /^main/ });
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_branches", { repo: "/work/demo" }));
+      await userEvent.keyboard("{Control>}b{/Control}develop{Enter}");
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("would be overwritten by checkout");
+      expect(screen.getByRole("button", { name: /^main/ })).toBeEnabled();
+    });
   });
 
   it("shows backend errors and lets the user dismiss them", async () => {

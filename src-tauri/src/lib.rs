@@ -95,6 +95,16 @@ async fn checkout_branch(repo: String, branch: String) -> GitResult<()> {
     blocking(move || git::checkout(&PathBuf::from(repo), &branch)).await
 }
 
+#[tauri::command]
+async fn checkout_remote_branch(repo: String, branch: String) -> GitResult<()> {
+    blocking(move || git::checkout_remote(&PathBuf::from(repo), &branch)).await
+}
+
+#[tauri::command]
+async fn create_branch(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -116,6 +126,8 @@ pub fn run() {
             unstage_all,
             commit,
             checkout_branch,
+            checkout_remote_branch,
+            create_branch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

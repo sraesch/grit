@@ -105,6 +105,10 @@ export const api = {
   unstageAll: (repo: string) => invoke<void>("unstage_all", { repo }),
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),
   checkout: (repo: string, branch: string) => invoke<void>("checkout_branch", { repo, branch }),
+  /** Creates a local branch tracking `branch` (e.g. "origin/feature") and switches to it. */
+  checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
+  /** Creates a branch at HEAD and switches to it. */
+  createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
 };
 
 export function errorMessage(e: unknown): string {
