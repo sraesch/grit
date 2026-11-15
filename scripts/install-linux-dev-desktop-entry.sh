@@ -19,6 +19,16 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   exit 0
 fi
 
+# A user-level grit.desktop overrides the installed package's entry (and NoDisplay
+# would hide grit from the app search), so never install it alongside the package.
+for system_entry in /usr/share/applications/grit.desktop /usr/local/share/applications/grit.desktop; do
+  if [[ -e "$system_entry" ]]; then
+    echo "grit is installed ($system_entry already provides the dock icon); nothing to do." >&2
+    echo "Uninstall the grit package first if you want the dev entry instead." >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$(dirname "$target")"
 cat > "$target" <<EOF
 [Desktop Entry]

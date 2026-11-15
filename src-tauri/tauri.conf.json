@@ -30,9 +30,13 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "category": "DeveloperTool",
+    "shortDescription": "A cross-platform interactive Git client",
+    "longDescription": "grit is a fast, cross-platform Git client. Stage and unstage files, review diffs, commit and amend, browse the history with a branch graph, and check out branches. It runs the installed git executable, so hooks, credentials, SSH and commit signing behave exactly like on the command line.",
     "copyright": "Copyright (c) 2026 Sascha Raesch",
     "license": "MIT",
     "licenseFile": "../LICENSE"

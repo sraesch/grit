@@ -34,7 +34,8 @@ npm run tauri build             # build installers for the current OS
 
 On Linux with Wayland (e.g. Ubuntu/GNOME), the dock only shows an app's icon if a matching `.desktop` file is
 installed. Installed packages include one; for `npm run tauri dev`, run `scripts/install-linux-dev-desktop-entry.sh`
-once (`--uninstall` removes it).
+once (`--uninstall` removes it). Remove the dev entry before installing a package: a user-level `grit.desktop`
+overrides the installed one and hides grit from the app search.
 
 Keep the Tauri Rust crates and `@tauri-apps/*` npm packages on the same minor version: when updating,
 run `cargo update` in `src-tauri` and update the npm packages together (`npx tauri info` shows both sides).

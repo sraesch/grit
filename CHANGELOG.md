@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux packages now include a long description, the Development menu category and a 512×512 icon
+- The Linux dev desktop-entry script refuses to run while grit is installed, because its entry hid the installed app from the app search and dock
+
 ## [0.1.0] - 2026-11-14
 
 ### Added
