@@ -1,12 +1,14 @@
 mod git;
 mod graph;
+mod settings;
 mod watcher;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, State, ipc::Response};
+use tauri::{AppHandle, Manager, State, ipc::Response};
 
 use git::{Branches, CommitDetails, GitResult, LogEntry, RepoInfo, Status};
+use settings::{Settings, SettingsStore};
 use watcher::WatchState;
 
 /// Runs blocking git work off the async runtime so the UI never stalls.
@@ -105,12 +107,27 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
+#[tauri::command]
+fn get_settings(store: State<'_, SettingsStore>) -> Settings {
+    store.get()
+}
+
+#[tauri::command]
+fn set_settings(store: State<'_, SettingsStore>, settings: Settings) -> Result<Settings, String> {
+    store.update(settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WatchState::default())
+        .setup(|app| {
+            let path = app.path().app_config_dir()?.join("settings.json");
+            app.manage(SettingsStore::load(path, app.path().home_dir().ok()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_repo,
             get_status,
@@ -128,6 +145,8 @@ pub fn run() {
             checkout_branch,
             checkout_remote_branch,
             create_branch,
+            get_settings,
+            set_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

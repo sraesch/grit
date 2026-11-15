@@ -53,6 +53,27 @@ describe("App", () => {
     expect(localStorage.getItem("lastRepo")).toBe("/work/demo");
   });
 
+  it("starts the Open dialog in the repositories folder from the settings", async () => {
+    mockBackend(invokeMock, { get_settings: () => ({ reposDir: "/home/ada/code" }) });
+    openMock.mockResolvedValue(null);
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Open repository…" }));
+    expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/home/ada/code" }));
+  });
+
+  it("opens the settings from the toolbar and with Ctrl+,", async () => {
+    mockBackend(invokeMock, { get_settings: () => ({ reposDir: null }) });
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toHaveFocus();
+
+    await userEvent.keyboard("{Control>},{/Control}");
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
   it("reopens the last repository on start", async () => {
     localStorage.setItem("lastRepo", "/work/demo");
     render(<App />);

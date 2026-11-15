@@ -81,6 +81,11 @@ export interface Branches {
   tags: Branch[];
 }
 
+export interface Settings {
+  /** Folder that holds cloned repositories; the Open dialog starts here. Null means the home folder. */
+  reposDir: string | null;
+}
+
 export interface RepoChanged {
   worktree: boolean;
   refs: boolean;
@@ -106,6 +111,9 @@ export const api = {
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),
   checkout: (repo: string, branch: string) => invoke<void>("checkout_branch", { repo, branch }),
   /** Creates a local branch tracking `branch` (e.g. "origin/feature") and switches to it. */
+  getSettings: () => invoke<Settings>("get_settings"),
+  /** Validates and saves the settings; resolves to what was stored (e.g. with "~" expanded). */
+  setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),

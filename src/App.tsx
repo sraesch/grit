@@ -5,6 +5,7 @@ import { api, Branches, errorMessage, LogEntry, RepoChanged, RepoInfo, Status } 
 import { switchTo, SwitchTarget } from "./branches";
 import { AboutDialog } from "./components/AboutDialog";
 import { BranchSwitcher } from "./components/BranchSwitcher";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { ChangesView } from "./components/ChangesView";
 import { HistoryView } from "./components/HistoryView";
 import { LogoLockup, LogoTile } from "./components/Logo";
@@ -31,6 +32,7 @@ function App() {
   const [branches, setBranches] = useState<Branches | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const branchButtonRef = useRef<HTMLButtonElement>(null);
@@ -38,6 +40,7 @@ function App() {
 
   const onError = useCallback((message: string) => setError(message), []);
   const closeAbout = useCallback(() => setAboutOpen(false), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeSwitcher = useCallback((refocus: boolean) => {
     setSwitcherOpen(false);
     if (refocus) branchButtonRef.current?.focus();
@@ -97,7 +100,14 @@ function App() {
   );
 
   async function chooseRepo() {
-    const selected = await open({ directory: true, multiple: false, title: "Open repository" });
+    // Start in the repositories folder from the settings; without one the dialog picks its own default.
+    const settings = await api.getSettings().catch(() => null);
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Open repository",
+      defaultPath: settings?.reposDir ?? undefined,
+    });
     if (typeof selected === "string") openRepo(selected);
   }
 
@@ -115,6 +125,18 @@ function App() {
       unlisten.then((fn) => fn());
     };
   }, [refreshStatus, refreshHistory]);
+
+  // Ctrl/Cmd+, opens the settings, as in most desktop apps.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "," && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Ctrl/Cmd+B opens the branch switcher.
   useEffect(() => {
@@ -192,6 +214,9 @@ function App() {
             ⟳ Refresh
           </button>
         )}
+        <button onClick={() => setSettingsOpen(true)} title="Settings (Ctrl/Cmd+,)">
+          Settings
+        </button>
         <button onClick={() => setAboutOpen(true)} title="About grit">
           About
         </button>
@@ -226,6 +251,7 @@ function App() {
       )}
 
       {aboutOpen && <AboutDialog onClose={closeAbout} />}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     </div>
   );
 }

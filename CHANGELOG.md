@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Commit bodies in the history details are rendered as GitHub-flavored markdown (lists, code, links, tables, task lists), with a toggle back to plain text that is remembered; links open in the system browser
 - Image preview in the history: selecting a changed image (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG) shows it before and after the commit side by side, with dimensions and file size, on a checkerboard for transparency; a toggle switches to the diff
 - Branch switcher: click the branch in the toolbar or press Ctrl/Cmd+B to filter branches and switch with the keyboard or mouse; remote branches without a local branch are checked out as a new tracking branch, and typing a new name creates a branch from HEAD. Uncommitted changes are carried over, and git's reason is shown when it refuses to switch
+- Settings dialog (toolbar or Ctrl/Cmd+,) with the repositories folder where cloned repositories live; Open… starts there. Settings are saved in the app's config folder
 - Double-click a remote branch in the sidebar to switch to its local branch, creating a tracking branch if needed
 
 ### Fixed
