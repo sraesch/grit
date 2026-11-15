@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { file, makeStatus, mockBackend } from "../test/tauri";
@@ -95,6 +95,41 @@ describe("ChangesView", () => {
     );
     expect(onChanged).toHaveBeenCalled();
     await waitFor(() => expect(textarea).toHaveValue(""));
+  });
+
+  it("previews the message as markdown and returns to editing", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    expect(screen.getByText("Nothing to preview")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Write" }));
+    const textarea = screen.getByRole("textbox", { name: "Commit message" });
+    expect(textarea).toHaveFocus();
+    await userEvent.type(textarea, "Add feature{Enter}{Enter}- one{Enter}- **two**");
+
+    await userEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    expect(screen.getByRole("tab", { name: "Preview" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("textbox", { name: "Commit message" })).toBeNull();
+    const preview = screen.getByRole("tabpanel");
+    expect(within(preview).getByText("Add feature")).toHaveClass("commit-summary");
+    expect(within(preview).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(preview).getByText("two").tagName).toBe("STRONG");
+
+    // The message survives switching back.
+    await userEvent.click(screen.getByRole("tab", { name: "Write" }));
+    expect(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("Add feature\n\n- one\n- **two**");
+  });
+
+  it("commits with Ctrl+Enter from the preview and returns to the editor", async () => {
+    setup();
+    await userEvent.type(screen.getByRole("textbox", { name: "Commit message" }), "Add feature");
+    await userEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    screen.getByRole("tabpanel").focus();
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("commit", { repo: "/repo", message: "Add feature", amend: false }),
+    );
+    expect(await screen.findByRole("textbox", { name: "Commit message" })).toHaveValue("");
   });
 
   it("blocks committing while conflicts exist", async () => {

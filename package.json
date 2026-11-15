@@ -1,7 +1,7 @@
 {
   "name": "grit",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A cross-platform interactive Git client",
   "author": "Sascha Raesch <sascha.raesch@gmail.com>",
   "license": "MIT",
@@ -24,7 +24,8 @@
     "@tauri-apps/plugin-opener": "^2.7.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-markdown": "^10.1.0"
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

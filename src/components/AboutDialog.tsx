@@ -1,8 +1,7 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef } from "react";
-import Markdown, { Components } from "react-markdown";
 import appChangelog from "../../CHANGELOG.app.md?raw";
 import { LogoLockup } from "./Logo";
+import { Markdown } from "./Markdown";
 
 interface Props {
   onClose: () => void;
@@ -11,21 +10,6 @@ interface Props {
   /** Markdown; defaults to CHANGELOG.app.md. */
   changelog?: string;
 }
-
-// Links open in the system browser; following them inside the webview would replace the app.
-const components: Components = {
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      onClick={(e) => {
-        e.preventDefault();
-        if (href) openUrl(href).catch(() => {});
-      }}
-    >
-      {children}
-    </a>
-  ),
-};
 
 /** Modal with the logo, the app version and the user-facing changelog. */
 export function AboutDialog({ onClose, version = __APP_VERSION__, changelog = appChangelog }: Props) {
@@ -58,7 +42,7 @@ export function AboutDialog({ onClose, version = __APP_VERSION__, changelog = ap
         </header>
         <div className="about-changelog selectable">
           {/* skipHtml drops raw HTML, including the maintainer comment at the top of the file. */}
-          <Markdown components={components} skipHtml>{changelog}</Markdown>
+          <Markdown>{changelog}</Markdown>
           {!hasReleases && <p className="empty small">No released versions yet.</p>}
         </div>
         <footer className="modal-footer">

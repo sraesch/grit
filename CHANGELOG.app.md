@@ -8,6 +8,15 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.2.0 — 2026-11-15
+
+- Open several repositories side by side in tabs, and pick up where you left off on the next start
+- Switch branches quickly with Ctrl/Cmd+B: search, check out remote branches or create a new one
+- See changed images before and after a commit, right in the history
+- Write commit messages in Markdown with a live preview, and read them formatted in the history
+- Choose where your repositories live in the new Settings dialog
+- On Linux, grit now shows up in the app search and the dock with its icon and description
+
 ## 0.1.0 — 2026-11-14
 
 - See your unstaged, staged and conflicted files with a diff for each, and stage or unstage them with a click

@@ -39,6 +39,15 @@ fn run(repo: &Path, args: &[&str]) -> GitResult<String> {
 }
 
 fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<String> {
+    exec(repo, args, stdin, ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Runs git and returns its stdout unmodified, for binary content such as images.
+fn run_bytes(repo: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
+    exec(repo, args, None, &[0])
+}
+
+fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
     let mut cmd = git_command(repo);
     cmd.args(args)
         .stdout(Stdio::piped())
@@ -58,7 +67,7 @@ fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let code = out.status.code().unwrap_or(-1);
     if ok_codes.contains(&code) {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if stderr.is_empty() {
@@ -462,6 +471,25 @@ pub fn commit_file_diff(repo: &Path, sha: &str, path: &str, orig_path: Option<&s
     run(repo, &args)
 }
 
+/// Contents of `path` (relative to the repository root) as of `rev`, as raw bytes.
+/// Files over `max_bytes` are refused, so a huge asset can't flood the UI.
+pub fn file_at_revision(repo: &Path, rev: &str, path: &str, max_bytes: u64) -> GitResult<Vec<u8>> {
+    // "rev:path" reads the path from the root of rev's tree, independent of the working directory.
+    let object = format!("{rev}:{path}");
+    let size: u64 = run(repo, &["cat-file", "-s", &object])?
+        .trim()
+        .parse()
+        .map_err(|_| format!("Unexpected size for {object}"))?;
+    if size > max_bytes {
+        return Err(format!(
+            "File is too large to preview ({:.1} MB, limit {:.0} MB)",
+            size as f64 / 1_048_576.0,
+            max_bytes as f64 / 1_048_576.0
+        ));
+    }
+    run_bytes(repo, &["cat-file", "blob", &object])
+}
+
 // ---------------------------------------------------------------------------
 // Branches
 // ---------------------------------------------------------------------------
@@ -563,8 +591,30 @@ pub fn commit(repo: &Path, message: &str, amend: bool) -> GitResult<()> {
     run_with(repo, &args, Some(message), &[0]).map(drop)
 }
 
+/// Rejects names git would parse as an option instead of a branch.
+fn branch_arg(name: &str) -> GitResult<&str> {
+    if name.is_empty() || name.starts_with('-') {
+        Err(format!("'{name}' is not a valid branch name"))
+    } else {
+        Ok(name)
+    }
+}
+
+/// Switches to an existing local branch. Uncommitted changes are carried over; git refuses
+/// (and reports the files) when they would be overwritten.
 pub fn checkout(repo: &Path, branch: &str) -> GitResult<()> {
-    run(repo, &["switch", branch]).map(drop)
+    run(repo, &["switch", branch_arg(branch)?]).map(drop)
+}
+
+/// Creates a local branch that tracks `remote_branch` (e.g. "origin/feature" → "feature")
+/// and switches to it.
+pub fn checkout_remote(repo: &Path, remote_branch: &str) -> GitResult<()> {
+    run(repo, &["switch", "--track", branch_arg(remote_branch)?]).map(drop)
+}
+
+/// Creates a branch at HEAD and switches to it.
+pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
+    run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
 }
 
 #[cfg(test)]
@@ -614,6 +664,10 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(full, content).unwrap();
+        }
+
+        fn write_bytes(&self, path: &str, content: &[u8]) {
+            std::fs::write(self.dir.join(path), content).unwrap();
         }
 
         fn commit_all(&self, message: &str) -> String {
@@ -873,6 +927,92 @@ mod tests {
         assert_eq!(b.local.len(), 2);
         assert!(b.local.iter().any(|x| x.name == "main" && x.current));
         assert_eq!(b.tags[0].name, "v1");
+    }
+
+    #[test]
+    fn switches_creates_and_tracks_branches() {
+        let origin = TestRepo::new("switch-origin");
+        origin.write("a.txt", "main\n");
+        origin.commit_all("first");
+        origin.git(&["branch", "feature/remote"]);
+
+        let clone = TestRepo {
+            dir: std::env::temp_dir().join(format!("grit-test-{}-switch-clone", std::process::id())),
+        };
+        let _ = std::fs::remove_dir_all(&clone.dir);
+        origin.git(&["clone", "-q", origin.dir.to_str().unwrap(), clone.dir.to_str().unwrap()]);
+        clone.configure();
+
+        // A remote branch becomes a local branch with the remote's name, tracking it.
+        checkout_remote(&clone.dir, "origin/feature/remote").unwrap();
+        let b = branches(&clone.dir).unwrap();
+        let local = b.local.iter().find(|x| x.name == "feature/remote").unwrap();
+        assert!(local.current);
+        assert_eq!(local.upstream.as_deref(), Some("origin/feature/remote"));
+
+        create_branch(&clone.dir, "topic").unwrap();
+        assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("topic"));
+        assert!(
+            create_branch(&clone.dir, "topic")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(create_branch(&clone.dir, "bad..name").is_err());
+
+        checkout(&clone.dir, "main").unwrap();
+        assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("main"));
+
+        // Names that look like options are refused before git sees them.
+        for name in ["-f", "--orphan", ""] {
+            assert!(
+                checkout(&clone.dir, name)
+                    .unwrap_err()
+                    .contains("not a valid branch name")
+            );
+            assert!(create_branch(&clone.dir, name).is_err());
+            assert!(checkout_remote(&clone.dir, name).is_err());
+        }
+    }
+
+    #[test]
+    fn refuses_to_switch_when_local_changes_would_be_lost() {
+        let repo = TestRepo::new("switch-dirty");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("a.txt", "two\n");
+        repo.commit_all("change on other");
+        repo.write("a.txt", "uncommitted\n");
+
+        let err = checkout(&repo.dir, "main").unwrap_err();
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn reads_binary_files_at_a_revision() {
+        let repo = TestRepo::new("blob");
+        // Not valid UTF-8: must come back byte for byte, without lossy conversion.
+        let v1 = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+        repo.write_bytes("logo.png", &v1);
+        repo.write("dir/a b.svg", "<svg/>");
+        let first = repo.commit_all("add images");
+        repo.write_bytes("logo.png", b"second");
+        let second = repo.commit_all("change logo");
+
+        assert_eq!(file_at_revision(&repo.dir, &first, "logo.png", 1024).unwrap(), v1);
+        assert_eq!(
+            file_at_revision(&repo.dir, &second, "logo.png", 1024).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            file_at_revision(&repo.dir, &second, "dir/a b.svg", 1024).unwrap(),
+            b"<svg/>"
+        );
+
+        let too_large = file_at_revision(&repo.dir, &first, "logo.png", 4).unwrap_err();
+        assert!(too_large.contains("too large"), "{too_large}");
+        assert!(file_at_revision(&repo.dir, &first, "missing.png", 1024).is_err());
     }
 
     #[test]

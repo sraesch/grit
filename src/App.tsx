@@ -1,149 +1,169 @@
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, Branches, errorMessage, LogEntry, RepoChanged, RepoInfo, Status } from "./api";
+import { api, errorMessage, RepoInfo } from "./api";
 import { AboutDialog } from "./components/AboutDialog";
-import { ChangesView } from "./components/ChangesView";
-import { HistoryView } from "./components/HistoryView";
 import { LogoLockup, LogoTile } from "./components/Logo";
-import { Sidebar, View } from "./components/Sidebar";
-import { Split } from "./components/Split";
+import { RepoTab, tabPanelId } from "./components/RepoTab";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { nextActive, readOpenTabs, saveOpenTabs, tabLabels } from "./tabs";
 import "@fontsource/nunito-sans/latin-900.css";
 import "./App.css";
 
-const LAST_REPO_KEY = "lastRepo";
-
-function readLastRepo(): string | null {
-  try {
-    return localStorage.getItem(LAST_REPO_KEY);
-  } catch {
-    return null;
-  }
-}
-
 function App() {
-  const [repo, setRepo] = useState<RepoInfo | null>(null);
-  const [view, setView] = useState<View>("changes");
-  const [status, setStatus] = useState<Status | null>(null);
-  const [log, setLog] = useState<LogEntry[] | null>(null);
-  const [branches, setBranches] = useState<Branches | null>(null);
+  const [tabs, setTabs] = useState<RepoInfo[]>([]);
+  const [active, setActive] = useState<string | null>(null);
+  // Until the tabs from the last session are reopened, saving would overwrite them with nothing.
+  const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
-  const repoRef = useRef<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const restoreStarted = useRef(false);
 
   const onError = useCallback((message: string) => setError(message), []);
+  const clearError = useCallback(() => setError(null), []);
   const closeAbout = useCallback(() => setAboutOpen(false), []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
-  const refreshStatus = useCallback(async () => {
-    const root = repoRef.current;
-    if (!root) return;
-    try {
-      const s = await api.status(root);
-      if (repoRef.current === root) setStatus(s);
-    } catch (e) {
-      onError(errorMessage(e));
-    }
-  }, [onError]);
-
-  const refreshHistory = useCallback(async () => {
-    const root = repoRef.current;
-    if (!root) return;
-    try {
-      const [l, b] = await Promise.all([api.log(root), api.branches(root)]);
-      if (repoRef.current === root) {
-        setLog(l);
-        setBranches(b);
-      }
-    } catch (e) {
-      onError(errorMessage(e));
-    }
-  }, [onError]);
-
-  const refreshAll = useCallback(() => {
-    refreshStatus();
-    refreshHistory();
-  }, [refreshStatus, refreshHistory]);
+  /** Adds a tab for the repository at `path`, or shows its tab if it is already open. */
+  const addTab = useCallback((info: RepoInfo) => {
+    setTabs((prev) => (prev.some((t) => t.root === info.root) ? prev : [...prev, info]));
+  }, []);
 
   const openRepo = useCallback(
     async (path: string) => {
       try {
         const info = await api.openRepo(path);
-        repoRef.current = info.root;
-        setRepo(info);
-        setStatus(null);
-        setLog(null);
-        setBranches(null);
+        addTab(info);
+        setActive(info.root);
         setError(null);
-        try {
-          localStorage.setItem(LAST_REPO_KEY, info.root);
-        } catch {
-          /* not remembered */
-        }
-        refreshAll();
       } catch (e) {
         onError(errorMessage(e));
       }
     },
-    [refreshAll, onError],
+    [addTab, onError],
   );
 
-  async function chooseRepo() {
-    const selected = await open({ directory: true, multiple: false, title: "Open repository" });
+  const chooseRepo = useCallback(async () => {
+    // Start in the repositories folder from the settings; without one the dialog picks its own default.
+    const settings = await api.getSettings().catch(() => null);
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Open repository",
+      defaultPath: settings?.reposDir ?? undefined,
+    });
     if (typeof selected === "string") openRepo(selected);
-  }
-
-  useEffect(() => {
-    const last = readLastRepo();
-    if (last) openRepo(last);
   }, [openRepo]);
 
+  const closeTab = useCallback(
+    (root: string) => {
+      setTabs((prev) => prev.filter((t) => t.root !== root));
+      setActive((current) => nextActive(tabs.map((t) => t.root), root, current));
+      api.closeRepo(root).catch(() => {});
+    },
+    [tabs],
+  );
+
+  // Reopen the tabs of the last session, in order. Repositories that were moved or deleted
+  // are skipped and reported.
   useEffect(() => {
-    const unlisten = listen<RepoChanged>("repo-changed", ({ payload }) => {
-      if (payload.worktree) refreshStatus();
-      if (payload.refs) refreshHistory();
-    });
-    return () => {
-      unlisten.then((fn) => fn());
+    if (restoreStarted.current) return;
+    restoreStarted.current = true;
+    const saved = readOpenTabs();
+    (async () => {
+      const failed: string[] = [];
+      const opened: string[] = [];
+      for (const root of saved.roots) {
+        try {
+          const info = await api.openRepo(root);
+          addTab(info);
+          opened.push(info.root);
+        } catch (e) {
+          failed.push(`${root}: ${errorMessage(e)}`);
+        }
+      }
+      setActive(saved.active && opened.includes(saved.active) ? saved.active : (opened[opened.length - 1] ?? null));
+      if (failed.length) onError(`Could not reopen:\n${failed.join("\n")}`);
+      setRestoring(false);
+    })();
+  }, [addTab, onError]);
+
+  useEffect(() => {
+    if (!restoring) saveOpenTabs(tabs.map((t) => t.root), active);
+  }, [tabs, active, restoring]);
+
+  // App-wide shortcuts: settings, opening, closing and cycling through tabs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.altKey) return;
+      const key = e.key.toLowerCase();
+      const cycle = (step: number) => {
+        if (tabs.length < 2) return;
+        const i = tabs.findIndex((t) => t.root === active);
+        setActive(tabs[(i + step + tabs.length) % tabs.length].root);
+      };
+      if (key === "," && !e.shiftKey) setSettingsOpen(true);
+      else if ((key === "o" || key === "t") && !e.shiftKey) chooseRepo();
+      else if (key === "w" && !e.shiftKey && active) closeTab(active);
+      else if ((key === "tab" && !e.shiftKey) || (key === "pagedown" && !e.shiftKey)) cycle(1);
+      else if ((key === "tab" && e.shiftKey) || (key === "pageup" && !e.shiftKey)) cycle(-1);
+      else return;
+      e.preventDefault();
     };
-  }, [refreshStatus, refreshHistory]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tabs, active, chooseRepo, closeTab]);
 
-  async function checkout(branch: string) {
-    if (!repo) return;
-    try {
-      await api.checkout(repo.root, branch);
-      refreshAll();
-    } catch (e) {
-      onError(errorMessage(e));
-    }
-  }
-
-  const changeCount = status ? new Set([...status.staged, ...status.unstaged, ...status.conflicted].map((f) => f.path)).size : 0;
+  const labels = tabLabels(tabs);
 
   return (
     <div className="app">
       <header className="toolbar">
         <LogoTile size={22} label="grit" />
-        <button onClick={chooseRepo}>Open…</button>
-        {repo && (
-          <>
-            <div className="repo-title" title={repo.root}>
-              <strong>{repo.name}</strong>
-              {status && (
-                <span className="branch-pill">
-                  {status.branch ?? "detached HEAD"}
-                  {status.ahead > 0 && <span className="ab">↑{status.ahead}</span>}
-                  {status.behind > 0 && <span className="ab">↓{status.behind}</span>}
-                </span>
-              )}
-            </div>
-          </>
-        )}
+        <div className="repo-tabs" role="tablist" aria-label="Open repositories">
+          {tabs.map((t) => {
+            const selected = t.root === active;
+            const label = labels.get(t.root) ?? t.name;
+            return (
+              <div
+                key={t.root}
+                className={`repo-tab-item${selected ? " selected" : ""}`}
+                title={t.root}
+                // Middle-click closes, as in browsers.
+                onAuxClick={(e) => e.button === 1 && closeTab(t.root)}
+                onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+              >
+                <button
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={tabPanelId(t.root)}
+                  tabIndex={selected ? 0 : -1}
+                  className="repo-tab-label"
+                  onClick={() => setActive(t.root)}
+                >
+                  {label}
+                </button>
+                <button
+                  className="repo-tab-close"
+                  aria-label={`Close ${label}`}
+                  title="Close (Ctrl/Cmd+W)"
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => closeTab(t.root)}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <button className="repo-tab-add" onClick={chooseRepo} aria-label="Open repository" title="Open repository (Ctrl/Cmd+O)">
+          +
+        </button>
         <div className="spacer" />
-        {repo && (
-          <button onClick={refreshAll} title="Refresh">
-            ⟳ Refresh
-          </button>
-        )}
+        <button onClick={() => setSettingsOpen(true)} title="Settings (Ctrl/Cmd+,)">
+          Settings
+        </button>
         <button onClick={() => setAboutOpen(true)} title="About grit">
           About
         </button>
@@ -156,18 +176,10 @@ function App() {
         </div>
       )}
 
-      {repo ? (
-        <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
-          <Sidebar view={view} onView={setView} changeCount={changeCount} branches={branches} onCheckout={checkout} />
-          <main className="main">
-            {view === "changes" ? (
-              <ChangesView repo={repo.root} status={status} onChanged={refreshAll} onError={onError} />
-            ) : (
-              <HistoryView repo={repo.root} log={log} onError={onError} />
-            )}
-          </main>
-        </Split>
-      ) : (
+      {tabs.map((t) => (
+        <RepoTab key={t.root} repo={t} active={t.root === active} onError={onError} onClearError={clearError} />
+      ))}
+      {tabs.length === 0 && !restoring && (
         <div className="welcome">
           <LogoLockup size={56} as="h1" />
           <p>Open a local repository to see its changes and history.</p>
@@ -178,6 +190,7 @@ function App() {
       )}
 
       {aboutOpen && <AboutDialog onClose={closeAbout} />}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     </div>
   );
 }

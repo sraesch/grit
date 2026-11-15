@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
+### Added
+
+- Markdown preview for commit messages: a Write/Preview toggle in the commit box shows the message as it will render
+- Commit bodies in the history details are rendered as GitHub-flavored markdown (lists, code, links, tables, task lists), with a toggle back to plain text that is remembered; links open in the system browser
+- Image preview in the history: selecting a changed image (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG) shows it before and after the commit side by side, with dimensions and file size, on a checkerboard for transparency; a toggle switches to the diff
+- Branch switcher: click the branch above the sidebar or press Ctrl/Cmd+B to filter branches and switch with the keyboard or mouse; remote branches without a local branch are checked out as a new tracking branch, and typing a new name creates a branch from HEAD. Uncommitted changes are carried over, and git's reason is shown when it refuses to switch
+- Tabs: open several repositories side by side. Each tab keeps its own view, selection and commit message draft and stays up to date in the background. Close tabs with ×, a middle-click or Ctrl/Cmd+W; open one with + or Ctrl/Cmd+O; cycle with Ctrl+Tab / Ctrl+Shift+Tab. Opening a repository that is already open shows its tab, and the open tabs are restored on the next start
+- Settings dialog (toolbar or Ctrl/Cmd+,) with the repositories folder where cloned repositories live; Open… starts there. Settings are saved in the app's config folder
+- Double-click a remote branch in the sidebar to switch to its local branch, creating a tracking branch if needed
+
+### Fixed
+
+- Linux packages now include a long description, the Development menu category and a 512×512 icon
+- The Linux dev desktop-entry script refuses to run while grit is installed, because its entry hid the installed app from the app search and dock
+
 ## [0.1.0] - 2026-11-14
 
 ### Added
@@ -28,5 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sraesch/grit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sraesch/grit/releases/tag/v0.1.0

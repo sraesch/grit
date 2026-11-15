@@ -1,12 +1,14 @@
 mod git;
 mod graph;
+mod settings;
 mod watcher;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State, ipc::Response};
 
 use git::{Branches, CommitDetails, GitResult, LogEntry, RepoInfo, Status};
+use settings::{Settings, SettingsStore};
 use watcher::WatchState;
 
 /// Runs blocking git work off the async runtime so the UI never stalls.
@@ -20,9 +22,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> GitResult<T> + Send + '
 async fn open_repo(app: AppHandle, watch: State<'_, WatchState>, path: String) -> GitResult<RepoInfo> {
     let info = blocking(move || git::open_repo(&PathBuf::from(path))).await?;
     let debouncer = watcher::watch(app, &info.root, &info.git_dir)?;
-    // Replacing the old debouncer drops it, which stops watching the previous repo.
-    *watch.0.lock().map_err(|e| e.to_string())? = Some(debouncer);
+    // Several repositories can be open in tabs; reopening one replaces (and stops) its old watcher.
+    watch
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(info.root.clone(), debouncer);
     Ok(info)
+}
+
+/// Stops watching a repository whose tab was closed.
+#[tauri::command]
+fn close_repo(watch: State<'_, WatchState>, root: String) -> GitResult<()> {
+    watch.0.lock().map_err(|e| e.to_string())?.remove(&root);
+    Ok(())
 }
 
 #[tauri::command]
@@ -55,6 +68,16 @@ async fn get_commit_file_diff(repo: String, sha: String, path: String, orig_path
     blocking(move || git::commit_file_diff(&PathBuf::from(repo), &sha, &path, orig_path.as_deref())).await
 }
 
+/// Largest file `get_file_at_revision` returns, to keep previews of huge assets from stalling the UI.
+const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Raw file contents at a revision, sent as binary (an ArrayBuffer in the frontend) rather than JSON.
+#[tauri::command]
+async fn get_file_at_revision(repo: String, rev: String, path: String) -> GitResult<Response> {
+    let bytes = blocking(move || git::file_at_revision(&PathBuf::from(repo), &rev, &path, MAX_PREVIEW_BYTES)).await?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
 async fn stage(repo: String, paths: Vec<String>) -> GitResult<()> {
     blocking(move || git::stage(&PathBuf::from(repo), &paths)).await
@@ -85,26 +108,57 @@ async fn checkout_branch(repo: String, branch: String) -> GitResult<()> {
     blocking(move || git::checkout(&PathBuf::from(repo), &branch)).await
 }
 
+#[tauri::command]
+async fn checkout_remote_branch(repo: String, branch: String) -> GitResult<()> {
+    blocking(move || git::checkout_remote(&PathBuf::from(repo), &branch)).await
+}
+
+#[tauri::command]
+async fn create_branch(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
+}
+
+#[tauri::command]
+fn get_settings(store: State<'_, SettingsStore>) -> Settings {
+    store.get()
+}
+
+#[tauri::command]
+fn set_settings(store: State<'_, SettingsStore>, settings: Settings) -> Result<Settings, String> {
+    store.update(settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WatchState::default())
+        .setup(|app| {
+            let path = app.path().app_config_dir()?.join("settings.json");
+            app.manage(SettingsStore::load(path, app.path().home_dir().ok()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_repo,
+            close_repo,
             get_status,
             get_log,
             get_branches,
             get_working_diff,
             get_commit_details,
             get_commit_file_diff,
+            get_file_at_revision,
             stage,
             stage_all,
             unstage,
             unstage_all,
             commit,
             checkout_branch,
+            checkout_remote_branch,
+            create_branch,
+            get_settings,
+            set_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
