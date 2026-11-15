@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, errorMessage, Settings } from "../api";
 
 interface SettingsDialogProps {
@@ -30,7 +30,8 @@ export function SettingsDialog({ onClose, onSaved }: SettingsDialogProps) {
   }, []);
 
   const loaded = reposDir !== null;
-  useEffect(() => {
+  // Focus in the same commit that enables the field, so typing right away always lands in it.
+  useLayoutEffect(() => {
     if (loaded) inputRef.current?.focus();
   }, [loaded]);
 
