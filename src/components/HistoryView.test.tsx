@@ -135,6 +135,85 @@ describe("HistoryView", () => {
     expect(screen.queryByRole("button", { name: "Markdown" })).toBeNull();
   });
 
+  describe("image files", () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).buffer;
+
+    beforeEach(() => {
+      let next = 0;
+      // jsdom has no object URLs.
+      URL.createObjectURL = vi.fn(() => `blob:image-${next++}`);
+      URL.revokeObjectURL = vi.fn();
+    });
+
+    function withFiles(files: ReturnType<typeof file>[], parents = ["p1"]) {
+      mockBackend(invokeMock, {
+        get_commit_details: ({ sha }) => ({ ...details(sha as string), parents, files }),
+        get_commit_file_diff: () => "diff --git a/x b/x\nBinary files a/x and b/x differ\n",
+        get_file_at_revision: ({ rev, path }) => bytes(`${rev}:${path}`),
+      });
+    }
+
+    it("shows a modified image before and after the commit", async () => {
+      withFiles([file("logo.png")]);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+
+      const before = await screen.findByRole("img", { name: "Before: logo.png" });
+      const after = screen.getByRole("img", { name: "After: logo.png" });
+      expect(before).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+      expect(after.getAttribute("src")).not.toBe(before.getAttribute("src"));
+      expect(invokeMock).toHaveBeenCalledWith("get_file_at_revision", { repo: "/repo", rev: "p1", path: "logo.png" });
+      expect(invokeMock).toHaveBeenCalledWith("get_file_at_revision", { repo: "/repo", rev: "c3", path: "logo.png" });
+      expect(screen.getAllByText("11 B")).toHaveLength(2);
+    });
+
+    it("reads a renamed image from its old path and shows added and deleted images alone", async () => {
+      withFiles([file("new.png", "R", "old.png"), file("added.svg", "A"), file("gone.gif", "D")]);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      await screen.findByRole("img", { name: "Before: old.png" });
+      expect(screen.getByRole("img", { name: "After: new.png" })).toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledWith("get_file_at_revision", { repo: "/repo", rev: "p1", path: "old.png" });
+
+      await userEvent.click(screen.getByText("added.svg"));
+      expect(await screen.findByRole("img", { name: "Added: added.svg" })).toBeInTheDocument();
+      expect(screen.queryByText("Before")).toBeNull();
+
+      await userEvent.click(screen.getByText("gone.gif"));
+      expect(await screen.findByRole("img", { name: "Deleted: gone.gif" })).toBeInTheDocument();
+      expect(screen.queryByText("After")).toBeNull();
+    });
+
+    it("shows images of a root commit as added", async () => {
+      withFiles([file("logo.png", "A")], []);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      expect(await screen.findByRole("img", { name: "Added: logo.png" })).toBeInTheDocument();
+    });
+
+    it("switches between the image and the diff", async () => {
+      withFiles([file("logo.png")]);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      await screen.findByRole("img", { name: "After: logo.png" });
+
+      await userEvent.click(screen.getByRole("button", { name: "Show diff" }));
+      expect(await screen.findByText("Binary file")).toBeInTheDocument();
+      expect(screen.queryByRole("img")).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", { name: "Show image" }));
+      expect(await screen.findByRole("img", { name: "After: logo.png" })).toBeInTheDocument();
+    });
+
+    it("reports images that cannot be loaded", async () => {
+      mockBackend(invokeMock, {
+        get_commit_details: ({ sha }) => ({ ...details(sha as string), files: [file("huge.png", "A")] }),
+        get_commit_file_diff: () => "",
+        get_file_at_revision: () => {
+          throw "File is too large to preview (30.0 MB, limit 25 MB)";
+        },
+      });
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      expect(await screen.findByText("File is too large to preview (30.0 MB, limit 25 MB)")).toBeInTheDocument();
+    });
+  });
+
   it("reports when details cannot be loaded", async () => {
     mockBackend(invokeMock, {
       get_commit_details: () => {

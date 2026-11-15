@@ -96,6 +96,9 @@ export const api = {
   commitDetails: (repo: string, sha: string) => invoke<CommitDetails>("get_commit_details", { repo, sha }),
   commitFileDiff: (repo: string, sha: string, path: string, origPath: string | null) =>
     invoke<string>("get_commit_file_diff", { repo, sha, path, origPath }),
+  /** Raw contents of `path` (relative to the repository root) at revision `rev`. */
+  fileAtRevision: (repo: string, rev: string, path: string) =>
+    invoke<ArrayBuffer>("get_file_at_revision", { repo, rev, path }),
   stage: (repo: string, paths: string[]) => invoke<void>("stage", { repo, paths }),
   stageAll: (repo: string) => invoke<void>("stage_all", { repo }),
   unstage: (repo: string, paths: string[]) => invoke<void>("unstage", { repo, paths }),

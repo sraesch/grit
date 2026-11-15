@@ -4,7 +4,7 @@ mod watcher;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, ipc::Response};
 
 use git::{Branches, CommitDetails, GitResult, LogEntry, RepoInfo, Status};
 use watcher::WatchState;
@@ -55,6 +55,16 @@ async fn get_commit_file_diff(repo: String, sha: String, path: String, orig_path
     blocking(move || git::commit_file_diff(&PathBuf::from(repo), &sha, &path, orig_path.as_deref())).await
 }
 
+/// Largest file `get_file_at_revision` returns, to keep previews of huge assets from stalling the UI.
+const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Raw file contents at a revision, sent as binary (an ArrayBuffer in the frontend) rather than JSON.
+#[tauri::command]
+async fn get_file_at_revision(repo: String, rev: String, path: String) -> GitResult<Response> {
+    let bytes = blocking(move || git::file_at_revision(&PathBuf::from(repo), &rev, &path, MAX_PREVIEW_BYTES)).await?;
+    Ok(Response::new(bytes))
+}
+
 #[tauri::command]
 async fn stage(repo: String, paths: Vec<String>) -> GitResult<()> {
     blocking(move || git::stage(&PathBuf::from(repo), &paths)).await
@@ -99,6 +109,7 @@ pub fn run() {
             get_working_diff,
             get_commit_details,
             get_commit_file_diff,
+            get_file_at_revision,
             stage,
             stage_all,
             unstage,

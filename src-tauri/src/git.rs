@@ -39,6 +39,15 @@ fn run(repo: &Path, args: &[&str]) -> GitResult<String> {
 }
 
 fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<String> {
+    exec(repo, args, stdin, ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Runs git and returns its stdout unmodified, for binary content such as images.
+fn run_bytes(repo: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
+    exec(repo, args, None, &[0])
+}
+
+fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
     let mut cmd = git_command(repo);
     cmd.args(args)
         .stdout(Stdio::piped())
@@ -58,7 +67,7 @@ fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let code = out.status.code().unwrap_or(-1);
     if ok_codes.contains(&code) {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if stderr.is_empty() {
@@ -462,6 +471,25 @@ pub fn commit_file_diff(repo: &Path, sha: &str, path: &str, orig_path: Option<&s
     run(repo, &args)
 }
 
+/// Contents of `path` (relative to the repository root) as of `rev`, as raw bytes.
+/// Files over `max_bytes` are refused, so a huge asset can't flood the UI.
+pub fn file_at_revision(repo: &Path, rev: &str, path: &str, max_bytes: u64) -> GitResult<Vec<u8>> {
+    // "rev:path" reads the path from the root of rev's tree, independent of the working directory.
+    let object = format!("{rev}:{path}");
+    let size: u64 = run(repo, &["cat-file", "-s", &object])?
+        .trim()
+        .parse()
+        .map_err(|_| format!("Unexpected size for {object}"))?;
+    if size > max_bytes {
+        return Err(format!(
+            "File is too large to preview ({:.1} MB, limit {:.0} MB)",
+            size as f64 / 1_048_576.0,
+            max_bytes as f64 / 1_048_576.0
+        ));
+    }
+    run_bytes(repo, &["cat-file", "blob", &object])
+}
+
 // ---------------------------------------------------------------------------
 // Branches
 // ---------------------------------------------------------------------------
@@ -614,6 +642,10 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(full, content).unwrap();
+        }
+
+        fn write_bytes(&self, path: &str, content: &[u8]) {
+            std::fs::write(self.dir.join(path), content).unwrap();
         }
 
         fn commit_all(&self, message: &str) -> String {
@@ -873,6 +905,32 @@ mod tests {
         assert_eq!(b.local.len(), 2);
         assert!(b.local.iter().any(|x| x.name == "main" && x.current));
         assert_eq!(b.tags[0].name, "v1");
+    }
+
+    #[test]
+    fn reads_binary_files_at_a_revision() {
+        let repo = TestRepo::new("blob");
+        // Not valid UTF-8: must come back byte for byte, without lossy conversion.
+        let v1 = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+        repo.write_bytes("logo.png", &v1);
+        repo.write("dir/a b.svg", "<svg/>");
+        let first = repo.commit_all("add images");
+        repo.write_bytes("logo.png", b"second");
+        let second = repo.commit_all("change logo");
+
+        assert_eq!(file_at_revision(&repo.dir, &first, "logo.png", 1024).unwrap(), v1);
+        assert_eq!(
+            file_at_revision(&repo.dir, &second, "logo.png", 1024).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            file_at_revision(&repo.dir, &second, "dir/a b.svg", 1024).unwrap(),
+            b"<svg/>"
+        );
+
+        let too_large = file_at_revision(&repo.dir, &first, "logo.png", 4).unwrap_err();
+        assert!(too_large.contains("too large"), "{too_large}");
+        assert!(file_at_revision(&repo.dir, &first, "missing.png", 1024).is_err());
     }
 
     #[test]

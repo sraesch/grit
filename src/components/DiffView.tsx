@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { ReactNode, useMemo } from "react";
 import { MAX_LINES, parseDiff } from "../diff";
 
 interface DiffViewProps {
@@ -6,9 +6,11 @@ interface DiffViewProps {
   loading?: boolean;
   error?: string | null;
   title?: string;
+  /** Controls shown at the right of the header. */
+  actions?: ReactNode;
 }
 
-export function DiffView({ diff, loading, error, title }: DiffViewProps) {
+export function DiffView({ diff, loading, error, title, actions }: DiffViewProps) {
   const parsed = useMemo(() => (diff == null ? null : parseDiff(diff)), [diff]);
 
   let body;
@@ -34,8 +36,19 @@ export function DiffView({ diff, loading, error, title }: DiffViewProps) {
 
   return (
     <div className="diff-view">
-      {title && <div className="pane-header mono">{title}</div>}
+      <PaneTitle title={title} actions={actions} />
       <div className="diff-scroll">{body}</div>
+    </div>
+  );
+}
+
+/** Header of the diff pane, shared with the image preview. */
+export function PaneTitle({ title, actions }: { title?: string; actions?: ReactNode }) {
+  if (!title) return null;
+  return (
+    <div className="pane-header mono">
+      <span className="pane-title">{title}</span>
+      {actions}
     </div>
   );
 }
