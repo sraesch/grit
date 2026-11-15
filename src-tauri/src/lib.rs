@@ -22,9 +22,20 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> GitResult<T> + Send + '
 async fn open_repo(app: AppHandle, watch: State<'_, WatchState>, path: String) -> GitResult<RepoInfo> {
     let info = blocking(move || git::open_repo(&PathBuf::from(path))).await?;
     let debouncer = watcher::watch(app, &info.root, &info.git_dir)?;
-    // Replacing the old debouncer drops it, which stops watching the previous repo.
-    *watch.0.lock().map_err(|e| e.to_string())? = Some(debouncer);
+    // Several repositories can be open in tabs; reopening one replaces (and stops) its old watcher.
+    watch
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(info.root.clone(), debouncer);
     Ok(info)
+}
+
+/// Stops watching a repository whose tab was closed.
+#[tauri::command]
+fn close_repo(watch: State<'_, WatchState>, root: String) -> GitResult<()> {
+    watch.0.lock().map_err(|e| e.to_string())?.remove(&root);
+    Ok(())
 }
 
 #[tauri::command]
@@ -130,6 +141,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_repo,
+            close_repo,
             get_status,
             get_log,
             get_branches,

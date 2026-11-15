@@ -87,12 +87,16 @@ export interface Settings {
 }
 
 export interface RepoChanged {
+  /** Root of the repository that changed, as returned by openRepo. */
+  root: string;
   worktree: boolean;
   refs: boolean;
 }
 
 export const api = {
   openRepo: (path: string) => invoke<RepoInfo>("open_repo", { path }),
+  /** Stops watching a repository whose tab was closed. */
+  closeRepo: (root: string) => invoke<void>("close_repo", { root }),
   status: (repo: string) => invoke<Status>("get_status", { repo }),
   log: (repo: string, limit?: number) => invoke<LogEntry[]>("get_log", { repo, limit }),
   branches: (repo: string) => invoke<Branches>("get_branches", { repo }),

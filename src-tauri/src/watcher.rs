@@ -1,5 +1,6 @@
 //! Watches the working tree and git directory and tells the frontend to refresh.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,12 +10,16 @@ use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+/// One watcher per open repository, keyed by the root that `open_repo` returned.
+/// Dropping a watcher stops it.
 #[derive(Default)]
-pub struct WatchState(pub Mutex<Option<Debouncer<RecommendedWatcher>>>);
+pub struct WatchState(pub Mutex<HashMap<String, Debouncer<RecommendedWatcher>>>);
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct RepoChanged {
+    /// The repository root, as returned by `open_repo`, so each tab only refreshes for its own repository.
+    root: String,
     /// Working tree or index changed: status needs a refresh.
     worktree: bool,
     /// Branches, tags or HEAD moved: history needs a refresh.
@@ -44,6 +49,7 @@ fn classify(path: &Path, git_dir: &Path, changes: &mut Changes) {
 }
 
 pub fn watch(app: AppHandle, root: &str, git_dir: &str) -> Result<Debouncer<RecommendedWatcher>, String> {
+    let root_label = root.to_string();
     let root: PathBuf = dunce::canonicalize(root).map_err(|e| e.to_string())?;
     let git_dir: PathBuf = dunce::canonicalize(git_dir).map_err(|e| e.to_string())?;
     let git_dir_for_cb = git_dir.clone();
@@ -58,6 +64,7 @@ pub fn watch(app: AppHandle, root: &str, git_dir: &str) -> Result<Debouncer<Reco
             let _ = app.emit(
                 "repo-changed",
                 RepoChanged {
+                    root: root_label.clone(),
                     worktree: changes.worktree,
                     refs: changes.refs,
                 },
