@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { KeyboardEvent, useEffect, useRef, useState } from "react";
 import { api, errorMessage, FileChange, Status } from "../api";
 import { DiffView } from "./DiffView";
 import { FileList } from "./FileList";
+import { CommitMessage } from "./Markdown";
 import { Split } from "./Split";
 
 interface Selection {
@@ -24,6 +25,9 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const [message, setMessage] = useState("");
   const [amend, setAmend] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const focusEditor = useRef(false);
 
   const staged = status?.staged ?? [];
   const unstaged = status?.unstaged ?? [];
@@ -35,6 +39,14 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     const list = selection.staged ? status.staged : [...status.unstaged, ...status.conflicted];
     if (!list.some((f) => f.path === selection.path)) setSelection(null);
   }, [status, selection]);
+
+  // Return focus to the message when switching back from the preview with the Write tab.
+  useEffect(() => {
+    if (!preview && focusEditor.current) {
+      focusEditor.current = false;
+      editorRef.current?.focus();
+    }
+  }, [preview]);
 
   // Reload the diff whenever the selection or the repository status changes.
   useEffect(() => {
@@ -83,10 +95,18 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
       await api.commit(repo, message, amend);
       setMessage("");
       setAmend(false);
+      setPreview(false);
     });
   }
 
   const canCommit = !busy && message.trim().length > 0 && (staged.length > 0 || amend) && conflicted.length === 0;
+
+  const commitOnShortcut = (e: KeyboardEvent) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      if (canCommit) doCommit();
+    }
+  };
 
   return (
     <Split direction="horizontal" initial={380} min={260} storageKey="changes">
@@ -143,17 +163,57 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
         </section>
 
         <section className="commit-box">
-          <textarea
-            placeholder="Commit message"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                if (canCommit) doCommit();
-              }
-            }}
-          />
+          <div className="commit-tabs" role="tablist" aria-label="Commit message mode">
+            <button
+              role="tab"
+              id="commit-tab-write"
+              aria-selected={!preview}
+              aria-controls="commit-panel-write"
+              onClick={() => {
+                focusEditor.current = true;
+                setPreview(false);
+              }}
+            >
+              Write
+            </button>
+            <button
+              role="tab"
+              id="commit-tab-preview"
+              aria-selected={preview}
+              aria-controls="commit-panel-preview"
+              onClick={() => setPreview(true)}
+            >
+              Preview
+            </button>
+            <span className="commit-tabs-hint">Markdown supported</span>
+          </div>
+          {preview ? (
+            <div
+              id="commit-panel-preview"
+              className="commit-preview selectable"
+              role="tabpanel"
+              aria-labelledby="commit-tab-preview"
+              tabIndex={0}
+              onKeyDown={commitOnShortcut}
+            >
+              {message.trim() ? (
+                <CommitMessage message={message} />
+              ) : (
+                <div className="empty small">Nothing to preview</div>
+              )}
+            </div>
+          ) : (
+            <div id="commit-panel-write" className="commit-editor" role="tabpanel" aria-labelledby="commit-tab-write">
+              <textarea
+                ref={editorRef}
+                aria-label="Commit message"
+                placeholder="Commit message"
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onKeyDown={commitOnShortcut}
+              />
+            </div>
+          )}
           <div className="commit-actions">
             <label className="checkbox">
               <input type="checkbox" checked={amend} onChange={(e) => setAmend(e.target.checked)} />

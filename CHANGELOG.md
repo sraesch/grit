@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Markdown preview for commit messages: a Write/Preview toggle in the commit box shows the message as it will render
+- Commit bodies in the history details are rendered as GitHub-flavored markdown (lists, code, links, tables, task lists), with a toggle back to plain text that is remembered; links open in the system browser
+
 ### Fixed
 
 - Linux packages now include a long description, the Development menu category and a 512×512 icon

@@ -106,6 +106,35 @@ describe("HistoryView", () => {
     expect(await screen.findByText("Subject of c2")).toBeInTheDocument();
   });
 
+  it("renders the commit body as markdown and remembers the plain-text choice", async () => {
+    mockBackend(invokeMock, {
+      get_commit_details: ({ sha }) => ({ ...details(sha as string), message: "Subject\n\n- **bold** item" }),
+      get_commit_file_diff: () => "",
+    });
+    const { unmount } = render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    expect(await screen.findByText("bold")).toHaveProperty("tagName", "STRONG");
+    const toggle = screen.getByRole("button", { name: "Markdown" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+    await userEvent.click(toggle);
+    expect(screen.getByText("- **bold** item")).toHaveClass("commit-body");
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    unmount();
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    expect(await screen.findByText("- **bold** item")).toHaveClass("commit-body");
+  });
+
+  it("hides the markdown toggle for commits without a body", async () => {
+    mockBackend(invokeMock, {
+      get_commit_details: ({ sha }) => ({ ...details(sha as string), message: "Just a subject\n" }),
+      get_commit_file_diff: () => "",
+    });
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    expect(await screen.findByText("Just a subject")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Markdown" })).toBeNull();
+  });
+
   it("reports when details cannot be loaded", async () => {
     mockBackend(invokeMock, {
       get_commit_details: () => {

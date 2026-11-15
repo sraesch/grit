@@ -5,6 +5,7 @@ import { fullDate, relativeTime } from "../util";
 import { DiffView } from "./DiffView";
 import { FileList } from "./FileList";
 import { GraphCell, graphWidth, ROW_HEIGHT } from "./GraphCell";
+import { CommitMessage, splitCommitMessage } from "./Markdown";
 import { Split } from "./Split";
 
 interface HistoryViewProps {
@@ -104,11 +105,24 @@ export function HistoryView({ repo, log, onError }: HistoryViewProps) {
   );
 }
 
+const MARKDOWN_KEY = "commit-message-markdown";
+
+/** Whether commit bodies are rendered as markdown; remembered across commits and restarts. */
+function useMarkdownPreference(): [boolean, (on: boolean) => void] {
+  const [markdown, setMarkdown] = useState(() => localStorage.getItem(MARKDOWN_KEY) !== "false");
+  const update = (on: boolean) => {
+    setMarkdown(on);
+    localStorage.setItem(MARKDOWN_KEY, String(on));
+  };
+  return [markdown, update];
+}
+
 function CommitPanel({ repo, sha, onError }: { repo: string; sha: string | null; onError: (m: string) => void }) {
   const [details, setDetails] = useState<CommitDetails | null>(null);
   const [file, setFile] = useState<FileChange | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
+  const [markdown, setMarkdown] = useMarkdownPreference();
 
   useEffect(() => {
     setDetails(null);
@@ -145,15 +159,21 @@ function CommitPanel({ repo, sha, onError }: { repo: string; sha: string | null;
   if (!sha) return <div className="empty">Select a commit</div>;
   if (!details) return <div className="empty">Loading…</div>;
 
-  const [summary, ...bodyLines] = details.message.split("\n");
-  const body = bodyLines.join("\n").trim();
-
   return (
     <Split direction="horizontal" initial={380} min={240} storageKey="commit-panel">
       <div className="commit-panel">
         <div className="commit-meta">
-          <div className="commit-summary">{summary}</div>
-          {body && <pre className="commit-body">{body}</pre>}
+          {splitCommitMessage(details.message).body && (
+            <button
+              className="small commit-format-toggle"
+              aria-pressed={markdown}
+              title={markdown ? "Show the message as plain text" : "Render the message as markdown"}
+              onClick={() => setMarkdown(!markdown)}
+            >
+              Markdown
+            </button>
+          )}
+          <CommitMessage message={details.message} markdown={markdown} />
           <dl>
             <dt>Author</dt>
             <dd>
