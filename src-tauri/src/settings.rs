@@ -6,12 +6,26 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     /// Folder that holds cloned repositories; the Open dialog starts here.
     /// `None` means the home folder.
     pub repos_dir: Option<String>,
+    /// Open repositories are fetched in the background this often; 0 turns it off.
+    pub auto_fetch_minutes: u32,
+}
+
+/// Longest automatic fetch interval: once a day.
+pub const MAX_AUTO_FETCH_MINUTES: u32 = 24 * 60;
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            repos_dir: None,
+            auto_fetch_minutes: 10,
+        }
+    }
 }
 
 pub struct SettingsStore {
@@ -41,8 +55,14 @@ impl SettingsStore {
 
     /// Validates and normalizes `settings`, writes them to disk and returns what was stored.
     pub fn update(&self, settings: Settings) -> Result<Settings, String> {
+        if settings.auto_fetch_minutes > MAX_AUTO_FETCH_MINUTES {
+            return Err(format!(
+                "Fetch automatically at most every {MAX_AUTO_FETCH_MINUTES} minutes (once a day)"
+            ));
+        }
         let settings = Settings {
             repos_dir: normalize_dir(settings.repos_dir.as_deref(), self.home.as_deref())?,
+            auto_fetch_minutes: settings.auto_fetch_minutes,
         };
         write_atomically(
             &self.path,
@@ -111,6 +131,7 @@ mod tests {
     fn repos(dir: &str) -> Settings {
         Settings {
             repos_dir: Some(dir.to_string()),
+            ..Settings::default()
         }
     }
 
@@ -179,5 +200,29 @@ mod tests {
             expected.to_str()
         );
         assert_eq!(store.update(repos("~")).unwrap().repos_dir.as_deref(), tmp.0.to_str());
+    }
+
+    #[test]
+    fn stores_the_auto_fetch_interval() {
+        let tmp = TempDir::new("auto-fetch");
+        let path = tmp.0.join("settings.json");
+        // Files from before the setting existed fetch every 10 minutes.
+        std::fs::write(&path, r#"{"reposDir": null}"#).unwrap();
+        let store = SettingsStore::load(path.clone(), None);
+        assert_eq!(store.get().auto_fetch_minutes, 10);
+
+        let off = Settings {
+            auto_fetch_minutes: 0,
+            ..Settings::default()
+        };
+        assert_eq!(store.update(off.clone()).unwrap(), off);
+        assert_eq!(SettingsStore::load(path, None).get(), off);
+
+        let too_long = Settings {
+            auto_fetch_minutes: MAX_AUTO_FETCH_MINUTES + 1,
+            ..Settings::default()
+        };
+        assert!(store.update(too_long).unwrap_err().contains("once a day"));
+        assert_eq!(store.get(), off);
     }
 }

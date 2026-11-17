@@ -5,9 +5,12 @@ mod watcher;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, Manager, State, ipc::Response};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
-use git::{Branches, CommitDetails, GitResult, LogEntry, RepoInfo, Status};
+use git::{
+    Branches, CommitDetails, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult, RepoInfo, Status,
+};
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
 
@@ -118,6 +121,90 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
+/// A progress line of a running fetch or pull, e.g. "Receiving objects:  45% (450/1000)".
+#[derive(Serialize, Clone)]
+struct GitProgress {
+    /// The repository root, as passed to the command, so only its tab shows the progress.
+    root: String,
+    text: String,
+}
+
+/// Emits git's progress output as `git-progress` events for the repository's tab.
+fn progress_emitter(app: AppHandle, root: String) -> impl FnMut(&str) {
+    move |text: &str| {
+        let _ = app.emit(
+            "git-progress",
+            GitProgress {
+                root: root.clone(),
+                text: text.to_string(),
+            },
+        );
+    }
+}
+
+#[tauri::command]
+async fn fetch(
+    app: AppHandle,
+    repo: String,
+    remote: Option<String>,
+    prune: bool,
+    tags: bool,
+    background: bool,
+) -> GitResult<FetchResult> {
+    blocking(move || {
+        let opts = FetchOptions {
+            remote,
+            prune,
+            tags,
+            background,
+        };
+        let path = PathBuf::from(&repo);
+        if background {
+            // Nobody watches an automatic fetch, so its progress isn't sent.
+            git::fetch(&path, &opts, &mut |_| {})
+        } else {
+            git::fetch(&path, &opts, &mut progress_emitter(app, repo))
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+async fn pull(
+    app: AppHandle,
+    repo: String,
+    remote: String,
+    branch: String,
+    rebase: bool,
+    autostash: bool,
+) -> GitResult<PullResult> {
+    blocking(move || {
+        let opts = PullOptions {
+            remote,
+            branch,
+            rebase,
+            autostash,
+        };
+        git::pull(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn abort_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::abort_operation(&PathBuf::from(repo))).await
+}
+
+#[tauri::command]
+async fn continue_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::continue_operation(&PathBuf::from(repo))).await
+}
+
+#[tauri::command]
+async fn skip_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::skip_operation(&PathBuf::from(repo))).await
+}
+
 #[tauri::command]
 fn get_settings(store: State<'_, SettingsStore>) -> Settings {
     store.get()
@@ -157,6 +244,11 @@ pub fn run() {
             checkout_branch,
             checkout_remote_branch,
             create_branch,
+            fetch,
+            pull,
+            abort_operation,
+            continue_operation,
+            skip_operation,
             get_settings,
             set_settings,
         ])

@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorMessage, RepoInfo } from "./api";
+import { api, errorMessage, RepoInfo, Settings } from "./api";
 import { AboutDialog } from "./components/AboutDialog";
 import { LogoLockup, LogoTile } from "./components/Logo";
 import { RepoTab, tabPanelId } from "./components/RepoTab";
@@ -17,6 +17,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const restoreStarted = useRef(false);
 
   const onError = useCallback((message: string) => setError(message), []);
@@ -91,6 +92,21 @@ function App() {
   useEffect(() => {
     if (!restoring) saveOpenTabs(tabs.map((t) => t.root), active);
   }, [tabs, active, restoring]);
+
+  // The tabs need the settings (automatic fetching) once a repository is open. Without them,
+  // nothing is fetched automatically.
+  const hasTabs = tabs.length > 0;
+  useEffect(() => {
+    if (!hasTabs || settings) return;
+    let cancelled = false;
+    api
+      .getSettings()
+      .then((s) => !cancelled && setSettings(s))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hasTabs, settings]);
 
   // App-wide shortcuts: settings, opening, closing and cycling through tabs.
   useEffect(() => {
@@ -177,7 +193,14 @@ function App() {
       )}
 
       {tabs.map((t) => (
-        <RepoTab key={t.root} repo={t} active={t.root === active} onError={onError} onClearError={clearError} />
+        <RepoTab
+          key={t.root}
+          repo={t}
+          active={t.root === active}
+          autoFetchMinutes={settings?.autoFetchMinutes ?? null}
+          onError={onError}
+          onClearError={clearError}
+        />
       ))}
       {tabs.length === 0 && !restoring && (
         <div className="welcome">
@@ -190,7 +213,7 @@ function App() {
       )}
 
       {aboutOpen && <AboutDialog onClose={closeAbout} />}
-      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} onSaved={setSettings} />}
     </div>
   );
 }

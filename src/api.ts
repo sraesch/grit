@@ -13,6 +13,20 @@ export interface FileChange {
   status: string;
 }
 
+export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert";
+
+/** A merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and waits for the user. */
+export interface Operation {
+  kind: OperationKind;
+  /** The branch being rebased. */
+  head: string | null;
+  /** Rebase progress: the commit being applied (1-based) and the number of commits. */
+  step: number | null;
+  total: number | null;
+  /** The prepared merge commit message. */
+  message: string | null;
+}
+
 export interface Status {
   branch: string | null;
   upstream: string | null;
@@ -21,6 +35,9 @@ export interface Status {
   staged: FileChange[];
   unstaged: FileChange[];
   conflicted: FileChange[];
+  operation: Operation | null;
+  /** When the repository was last fetched (unix seconds), or null if never. */
+  lastFetch: number | null;
 }
 
 export interface Segment {
@@ -75,15 +92,69 @@ export interface Branch {
   track: string | null;
 }
 
+export interface Remote {
+  name: string;
+  /** The fetch URL. */
+  url: string;
+}
+
 export interface Branches {
   local: Branch[];
   remote: Branch[];
   tags: Branch[];
+  remotes: Remote[];
+}
+
+export interface FetchOptions {
+  /** Null fetches every remote. */
+  remote: string | null;
+  /** Remove remote branches that were deleted on the remote. */
+  prune: boolean;
+  /** Fetch all tags, not only those in the fetched history. */
+  tags: boolean;
+  /** An automatic fetch: never prompts and reports no progress. */
+  background: boolean;
+}
+
+export interface FetchResult {
+  newBranches: string[];
+  updatedBranches: string[];
+  deletedBranches: string[];
+  newTags: string[];
+}
+
+export interface PullOptions {
+  remote: string;
+  /** Branch name on the remote, e.g. "main" (not "origin/main"). */
+  branch: string;
+  rebase: boolean;
+  /** Stash uncommitted changes before the pull and reapply them afterwards. */
+  autostash: boolean;
+}
+
+export type PullOutcome = "up-to-date" | "fast-forward" | "merge" | "rebase" | "conflicts" | "stash-conflicts";
+
+export interface PullResult {
+  outcome: PullOutcome;
+  /** Commits that came from the remote branch. */
+  incoming: number;
+  /** Local commits that were rebased onto the remote branch. */
+  rebased: number;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
+/** A progress line of a running fetch or pull. */
+export interface GitProgress {
+  root: string;
+  text: string;
 }
 
 export interface Settings {
   /** Folder that holds cloned repositories; the Open dialog starts here. Null means the home folder. */
   reposDir: string | null;
+  /** Open repositories are fetched in the background this often; 0 turns it off. */
+  autoFetchMinutes: number;
 }
 
 export interface RepoChanged {
@@ -121,6 +192,16 @@ export const api = {
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
+  /** Progress arrives as `git-progress` events unless `background` is set. */
+  fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
+  /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */
+  pull: (repo: string, options: PullOptions) => invoke<PullResult>("pull", { repo, ...options }),
+  /** Aborts the merge, rebase, cherry-pick or revert in progress. */
+  abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
+  /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
+  continueOperation: (repo: string) => invoke<void>("continue_operation", { repo }),
+  /** Skips the commit that stopped a rebase, cherry-pick or revert. */
+  skipOperation: (repo: string) => invoke<void>("skip_operation", { repo }),
 };
 
 export function errorMessage(e: unknown): string {

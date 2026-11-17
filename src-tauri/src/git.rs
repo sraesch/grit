@@ -4,9 +4,11 @@
 //! helpers, SSH config, signing and `.gitconfig` behave exactly as on the command line.
 //! Read-heavy paths can later move to an in-process library (gix) where it pays off.
 
-use std::io::Write;
-use std::path::Path;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 
@@ -130,6 +132,11 @@ pub struct Status {
     pub staged: Vec<FileChange>,
     pub unstaged: Vec<FileChange>,
     pub conflicted: Vec<FileChange>,
+    /// A merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and waits
+    /// to be continued or aborted.
+    pub operation: Option<Operation>,
+    /// When the repository was last fetched (unix seconds), from the time of `FETCH_HEAD`.
+    pub last_fetch: Option<i64>,
 }
 
 pub fn status(repo: &Path) -> GitResult<Status> {
@@ -137,7 +144,23 @@ pub fn status(repo: &Path) -> GitResult<Status> {
         repo,
         &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
     )?;
-    Ok(parse_status(&out))
+    let mut st = parse_status(&out);
+    let git_dir = git_dir(repo)?;
+    st.operation = operation(&git_dir);
+    st.last_fetch = modified_secs(&git_dir.join("FETCH_HEAD"));
+    Ok(st)
+}
+
+/// The git directory of the worktree at `repo` (per-worktree state such as `MERGE_HEAD` lives here).
+fn git_dir(repo: &Path) -> GitResult<PathBuf> {
+    Ok(PathBuf::from(
+        run(repo, &["rev-parse", "--absolute-git-dir"])?.trim_end(),
+    ))
+}
+
+fn modified_secs(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64)
 }
 
 fn parse_status(out: &str) -> Status {
@@ -511,6 +534,15 @@ pub struct Branches {
     pub local: Vec<Branch>,
     pub remote: Vec<Branch>,
     pub tags: Vec<Branch>,
+    pub remotes: Vec<Remote>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Remote {
+    pub name: String,
+    /// The fetch URL.
+    pub url: String,
 }
 
 pub fn branches(repo: &Path) -> GitResult<Branches> {
@@ -548,7 +580,26 @@ pub fn branches(repo: &Path) -> GitResult<Branches> {
             result.tags.push(make(n));
         }
     }
+    result.remotes = remotes(repo)?;
     Ok(result)
+}
+
+pub fn remotes(repo: &Path) -> GitResult<Vec<Remote>> {
+    Ok(parse_remotes(&run(repo, &["remote", "-v"])?))
+}
+
+/// Parses `git remote -v`: `origin\thttps://host/repo.git (fetch)`, one fetch and one push line per remote.
+fn parse_remotes(out: &str) -> Vec<Remote> {
+    out.lines()
+        .filter_map(|line| {
+            let (name, rest) = line.split_once('\t')?;
+            let url = rest.strip_suffix(" (fetch)")?;
+            Some(Remote {
+                name: name.to_string(),
+                url: url.to_string(),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +668,513 @@ pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
     run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
 }
 
+// ---------------------------------------------------------------------------
+// Fetch and pull
+// ---------------------------------------------------------------------------
+
+/// Output of a git command that talks to a remote. The exit code is returned rather than
+/// turned into an error, because a failed pull can still leave a state to report (conflicts).
+struct NetOutput {
+    code: i32,
+    stderr: String,
+}
+
+/// Runs git with `--progress` output streamed to `on_progress`, one line (or `\r`-separated
+/// update) at a time, e.g. "Receiving objects:  45% (450/1000)".
+fn exec_streaming(
+    repo: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<NetOutput> {
+    let mut cmd = git_command(repo);
+    cmd.args(args)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start git: {e}"))?;
+
+    // Drain stdout on its own thread so a chatty merge can't fill the pipe and block git
+    // while we are reading stderr.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = stdout.read_to_end(&mut sink);
+    });
+
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let mut all = Vec::new();
+    let mut line = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match stderr.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        all.extend_from_slice(&buf[..n]);
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                emit_line(&mut line, on_progress);
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    emit_line(&mut line, on_progress);
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let _ = stdout_reader.join();
+    Ok(NetOutput {
+        code: status.code().unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&all).into_owned(),
+    })
+}
+
+fn emit_line(line: &mut Vec<u8>, on_progress: &mut dyn FnMut(&str)) {
+    let text = String::from_utf8_lossy(line);
+    let text = text.trim();
+    if !text.is_empty() {
+        on_progress(text);
+    }
+    line.clear();
+}
+
+/// Turns git's stderr into a readable error: progress updates are dropped and only the final
+/// state of each `\r`-overwritten line is kept.
+fn error_text(stderr: &str, fallback: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.rsplit('\r').map(str::trim_end).find(|s| !s.trim().is_empty()))
+        .filter(|l| !is_progress(l))
+        .collect();
+    if lines.is_empty() {
+        fallback.to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn is_progress(line: &str) -> bool {
+    let l = line.trim_start();
+    let l = l.strip_prefix("remote:").map(str::trim_start).unwrap_or(l);
+    const PHASES: [&str; 10] = [
+        "Enumerating objects",
+        "Counting objects",
+        "Compressing objects",
+        "Receiving objects",
+        "Resolving deltas",
+        "Unpacking objects",
+        "Writing objects",
+        "Updating files",
+        "Checking out files",
+        "Total ",
+    ];
+    PHASES.iter().any(|p| l.starts_with(p)) || (l.contains("% (") && l.contains(')'))
+}
+
+/// Environment for network commands. Background fetches must never pop up a prompt: ssh runs
+/// in batch mode (unless the user configured their own ssh command) and Git Credential Manager
+/// stays non-interactive. Credential helpers and ssh agents still work.
+fn network_env(repo: &Path, background: bool) -> Vec<(&'static str, &'static str)> {
+    if !background {
+        return Vec::new();
+    }
+    let mut env = vec![("GCM_INTERACTIVE", "never"), ("SSH_ASKPASS_REQUIRE", "never")];
+    let custom_ssh = std::env::var_os("GIT_SSH_COMMAND").is_some()
+        || std::env::var_os("GIT_SSH").is_some()
+        || run_with(repo, &["config", "--get", "core.sshCommand"], None, &[0, 1]).is_ok_and(|v| !v.trim().is_empty());
+    if !custom_ssh {
+        env.push(("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"));
+    }
+    env
+}
+
+/// Rejects arguments git would parse as an option, e.g. a remote named "--upload-pack=…".
+fn plain_arg<'a>(value: &'a str, what: &str) -> GitResult<&'a str> {
+    if value.is_empty() || value.starts_with('-') {
+        Err(format!("'{value}' is not a valid {what}"))
+    } else {
+        Ok(value)
+    }
+}
+
+/// Remote-tracking branches and tags with the commit each points at.
+fn remote_refs(repo: &Path) -> GitResult<HashMap<String, String>> {
+    let out = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%1f%(objectname)",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_once(FIELD_SEP))
+        .filter(|(name, _)| !name.ends_with("/HEAD"))
+        .map(|(name, sha)| (name.to_string(), sha.to_string()))
+        .collect())
+}
+
+#[derive(Serialize, Default, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResult {
+    /// Remote branches that appeared, e.g. "origin/feature".
+    pub new_branches: Vec<String>,
+    /// Remote branches that moved.
+    pub updated_branches: Vec<String>,
+    /// Remote branches removed by pruning.
+    pub deleted_branches: Vec<String>,
+    pub new_tags: Vec<String>,
+}
+
+impl FetchResult {
+    /// What changed between two snapshots of `remote_refs`. Comparing refs instead of parsing
+    /// git's output keeps this independent of git's version and language.
+    fn diff(before: &HashMap<String, String>, after: &HashMap<String, String>) -> Self {
+        let mut result = FetchResult::default();
+        for (name, sha) in after {
+            if let Some(branch) = name.strip_prefix("refs/remotes/") {
+                match before.get(name) {
+                    None => result.new_branches.push(branch.to_string()),
+                    Some(old) if old != sha => result.updated_branches.push(branch.to_string()),
+                    Some(_) => {}
+                }
+            } else if let Some(tag) = name.strip_prefix("refs/tags/")
+                && !before.contains_key(name)
+            {
+                result.new_tags.push(tag.to_string());
+            }
+        }
+        for name in before.keys() {
+            if let Some(branch) = name.strip_prefix("refs/remotes/")
+                && !after.contains_key(name)
+            {
+                result.deleted_branches.push(branch.to_string());
+            }
+        }
+        for list in [
+            &mut result.new_branches,
+            &mut result.updated_branches,
+            &mut result.deleted_branches,
+            &mut result.new_tags,
+        ] {
+            list.sort();
+        }
+        result
+    }
+}
+
+#[derive(Default)]
+pub struct FetchOptions {
+    /// `None` fetches every remote.
+    pub remote: Option<String>,
+    /// Remove remote-tracking branches whose branch was deleted on the remote.
+    pub prune: bool,
+    /// Fetch all tags, not only those pointing into fetched history.
+    pub tags: bool,
+    /// An automatic fetch: never prompt for credentials.
+    pub background: bool,
+}
+
+pub fn fetch(repo: &Path, opts: &FetchOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<FetchResult> {
+    let before = remote_refs(repo)?;
+    let mut args = vec!["fetch", "--progress"];
+    if opts.prune {
+        args.push("--prune");
+    }
+    if opts.tags {
+        args.push("--tags");
+    }
+    match &opts.remote {
+        Some(remote) => args.push(plain_arg(remote, "remote name")?),
+        None => args.push("--all"),
+    }
+    let env = network_env(repo, opts.background);
+    let out = exec_streaming(repo, &args, &env, on_progress)?;
+    if out.code != 0 {
+        return Err(error_text(&out.stderr, "Fetch failed"));
+    }
+    Ok(FetchResult::diff(&before, &remote_refs(repo)?))
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum PullOutcome {
+    /// Nothing new on the remote branch.
+    UpToDate,
+    FastForward,
+    /// A merge commit was created.
+    Merge,
+    /// Local commits were replayed on top of the remote branch.
+    Rebase,
+    /// The merge or rebase stopped on conflicts; `Status::operation` describes it.
+    Conflicts,
+    /// The pull succeeded, but reapplying the stashed local changes conflicted.
+    /// The changes are kept in the stash.
+    StashConflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PullResult {
+    pub outcome: PullOutcome,
+    /// Commits that came from the remote branch.
+    pub incoming: u32,
+    /// Local commits that were rebased onto the remote branch.
+    pub rebased: u32,
+    /// Files with conflicts, for the `Conflicts` and `StashConflicts` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct PullOptions {
+    pub remote: String,
+    /// Branch name on the remote, e.g. "main" (not "origin/main").
+    pub branch: String,
+    pub rebase: bool,
+    /// Stash uncommitted changes before and reapply them after the pull.
+    pub autostash: bool,
+}
+
+fn rev(repo: &Path, name: &str) -> Option<String> {
+    run(repo, &["rev-parse", "--verify", "-q", name])
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn count(repo: &Path, range: &str) -> u32 {
+    run(repo, &["rev-list", "--count", range])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    run(repo, &["merge-base", "--is-ancestor", ancestor, descendant]).is_ok()
+}
+
+/// Fetches `opts.branch` from `opts.remote` and merges or rebases the current branch onto it.
+pub fn pull(repo: &Path, opts: &PullOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<PullResult> {
+    let remote = plain_arg(&opts.remote, "remote name")?;
+    let branch = plain_arg(&opts.branch, "branch name")?;
+    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("Pulling needs a current branch, but HEAD is detached. Switch to a branch first.".into());
+    }
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before pulling.",
+            op.kind.label()
+        ));
+    }
+    let old = rev(repo, "HEAD");
+
+    // A full ref keeps a tag with the branch's name from being pulled instead.
+    let refspec = format!("refs/heads/{branch}");
+    // An explicit --rebase/--no-rebase keeps newer git from refusing divergent branches when
+    // pull.rebase is unset; pull.ff from the user's config still applies.
+    let args = [
+        "pull",
+        "--progress",
+        "--no-edit",
+        if opts.rebase { "--rebase" } else { "--no-rebase" },
+        if opts.autostash {
+            "--autostash"
+        } else {
+            "--no-autostash"
+        },
+        remote,
+        &refspec,
+    ];
+    let out = exec_streaming(repo, &args, &[], on_progress)?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    let result = |outcome, incoming, rebased| PullResult {
+        outcome,
+        incoming,
+        rebased,
+        conflicts,
+    };
+    if conflicts > 0 {
+        let outcome = if st.operation.is_some() {
+            PullOutcome::Conflicts
+        } else {
+            PullOutcome::StashConflicts
+        };
+        let incoming = old.as_deref().map_or(0, |o| count(repo, &format!("{o}..FETCH_HEAD")));
+        return Ok(result(outcome, incoming, 0));
+    }
+    if out.code != 0 {
+        return Err(error_text(&out.stderr, "Pull failed"));
+    }
+
+    let new = rev(repo, "HEAD");
+    let outcome_and_counts = match (old.as_deref(), new.as_deref()) {
+        (Some(o), Some(n)) if o == n => (PullOutcome::UpToDate, 0, 0),
+        (None, _) | (_, None) => (
+            PullOutcome::FastForward,
+            new.as_deref().map_or(0, |n| count(repo, n)),
+            0,
+        ),
+        (Some(o), Some(n)) => {
+            let incoming = count(repo, &format!("{o}..FETCH_HEAD"));
+            let parents = run(repo, &["rev-list", "--parents", "-n1", n]).unwrap_or_default();
+            let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+            if parents.len() > 1 && parents[0] == o {
+                (PullOutcome::Merge, incoming, 0)
+            } else if is_ancestor(repo, o, n) {
+                (PullOutcome::FastForward, incoming, 0)
+            } else {
+                (PullOutcome::Rebase, incoming, count(repo, "FETCH_HEAD..HEAD"))
+            }
+        }
+    };
+    let (outcome, incoming, rebased) = outcome_and_counts;
+    Ok(result(outcome, incoming, rebased))
+}
+
+// ---------------------------------------------------------------------------
+// Merge, rebase, cherry-pick and revert in progress
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum OperationKind {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl OperationKind {
+    fn label(self) -> &'static str {
+        match self {
+            OperationKind::Merge => "merge",
+            OperationKind::Rebase => "rebase",
+            OperationKind::CherryPick => "cherry-pick",
+            OperationKind::Revert => "revert",
+        }
+    }
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Operation {
+    pub kind: OperationKind,
+    /// The branch being rebased, e.g. "main".
+    pub head: Option<String>,
+    /// Rebase progress: the commit being applied (1-based) and the number of commits.
+    pub step: Option<u32>,
+    pub total: Option<u32>,
+    /// The prepared commit message (`MERGE_MSG` without comments), for merges.
+    pub message: Option<String>,
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Detects an operation that stopped and waits for the user, from git's state files.
+fn operation(git_dir: &Path) -> Option<Operation> {
+    let blank = |kind| Operation {
+        kind,
+        head: None,
+        step: None,
+        total: None,
+        message: None,
+    };
+    // A rebase that stops on a picked commit also leaves CHERRY_PICK_HEAD behind, so check it first.
+    for (dir, step_file, total_file) in [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")] {
+        let dir = git_dir.join(dir);
+        // rebase-apply is also used by `git am`, which is not a rebase.
+        if dir.is_dir() && !dir.join("applying").exists() {
+            let number = |f: &str| read_trimmed(&dir.join(f)).and_then(|s| s.parse().ok());
+            return Some(Operation {
+                head: read_trimmed(&dir.join("head-name"))
+                    .map(|h| h.strip_prefix("refs/heads/").unwrap_or(&h).to_string()),
+                step: number(step_file),
+                total: number(total_file),
+                ..blank(OperationKind::Rebase)
+            });
+        }
+    }
+    if git_dir.join("MERGE_HEAD").exists() {
+        let message = std::fs::read_to_string(git_dir.join("MERGE_MSG")).ok().map(|m| {
+            m.lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        });
+        return Some(Operation {
+            message: message.filter(|m| !m.is_empty()),
+            ..blank(OperationKind::Merge)
+        });
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        return Some(blank(OperationKind::CherryPick));
+    }
+    if git_dir.join("REVERT_HEAD").exists() {
+        return Some(blank(OperationKind::Revert));
+    }
+    None
+}
+
+fn current_operation(repo: &Path) -> GitResult<Operation> {
+    operation(&git_dir(repo)?).ok_or_else(|| "There is no merge or rebase in progress.".to_string())
+}
+
+/// Gives up the operation in progress and returns to the state before it started.
+pub fn abort_operation(repo: &Path) -> GitResult<()> {
+    let op = current_operation(repo)?;
+    run(repo, &[op.kind.label(), "--abort"]).map(drop)
+}
+
+/// Continues after the conflicts were resolved and staged. A merge is finished by committing
+/// with its prepared message.
+pub fn continue_operation(repo: &Path) -> GitResult<()> {
+    let op = current_operation(repo)?;
+    let args: &[&str] = match op.kind {
+        OperationKind::Merge => &["commit", "--no-edit"],
+        kind => &[kind.label(), "--continue"],
+    };
+    // Accept the prepared messages instead of waiting for an editor that never opens.
+    exec_with_env(repo, args, &[("GIT_EDITOR", "true")]).map(drop)
+}
+
+/// Skips the commit that stopped a rebase, cherry-pick or revert.
+pub fn skip_operation(repo: &Path) -> GitResult<()> {
+    let op = current_operation(repo)?;
+    if op.kind == OperationKind::Merge {
+        return Err("A merge can't be skipped; abort it instead.".into());
+    }
+    exec_with_env(repo, &[op.kind.label(), "--skip"], &[("GIT_EDITOR", "true")]).map(drop)
+}
+
+fn exec_with_env(repo: &Path, args: &[&str], envs: &[(&str, &str)]) -> GitResult<String> {
+    let out = git_command(repo)
+        .args(args)
+        .envs(envs.iter().copied())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to start git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // `rebase --continue` explains itself on stdout ("You must edit all merge conflicts…").
+        let text = if stderr.trim().is_empty() { stdout } else { stderr };
+        Err(error_text(&text, &format!("git {} failed", args.join(" "))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -649,6 +1207,8 @@ mod tests {
                 ("core.autocrlf", "false"),
                 ("core.hooksPath", "/dev/null"),
                 ("merge.conflictStyle", "merge"),
+                // Pull flags are explicit, but a global pull.ff=only would still refuse merges.
+                ("pull.ff", "true"),
             ] {
                 self.git(&["config", key, value]);
             }
@@ -664,6 +1224,25 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(full, content).unwrap();
+        }
+
+        /// Clones `origin` into a new throwaway repository.
+        fn clone_of(origin: &TestRepo, name: &str) -> TestRepo {
+            let clone = TestRepo {
+                dir: std::env::temp_dir().join(format!("grit-test-{}-{name}", std::process::id())),
+            };
+            let _ = std::fs::remove_dir_all(&clone.dir);
+            origin.git(&["clone", "-q", origin.dir.to_str().unwrap(), clone.dir.to_str().unwrap()]);
+            clone.configure();
+            clone
+        }
+
+        fn head(&self) -> String {
+            self.git(&["rev-parse", "HEAD"]).trim().to_string()
+        }
+
+        fn read(&self, path: &str) -> String {
+            std::fs::read_to_string(self.dir.join(path)).unwrap()
         }
 
         fn write_bytes(&self, path: &str, content: &[u8]) {
@@ -1062,5 +1641,445 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         assert_eq!(files[1].orig_path.as_deref(), Some("old.rs"));
         assert_eq!(files[1].path, "new.rs");
         assert_eq!(files[2].status, "D");
+    }
+
+    fn fetch_opts(remote: Option<&str>, prune: bool) -> FetchOptions {
+        FetchOptions {
+            remote: remote.map(String::from),
+            prune,
+            ..FetchOptions::default()
+        }
+    }
+
+    fn pull_opts(rebase: bool, autostash: bool) -> PullOptions {
+        PullOptions {
+            remote: "origin".into(),
+            branch: "main".into(),
+            rebase,
+            autostash,
+        }
+    }
+
+    fn no_progress(_: &str) {}
+
+    #[test]
+    fn fetch_reports_new_updated_and_pruned_branches_and_tags() {
+        let origin = TestRepo::new("fetch-origin");
+        origin.commit_all_initial();
+        origin.git(&["branch", "doomed"]);
+        let clone = TestRepo::clone_of(&origin, "fetch-clone");
+
+        origin.write("more.txt", "more\n");
+        origin.commit_all("more");
+        origin.git(&["branch", "fresh"]);
+        origin.git(&["branch", "-D", "doomed"]);
+        origin.git(&["tag", "v1"]);
+
+        let mut lines = Vec::new();
+        let result = fetch(&clone.dir, &fetch_opts(Some("origin"), false), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            result,
+            FetchResult {
+                new_branches: vec!["origin/fresh".into()],
+                updated_branches: vec!["origin/main".into()],
+                deleted_branches: vec![],
+                new_tags: vec!["v1".into()],
+            }
+        );
+        // git's own report ("From …", "* [new branch] …") arrives as progress.
+        assert!(lines.iter().any(|l| l.contains("fresh")), "{lines:?}");
+        assert!(status(&clone.dir).unwrap().last_fetch.is_some());
+        assert_eq!(status(&clone.dir).unwrap().behind, 1);
+
+        // Branches deleted on the remote stay until pruned.
+        assert!(
+            branches(&clone.dir)
+                .unwrap()
+                .remote
+                .iter()
+                .any(|b| b.name == "origin/doomed")
+        );
+        let pruned = fetch(&clone.dir, &fetch_opts(None, true), &mut no_progress).unwrap();
+        assert_eq!(pruned.deleted_branches, vec!["origin/doomed".to_string()]);
+        assert!(
+            branches(&clone.dir)
+                .unwrap()
+                .remote
+                .iter()
+                .all(|b| b.name != "origin/doomed")
+        );
+
+        assert_eq!(
+            fetch(&clone.dir, &fetch_opts(None, true), &mut no_progress).unwrap(),
+            FetchResult::default()
+        );
+    }
+
+    #[test]
+    fn fetches_all_tags_on_request_and_every_remote() {
+        let origin = TestRepo::new("fetch-tags-origin");
+        origin.commit_all_initial();
+        let clone = TestRepo::clone_of(&origin, "fetch-tags-clone");
+        let other = TestRepo::new("fetch-tags-other");
+        other.commit_all_initial();
+        clone.git(&["remote", "add", "other", other.dir.to_str().unwrap()]);
+        assert_eq!(
+            branches(&clone.dir)
+                .unwrap()
+                .remotes
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["origin", "other"]
+        );
+
+        // A tag on a commit outside the fetched history only comes with --tags.
+        origin.git(&["switch", "-q", "-c", "side"]);
+        origin.write("side.txt", "s\n");
+        origin.commit_all("side");
+        origin.git(&["tag", "side-tag"]);
+        origin.git(&["switch", "-q", "main"]);
+        origin.git(&["branch", "-D", "side"]);
+
+        let all = fetch(&clone.dir, &fetch_opts(None, false), &mut no_progress).unwrap();
+        assert_eq!(all.new_branches, vec!["other/main".to_string()]);
+        assert!(all.new_tags.is_empty());
+
+        let opts = FetchOptions {
+            tags: true,
+            ..fetch_opts(Some("origin"), false)
+        };
+        assert_eq!(
+            fetch(&clone.dir, &opts, &mut no_progress).unwrap().new_tags,
+            vec!["side-tag".to_string()]
+        );
+    }
+
+    #[test]
+    fn fetch_errors_are_readable() {
+        let repo = TestRepo::new("fetch-errors");
+        repo.commit_all_initial();
+        let err = fetch(&repo.dir, &fetch_opts(Some("nowhere"), false), &mut no_progress).unwrap_err();
+        assert!(err.contains("nowhere"), "{err}");
+        let err = fetch(
+            &repo.dir,
+            &fetch_opts(Some("--upload-pack=touch x"), false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("not a valid remote name"), "{err}");
+        repo.git(&["remote", "add", "gone", "/does/not/exist/grit"]);
+        let err = fetch(&repo.dir, &fetch_opts(Some("gone"), false), &mut no_progress).unwrap_err();
+        assert!(err.contains("/does/not/exist/grit"), "{err}");
+    }
+
+    #[test]
+    fn pulls_fast_forward_and_reports_up_to_date() {
+        let origin = TestRepo::new("pull-ff-origin");
+        origin.commit_all_initial();
+        let clone = TestRepo::clone_of(&origin, "pull-ff-clone");
+        for name in ["a", "b"] {
+            origin.write(name, name);
+            origin.commit_all(name);
+        }
+
+        let r = pull(&clone.dir, &pull_opts(false, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming), (PullOutcome::FastForward, 2));
+        assert_eq!(clone.head(), origin.head());
+        // The remote-tracking branch moved along, so the branch is no longer behind.
+        assert_eq!(status(&clone.dir).unwrap().behind, 0);
+
+        let r = pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming), (PullOutcome::UpToDate, 0));
+    }
+
+    /// An origin and a clone that both committed on main since the clone was made.
+    fn diverged(name: &str) -> (TestRepo, TestRepo) {
+        let origin = TestRepo::new(&format!("{name}-origin"));
+        origin.write("shared.txt", "base\n");
+        origin.commit_all("base");
+        let clone = TestRepo::clone_of(&origin, &format!("{name}-clone"));
+        origin.write("theirs.txt", "theirs\n");
+        origin.commit_all("theirs");
+        clone.write("ours.txt", "ours\n");
+        clone.commit_all("ours");
+        (origin, clone)
+    }
+
+    #[test]
+    fn pulls_divergent_branches_with_a_merge() {
+        let (origin, clone) = diverged("pull-merge");
+        let before = clone.head();
+        let r = pull(&clone.dir, &pull_opts(false, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming), (PullOutcome::Merge, 1));
+        let parents = clone.git(&["rev-list", "--parents", "-n1", "HEAD"]);
+        assert_eq!(
+            parents.split_whitespace().skip(1).collect::<Vec<_>>(),
+            [before, origin.head()]
+        );
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn pulls_divergent_branches_with_a_rebase() {
+        let (origin, clone) = diverged("pull-rebase");
+        let r = pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming, r.rebased), (PullOutcome::Rebase, 1, 1));
+        assert_eq!(clone.git(&["rev-parse", "HEAD~1"]).trim(), origin.head());
+        assert_eq!(clone.read("ours.txt"), "ours\n");
+    }
+
+    #[test]
+    fn stashes_local_changes_around_a_pull_on_request() {
+        let (_origin, clone) = diverged("pull-stash");
+        clone.write("shared.txt", "local edit\n");
+
+        // Rebasing refuses to start with uncommitted changes, and nothing changes.
+        let before = clone.head();
+        let err = pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap_err();
+        assert!(err.to_lowercase().contains("unstaged changes"), "{err}");
+        assert_eq!(clone.head(), before);
+
+        let r = pull(&clone.dir, &pull_opts(true, true), &mut no_progress).unwrap();
+        assert_eq!(r.outcome, PullOutcome::Rebase);
+        assert_eq!(clone.read("shared.txt"), "local edit\n");
+        assert_eq!(clone.git(&["stash", "list"]), "");
+    }
+
+    #[test]
+    fn keeps_local_changes_in_the_stash_when_reapplying_them_conflicts() {
+        let origin = TestRepo::new("pull-stash-conflict-origin");
+        origin.write("f.txt", "base\n");
+        origin.commit_all("base");
+        let clone = TestRepo::clone_of(&origin, "pull-stash-conflict-clone");
+        origin.write("f.txt", "theirs\n");
+        origin.commit_all("theirs");
+        clone.write("f.txt", "mine\n");
+
+        let r = pull(&clone.dir, &pull_opts(false, true), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.conflicts), (PullOutcome::StashConflicts, 1));
+        assert_eq!(clone.head(), origin.head());
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+        assert_eq!(clone.git(&["stash", "list"]).lines().count(), 1);
+    }
+
+    /// Like `diverged`, but both sides changed the same line of shared.txt.
+    fn conflicting(name: &str) -> (TestRepo, TestRepo) {
+        let (origin, clone) = diverged(name);
+        origin.write("shared.txt", "theirs\n");
+        origin.commit_all("theirs edits shared");
+        clone.write("shared.txt", "ours\n");
+        clone.commit_all("ours edits shared");
+        (origin, clone)
+    }
+
+    #[test]
+    fn stops_a_conflicting_merge_for_the_user_to_abort_or_finish() {
+        let (_origin, clone) = conflicting("pull-merge-conflict");
+        let before = clone.head();
+
+        let r = pull(&clone.dir, &pull_opts(false, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.conflicts, r.incoming), (PullOutcome::Conflicts, 1, 2));
+        let op = status(&clone.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Merge);
+        let message = op.message.unwrap();
+        assert!(message.starts_with("Merge branch 'main' of "), "{message}");
+        assert!(!message.contains('#'), "{message}");
+
+        // Pulling again is refused until the merge is finished.
+        let err = pull(&clone.dir, &pull_opts(false, false), &mut no_progress).unwrap_err();
+        assert!(err.contains("merge is in progress"), "{err}");
+        assert!(skip_operation(&clone.dir).is_err());
+
+        abort_operation(&clone.dir).unwrap();
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+        assert_eq!(clone.head(), before);
+        assert_eq!(clone.read("shared.txt"), "ours\n");
+        assert!(abort_operation(&clone.dir).unwrap_err().contains("no merge or rebase"));
+
+        // This time resolve the conflict and finish the merge with the prepared message.
+        pull(&clone.dir, &pull_opts(false, false), &mut no_progress).unwrap();
+        assert!(
+            continue_operation(&clone.dir).is_err(),
+            "unresolved conflicts must block"
+        );
+        clone.write("shared.txt", "both\n");
+        stage(&clone.dir, &["shared.txt".into()]).unwrap();
+        continue_operation(&clone.dir).unwrap();
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+        let subject = clone.git(&["log", "-1", "--format=%s"]);
+        assert!(subject.starts_with("Merge branch 'main' of "), "{subject}");
+    }
+
+    #[test]
+    fn stops_a_conflicting_rebase_for_the_user_to_continue_skip_or_abort() {
+        let (origin, clone) = conflicting("pull-rebase-conflict");
+        let before = clone.head();
+
+        let r = pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.conflicts), (PullOutcome::Conflicts, 1));
+        let op = status(&clone.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Rebase);
+        assert_eq!(op.head.as_deref(), Some("main"));
+        // "ours" applies cleanly, "ours edits shared" stops.
+        assert_eq!((op.step, op.total), (Some(2), Some(2)));
+
+        abort_operation(&clone.dir).unwrap();
+        assert_eq!(clone.head(), before);
+        assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("main"));
+
+        // Resolve and continue: both local commits end up on top of the remote ones.
+        pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        let err = continue_operation(&clone.dir).unwrap_err();
+        assert!(!err.is_empty());
+        clone.write("shared.txt", "both\n");
+        stage(&clone.dir, &["shared.txt".into()]).unwrap();
+        continue_operation(&clone.dir).unwrap();
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+        assert_eq!(clone.git(&["rev-parse", "HEAD~2"]).trim(), origin.head());
+        assert_eq!(clone.git(&["log", "-1", "--format=%s"]).trim(), "ours edits shared");
+
+        // Skipping drops the conflicting commit instead.
+        let (origin, clone) = conflicting("pull-rebase-skip");
+        pull(&clone.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        skip_operation(&clone.dir).unwrap();
+        assert!(status(&clone.dir).unwrap().operation.is_none());
+        assert_eq!(clone.git(&["rev-parse", "HEAD~1"]).trim(), origin.head());
+        assert_eq!(clone.read("shared.txt"), "theirs\n");
+    }
+
+    #[test]
+    fn refuses_to_pull_without_a_branch_or_with_bad_arguments() {
+        let origin = TestRepo::new("pull-refuse-origin");
+        let first = origin.commit_all_initial();
+        let clone = TestRepo::clone_of(&origin, "pull-refuse-clone");
+        let bad = PullOptions {
+            branch: "--exec=x".into(),
+            ..pull_opts(false, false)
+        };
+        assert!(
+            pull(&clone.dir, &bad, &mut no_progress)
+                .unwrap_err()
+                .contains("not a valid branch")
+        );
+        let missing = PullOptions {
+            branch: "nope".into(),
+            ..pull_opts(false, false)
+        };
+        assert!(
+            pull(&clone.dir, &missing, &mut no_progress)
+                .unwrap_err()
+                .contains("nope")
+        );
+
+        clone.git(&["switch", "-q", "--detach", &first]);
+        assert!(
+            pull(&clone.dir, &pull_opts(false, false), &mut no_progress)
+                .unwrap_err()
+                .contains("detached")
+        );
+    }
+
+    #[test]
+    fn detects_cherry_picks_in_progress() {
+        let repo = TestRepo::new("cherry-pick");
+        repo.write("f.txt", "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", "other\n");
+        let pick = repo.commit_all("other");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("f.txt", "main\n");
+        repo.commit_all("main");
+        assert!(run(&repo.dir, &["cherry-pick", &pick]).is_err());
+
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::CherryPick);
+        abort_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(repo.read("f.txt"), "main\n");
+    }
+
+    #[test]
+    fn background_fetches_never_prompt() {
+        let repo = TestRepo::new("network-env");
+        assert!(network_env(&repo.dir, false).is_empty());
+        let env = network_env(&repo.dir, true);
+        assert!(env.contains(&("GCM_INTERACTIVE", "never")));
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
+            assert!(env.contains(&("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")));
+        }
+        // A configured ssh command is the user's choice and is left alone.
+        repo.git(&["config", "core.sshCommand", "ssh -i ~/.ssh/work"]);
+        assert!(
+            network_env(&repo.dir, true)
+                .iter()
+                .all(|(k, _)| *k != "GIT_SSH_COMMAND")
+        );
+    }
+
+    #[test]
+    fn parses_remotes() {
+        let remotes = parse_remotes(
+            "origin\tgit@github.com:a/b.git (fetch)\norigin\tgit@github.com:a/b.git (push)\n\
+             up stream\t/path with space (fetch)\nup stream\t/path with space (push)\n",
+        );
+        assert_eq!(
+            remotes,
+            vec![
+                Remote {
+                    name: "origin".into(),
+                    url: "git@github.com:a/b.git".into()
+                },
+                Remote {
+                    name: "up stream".into(),
+                    url: "/path with space".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cleans_progress_out_of_errors() {
+        let stderr = "remote: Enumerating objects: 5, done.\n\
+                      remote: Counting objects:  50% (2/4)\rremote: Counting objects: 100% (4/4), done.\n\
+                      Receiving objects:  10% (1/10)\rReceiving objects: 100% (10/10), done.\n\
+                      fatal: unable to access 'https://example.com/': Could not resolve host\n";
+        assert_eq!(
+            error_text(stderr, "fallback"),
+            "fatal: unable to access 'https://example.com/': Could not resolve host"
+        );
+        assert_eq!(error_text("Receiving objects: 100% (1/1)\n", "fallback"), "fallback");
+    }
+
+    #[test]
+    fn diffs_ref_snapshots() {
+        let snapshot = |refs: &[(&str, &str)]| -> HashMap<String, String> {
+            refs.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect()
+        };
+        let before = snapshot(&[
+            ("refs/remotes/origin/main", "1"),
+            ("refs/remotes/origin/old", "2"),
+            ("refs/tags/v1", "3"),
+        ]);
+        let after = snapshot(&[
+            ("refs/remotes/origin/main", "4"),
+            ("refs/remotes/origin/b", "5"),
+            ("refs/remotes/origin/a", "5"),
+            ("refs/tags/v1", "3"),
+            ("refs/tags/v2", "6"),
+        ]);
+        assert_eq!(
+            FetchResult::diff(&before, &after),
+            FetchResult {
+                new_branches: vec!["origin/a".into(), "origin/b".into()],
+                updated_branches: vec!["origin/main".into()],
+                deleted_branches: vec!["origin/old".into()],
+                new_tags: vec!["v2".into()],
+            }
+        );
     }
 }

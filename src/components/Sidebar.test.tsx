@@ -15,6 +15,7 @@ const branches: Branches = {
     { name: "origin/new-work", sha: "c", current: false, upstream: null, track: null },
   ],
   tags: [{ name: "v1.0", sha: "a", current: false, upstream: null, track: null }],
+  remotes: [{ name: "origin", url: "git@example.com:demo.git" }],
 };
 
 function setup() {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Fetch: the Fetch button (or Ctrl/Cmd+Shift+F) fetches one remote or all of them, optionally pruning remote branches deleted on the remote and fetching all tags. git's progress is shown while it runs, followed by a summary of new, updated and pruned branches and new tags
+- Pull: the Pull button (or Ctrl/Cmd+Shift+L) shows how far behind the upstream the branch is and pulls a remote branch into the current one, by merge or rebase, optionally stashing and reapplying local changes. The result says what happened (fast-forward, merge, rebase or already up to date). The dialogs remember their options
+- When a pull, merge, rebase, cherry-pick or revert stops on conflicts, a banner explains what to do and offers to continue, skip the commit or abort; a merge in progress can be committed from the banner or with its prepared message in the commit box
+- Automatic fetching: open repositories fetch all remotes in the background (every 10 minutes by default, configurable or off in Settings). Automatic fetches never prompt for credentials, and a failure shows quietly on the Fetch button, which also tells when the repository was last fetched
+
 ## [0.2.0] - 2026-11-15
 
 ### Added
