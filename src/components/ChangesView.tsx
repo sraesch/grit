@@ -97,9 +97,11 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const select = (f: FileChange, isStaged: boolean) =>
     setSelection({ path: f.path, staged: isStaged, untracked: f.status === "?" });
 
-  const stageFile = (f: FileChange) => run(() => api.stage(repo, [f.path]));
-  const unstageFile = (f: FileChange) =>
-    run(() => api.unstage(repo, f.origPath ? [f.origPath, f.path] : [f.path]));
+  const stageFiles = (files: FileChange[]) => run(() => api.stage(repo, files.map((f) => f.path)));
+  const unstageFiles = (files: FileChange[]) =>
+    run(() => api.unstage(repo, files.flatMap((f) => (f.origPath ? [f.origPath, f.path] : [f.path]))));
+  const stageFile = (f: FileChange) => stageFiles([f]);
+  const unstageFile = (f: FileChange) => unstageFiles([f]);
 
   async function doCommit() {
     if (!message.trim()) return;
@@ -148,6 +150,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
                 onSelect={(f) => select(f, false)}
                 actionLabel="Mark resolved"
                 onAction={stageFile}
+                onFolderAction={stageFiles}
               />
             )}
             <FileList
@@ -157,6 +160,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               onActivate={stageFile}
               actionLabel="Stage"
               onAction={stageFile}
+              onFolderAction={stageFiles}
             />
             {unstaged.length + conflicted.length === 0 && <div className="empty small">Working tree clean</div>}
           </div>
@@ -178,6 +182,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               onActivate={unstageFile}
               actionLabel="Unstage"
               onAction={unstageFile}
+              onFolderAction={unstageFiles}
             />
             {staged.length === 0 && <div className="empty small">Nothing staged</div>}
           </div>

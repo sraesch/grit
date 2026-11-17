@@ -108,6 +108,32 @@ describe("ChangesView", () => {
     );
   });
 
+  it("stages and unstages the files listed in a folder", async () => {
+    const { onChanged } = setup({
+      status: makeStatus({
+        unstaged: [file("src/a.ts"), file("src/lib/b.ts"), file("top.txt")],
+        conflicted: [file("src/c.ts", "U")],
+        staged: [file("lib/x.rs", "A"), file("lib/y.rs", "R", "lib/old.rs")],
+      }),
+    });
+    const unstagedSrc = screen.getAllByText("src")[1].closest("li")!;
+    await userEvent.click(within(unstagedSrc).getByRole("button", { name: "Stage" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(invokeMock).toHaveBeenCalledWith("stage", {
+      repo: "/repo",
+      paths: ["src/lib/b.ts", "src/a.ts"],
+    });
+    expect(unstagedSrc).toHaveAttribute("aria-expanded", "true");
+
+    const lib = screen.getAllByText("lib").pop()!.closest("li")!;
+    await userEvent.click(within(lib).getByRole("button", { name: "Unstage" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+    expect(invokeMock).toHaveBeenCalledWith("unstage", {
+      repo: "/repo",
+      paths: ["lib/x.rs", "lib/old.rs", "lib/y.rs"],
+    });
+  });
+
   it("stages and unstages everything", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: "Stage all" }));
