@@ -1232,7 +1232,16 @@ mod tests {
                 dir: std::env::temp_dir().join(format!("grit-test-{}-{name}", std::process::id())),
             };
             let _ = std::fs::remove_dir_all(&clone.dir);
-            origin.git(&["clone", "-q", origin.dir.to_str().unwrap(), clone.dir.to_str().unwrap()]);
+            // Set before the checkout: Git for Windows enables core.autocrlf system-wide, which
+            // would check files out with CRLF that then show up as changes once it is turned off.
+            origin.git(&[
+                "clone",
+                "-q",
+                "-c",
+                "core.autocrlf=false",
+                origin.dir.to_str().unwrap(),
+                clone.dir.to_str().unwrap(),
+            ]);
             clone.configure();
             clone
         }
