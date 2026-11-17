@@ -18,6 +18,7 @@ const openMock = vi.mocked(open);
 
 let emitRepoChanged: (payload: RepoChanged) => void = () => {};
 let emitProgress: (payload: GitProgress) => void = () => {};
+let emitOpenSettings: () => void = () => {};
 
 function backend(statusFn = () => makeStatus({ unstaged: [file("a.txt")] })) {
   mockBackend(invokeMock, {
@@ -35,6 +36,7 @@ describe("App", () => {
     const emit = (event: string, payload: unknown) => handlers.get(event)?.forEach((h) => h({ payload }));
     emitRepoChanged = (payload) => emit("repo-changed", payload);
     emitProgress = (payload) => emit("git-progress", payload);
+    emitOpenSettings = () => emit("open-settings", null);
     listenMock.mockImplementation(async (event, handler) => {
       const h = handler as (e: { payload: unknown }) => void;
       if (!handlers.has(event)) handlers.set(event, new Set());
@@ -81,6 +83,14 @@ describe("App", () => {
 
     await userEvent.keyboard("{Control>},{/Control}");
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("opens the settings from the app menu", async () => {
+    mockBackend(invokeMock, { get_settings: () => ({ reposDir: null }) });
+    render(<App />);
+    await waitFor(() => expect(listenMock).toHaveBeenCalledWith("open-settings", expect.any(Function)));
+    act(() => emitOpenSettings());
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   });
 
   it("reopens the last repository on start", async () => {

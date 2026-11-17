@@ -1,5 +1,7 @@
 mod git;
 mod graph;
+#[cfg(target_os = "macos")]
+mod menu;
 mod settings;
 mod watcher;
 
@@ -217,7 +219,11 @@ fn set_settings(store: State<'_, SettingsStore>, settings: Settings) -> Result<S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Elsewhere there is no app menu; the toolbar's settings button and Ctrl+, open the settings.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(menu::on_event);
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WatchState::default())

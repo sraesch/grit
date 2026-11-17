@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pull: the Pull button (or Ctrl/Cmd+Shift+L) shows how far behind the upstream the branch is and pulls a remote branch into the current one, by merge or rebase, optionally stashing and reapplying local changes. The result says what happened (fast-forward, merge, rebase or already up to date). The dialogs remember their options
 - When a pull, merge, rebase, cherry-pick or revert stops on conflicts, a banner explains what to do and offers to continue, skip the commit or abort; a merge in progress can be committed from the banner or with its prepared message in the commit box
 - Automatic fetching: open repositories fetch all remotes in the background (every 10 minutes by default, configurable or off in Settings). Automatic fetches never prompt for credentials, and a failure shows quietly on the Fetch button, which also tells when the repository was last fetched
+- macOS: "Settings…" (Cmd+,) in the app menu opens the settings
 
 ## [0.2.0] - 2026-11-15
 

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, RepoInfo, Settings } from "./api";
@@ -107,6 +108,14 @@ function App() {
       cancelled = true;
     };
   }, [hasTabs, settings]);
+
+  // "Settings…" in the macOS app menu.
+  useEffect(() => {
+    const unlisten = listen("open-settings", () => setSettingsOpen(true));
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // App-wide shortcuts: settings, opening, closing and cycling through tabs.
   useEffect(() => {
