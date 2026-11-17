@@ -61,7 +61,7 @@ export function parseTrack(track: string | null): { ahead: number; behind: numbe
   return { ahead: n("ahead"), behind: n("behind"), gone: track === "[gone]" };
 }
 
-const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+export const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
 /** "Fetched origin: 1 new branch, 2 updated, 1 pruned, 3 new tags". */
 export function fetchSummary(result: FetchResult, remote: string | null): string {
@@ -192,6 +192,10 @@ export interface PushPrefs {
   tags: boolean;
 }
 
+export interface RebasePrefs {
+  autostash: boolean;
+}
+
 function readPrefs<T extends object>(key: string, defaults: T): T {
   try {
     const stored = JSON.parse(localStorage.getItem(key) ?? "null");
@@ -214,7 +218,7 @@ function savePrefs(key: string, prefs: object) {
   }
 }
 
-/** The fetch, pull and push dialogs remember their options, as Fork does. */
+/** The fetch, pull, push and rebase dialogs remember their options, as Fork does. */
 export const prefs = {
   fetch: () => readPrefs<FetchPrefs>("fetchOptions", { prune: true, tags: false }),
   saveFetch: (p: FetchPrefs) => savePrefs("fetchOptions", p),
@@ -222,4 +226,6 @@ export const prefs = {
   savePull: (p: PullPrefs) => savePrefs("pullOptions", p),
   push: () => readPrefs<PushPrefs>("pushOptions", { tags: false }),
   savePush: (p: PushPrefs) => savePrefs("pushOptions", p),
+  rebase: () => readPrefs<RebasePrefs>("rebaseOptions", { autostash: true }),
+  saveRebase: (p: RebasePrefs) => savePrefs("rebaseOptions", p),
 };

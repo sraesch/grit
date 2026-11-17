@@ -24,8 +24,8 @@ interface DialogProps {
   children: ReactNode;
 }
 
-/** Modal form shared by the fetch, pull and push dialogs: Enter submits, Escape and Cancel close. */
-function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
+/** Modal form shared by the fetch, pull, push and rebase dialogs: Enter submits, Escape and Cancel close. */
+export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
   const formRef = useRef<HTMLFormElement>(null);
 
   // Start on the first field, so the keyboard works right away.
