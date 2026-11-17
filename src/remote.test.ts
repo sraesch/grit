@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { Branch, Branches, Operation, PullResult } from "./api";
+import { Branch, Branches, Operation, PullResult, PushResult } from "./api";
 import {
   autoFetchDue,
   defaultFetchRemote,
+  defaultPushTarget,
   fetchSummary,
   operationTitle,
+  parseTrack,
   prefs,
   pullSources,
   pullSummary,
+  pushSummary,
   splitRemoteBranch,
 } from "./remote";
 import { makeStatus } from "./test/tauri";
@@ -159,6 +162,71 @@ describe("operationTitle", () => {
   });
 });
 
+describe("defaultPushTarget", () => {
+  const branches: Branches = {
+    local: [
+      { ...branch("main"), upstream: "upstream/main" },
+      { ...branch("team/x"), upstream: "team/ui/x" },
+      branch("feature"),
+    ],
+    remote: [],
+    tags: [],
+    remotes: [remote("origin"), remote("upstream"), remote("team/ui")],
+  };
+
+  it("pushes to the upstream", () => {
+    expect(defaultPushTarget("main", branches, null)).toEqual({ remote: "upstream", remoteBranch: "main" });
+    expect(defaultPushTarget("team/x", branches, null)).toEqual({ remote: "team/ui", remoteBranch: "x" });
+  });
+
+  it("otherwise pushes to the same name on the default remote", () => {
+    expect(defaultPushTarget("feature", branches, null)).toEqual({ remote: "origin", remoteBranch: "feature" });
+    expect(defaultPushTarget("feature", { ...branches, remotes: [] }, null)).toBeNull();
+  });
+});
+
+describe("parseTrack", () => {
+  it("reads ahead, behind and gone", () => {
+    expect(parseTrack("[ahead 3, behind 12]")).toEqual({ ahead: 3, behind: 12, gone: false });
+    expect(parseTrack("[behind 1]")).toEqual({ ahead: 0, behind: 1, gone: false });
+    expect(parseTrack("[gone]")).toEqual({ ahead: 0, behind: 0, gone: true });
+    expect(parseTrack(null)).toEqual({ ahead: 0, behind: 0, gone: false });
+  });
+});
+
+describe("pushSummary", () => {
+  const result = (partial: Partial<PushResult>): PushResult => ({
+    outcome: "pushed",
+    commits: 0,
+    newTags: [],
+    rejectedTags: [],
+    ...partial,
+  });
+  const summary = (partial: Partial<PushResult>) => pushSummary(result(partial), "main", "origin/main");
+
+  it("describes successful pushes", () => {
+    expect(summary({ commits: 1 })).toEqual({ kind: "info", text: "Pushed 1 commit from main to origin/main" });
+    expect(summary({ outcome: "up-to-date" }).text).toBe("origin/main is already up to date with main");
+    expect(summary({ outcome: "new-branch", commits: 3, newTags: ["v1", "v2"] }).text).toBe(
+      "Pushed main to the new branch origin/main, with 2 new tags",
+    );
+    expect(summary({ outcome: "forced", commits: 2 }).text).toBe("Force pushed main to origin/main");
+  });
+
+  it("warns about rejected pushes and tags", () => {
+    expect(summary({ outcome: "rejected" })).toEqual({
+      kind: "warning",
+      text: "Push rejected: origin/main has commits that main doesn't have. Pull them first, or force push to overwrite them.",
+    });
+    expect(summary({ outcome: "stale" }).text).toMatch(/^Force push refused: origin\/main has commits you haven't pulled/);
+    expect(summary({ commits: 1, newTags: ["v2"], rejectedTags: ["v1"] })).toEqual({
+      kind: "warning",
+      text: "Pushed 1 commit from main to origin/main, with 1 new tag. The remote already has a different tag v1, which was not pushed",
+    });
+    expect(summary({ outcome: "up-to-date", rejectedTags: ["a", "b"] }).text).toMatch(/different tags a, b, which were not pushed$/);
+  });
+});
+
 describe("prefs", () => {
   it("remembers the dialog options and ignores broken values", () => {
     expect(prefs.pull()).toEqual({ rebase: false, autostash: true });
@@ -169,5 +237,9 @@ describe("prefs", () => {
     expect(prefs.fetch()).toEqual({ prune: true, tags: true });
     localStorage.setItem("fetchOptions", "{broken");
     expect(prefs.fetch()).toEqual({ prune: true, tags: false });
+
+    expect(prefs.push()).toEqual({ tags: false });
+    prefs.savePush({ tags: true });
+    expect(prefs.push()).toEqual({ tags: true });
   });
 });

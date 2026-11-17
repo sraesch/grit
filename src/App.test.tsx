@@ -50,6 +50,10 @@ describe("App", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "grit" })).toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalled();
+    // The toolbar keeps its place, with nothing to fetch, pull or push.
+    for (const name of ["Fetch", "Pull", "Push"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
   });
 
   it("opens a repository chosen in the dialog and remembers it", async () => {
@@ -163,6 +167,37 @@ describe("App", () => {
       expect(screen.getByText("beta.txt")).not.toBeVisible();
       expect(localStorage.getItem("openRepos")).toBe(JSON.stringify(["/work/alpha", "/work/beta"]));
       expect(localStorage.getItem("activeRepo")).toBe("/work/alpha");
+    });
+
+    it("shows the active tab's fetch, pull and push in the toolbar", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: nameOf(path as string) }),
+        get_settings: () => ({ reposDir: null }),
+        get_status: ({ repo }) =>
+          makeStatus({ upstream: "origin/main", ...(repo === "/work/alpha" ? { ahead: 3 } : { behind: 4 }) }),
+        get_log: () => [],
+        get_branches: () => ({
+          local: [{ name: "main", sha: "a", current: true, upstream: "origin/main", track: null }],
+          remote: [{ name: "origin/main", sha: "b", current: false, upstream: null, track: null }],
+          tags: [],
+          remotes: [{ name: "origin", url: "/srv/repo.git" }],
+        }),
+      });
+      render(<App />);
+      await openViaDialog("/work/alpha");
+      await openViaDialog("/work/beta");
+      const toolbarButton = (name: RegExp) => within(screen.getByRole("banner")).getByRole("button", { name });
+
+      // Only the active tab's buttons are there, with its counts.
+      await waitFor(() => expect(toolbarButton(/^Pull/)).toHaveTextContent("Pull4"));
+      expect(toolbarButton(/^Push/)).toHaveTextContent(/^Push$/);
+      await userEvent.click(tab("alpha"));
+      await waitFor(() => expect(toolbarButton(/^Push/)).toHaveTextContent("Push3"));
+      expect(toolbarButton(/^Pull/)).toHaveTextContent(/^Pull$/);
+      expect(within(screen.getByRole("banner")).getAllByRole("button", { name: /^Fetch/ })).toHaveLength(1);
+
+      await userEvent.click(toolbarButton(/^Push/));
+      expect(screen.getByRole("dialog", { name: "Push" })).toBeInTheDocument();
     });
 
     it("shows the existing tab when a repository is opened again", async () => {
@@ -338,7 +373,7 @@ describe("App", () => {
     });
   });
 
-  describe("fetch and pull", () => {
+  describe("fetch, pull and push", () => {
     const now = () => Math.floor(Date.now() / 1000);
     let status: Status;
     let settings: Settings | null;
@@ -496,6 +531,62 @@ describe("App", () => {
       await userEvent.click(screen.getByRole("button", { name: "Abort merge" }));
       expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
       await waitFor(() => expect(screen.queryByText("Merge in progress")).toBeNull());
+    });
+
+    const pushButton = () => screen.getByRole("button", { name: /^Push/ });
+
+    it("pushes the current branch to its upstream and reports the result", async () => {
+      status = makeStatus({ upstream: "origin/main", ahead: 1, lastFetch: now() });
+      mockBackend(invokeMock, {
+        ...handlers,
+        push: () => {
+          status = makeStatus({ upstream: "origin/main", lastFetch: now() });
+          return { outcome: "pushed", commits: 1, newTags: [], rejectedTags: [] };
+        },
+      });
+      await ready();
+      expect(pushButton()).toHaveTextContent("Push1");
+
+      await userEvent.keyboard("{Control>}{Shift>}P{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Push" });
+      expect(within(dialog).getByLabelText("Branch")).toHaveDisplayValue("main");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Push" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("push", {
+        repo: "/work/demo",
+        branch: "main",
+        remote: "origin",
+        remoteBranch: "main",
+        setUpstream: false,
+        tags: false,
+        force: false,
+      });
+      expect(await screen.findByText("Pushed 1 commit from main to origin/main")).toBeInTheDocument();
+      await waitFor(() => expect(pushButton()).toHaveTextContent(/^Push$/));
+    });
+
+    it("offers to pull or force push when a push is rejected", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        push: ({ force }) =>
+          force
+            ? { outcome: "forced", commits: 1, newTags: [], rejectedTags: [] }
+            : { outcome: "rejected", commits: 0, newTags: [], rejectedTags: [] },
+      });
+      await ready();
+      await userEvent.click(pushButton());
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Push" })).getByRole("button", { name: "Push" }));
+
+      expect(await screen.findByText(/^Push rejected: origin\/main has commits/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Pull…" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Force Push…" }));
+
+      const dialog = screen.getByRole("dialog", { name: "Push" });
+      expect(within(dialog).getByLabelText("Force push")).toBeChecked();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Force Push" }));
+      expect(invokeMock).toHaveBeenCalledWith("push", expect.objectContaining({ branch: "main", force: true }));
+      expect(await screen.findByText("Force pushed main to origin/main")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Force Push…" })).toBeNull();
     });
 
     it("fetches in the background when the last fetch is older than the interval", async () => {

@@ -1,19 +1,31 @@
 import { FormEvent, KeyboardEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FetchOptions, PullOptions, Remote, Status } from "../api";
-import { ALL_REMOTES, FetchPrefs, prefs, PullPrefs, splitRemoteBranch } from "../remote";
+import { Branches, FetchOptions, PullOptions, PushOptions, Remote, Status } from "../api";
+import {
+  ALL_REMOTES,
+  defaultPushTarget,
+  FetchPrefs,
+  parseTrack,
+  prefs,
+  PullPrefs,
+  PushPrefs,
+  PushTarget,
+  splitRemoteBranch,
+} from "../remote";
 
 interface DialogProps {
   id: string;
   title: string;
   submitLabel: string;
+  /** Marks the submit button as destructive, e.g. for a force push. */
+  danger?: boolean;
   canSubmit: boolean;
   onSubmit: () => void;
   onClose: () => void;
   children: ReactNode;
 }
 
-/** Modal form shared by the fetch and pull dialogs: Enter submits, Escape and Cancel close. */
-function Dialog({ id, title, submitLabel, canSubmit, onSubmit, onClose, children }: DialogProps) {
+/** Modal form shared by the fetch, pull and push dialogs: Enter submits, Escape and Cancel close. */
+function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
   const formRef = useRef<HTMLFormElement>(null);
 
   // Start on the first field, so the keyboard works right away.
@@ -67,7 +79,7 @@ function Dialog({ id, title, submitLabel, canSubmit, onSubmit, onClose, children
           <button type="button" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!canSubmit}>
+          <button type="submit" className={danger ? "primary danger" : "primary"} disabled={!canSubmit}>
             {submitLabel}
           </button>
         </footer>
@@ -221,6 +233,159 @@ export function PullDialog({ branch, status, remotes, sources, preferred, onPull
           {options.rebase
             ? "A rebase won't start until they are stashed or committed."
             : "The pull stops if it would overwrite them."}
+        </p>
+      )}
+    </Dialog>
+  );
+}
+
+interface PushDialogProps {
+  branches: Branches;
+  status: Status | null;
+  /** The local branch to preselect, usually the current one. */
+  branch: string;
+  /** Where to push it; defaults to the branch's upstream. */
+  target?: PushTarget;
+  /** Start with force push checked, e.g. after a rejected push. */
+  force?: boolean;
+  onPush: (options: PushOptions) => void;
+  onClose: () => void;
+}
+
+/** Choose a local branch and the remote branch to push it to, with tags, tracking and force. */
+export function PushDialog({ branches, status, branch: initialBranch, target, force: initialForce = false, onPush, onClose }: PushDialogProps) {
+  const [branch, setBranch] = useState(initialBranch);
+  const initialTarget = target ?? defaultPushTarget(initialBranch, branches, status);
+  const [remote, setRemote] = useState(initialTarget?.remote ?? branches.remotes[0]?.name ?? "");
+  const [remoteBranch, setRemoteBranch] = useState(initialTarget?.remoteBranch ?? initialBranch);
+  const [options, setOptions] = useState<PushPrefs>(prefs.push);
+  const [force, setForce] = useState(initialForce);
+
+  const local = branches.local.find((b) => b.name === branch);
+  const name = remoteBranch.trim();
+  const full = `${remote}/${name}`;
+  const exists = branches.remote.some((b) => b.name === full);
+  const isUpstream = !!local?.upstream && local.upstream === full;
+  // Tracking is offered when it would change something; a branch without upstream gets it by default.
+  const [setUpstream, setSetUpstream] = useState(!local?.upstream);
+  const valid = !!remote && !!name && !name.startsWith("-") && !/[\s:]/.test(name);
+  const remoteBranches = branches.remote
+    .map((b) => splitRemoteBranch(b.name, branches.remotes))
+    .filter((b) => b?.remote === remote)
+    .map((b) => b!.branch);
+
+  function chooseBranch(next: string) {
+    setBranch(next);
+    const t = defaultPushTarget(next, branches, status);
+    if (t) {
+      setRemote(t.remote);
+      setRemoteBranch(t.remoteBranch);
+    }
+    setSetUpstream(!branches.local.find((b) => b.name === next)?.upstream);
+  }
+
+  function submit() {
+    if (!valid) return;
+    prefs.savePush(options);
+    onPush({ branch, remote, remoteBranch: name, setUpstream: setUpstream && !isUpstream, tags: options.tags, force });
+  }
+
+  let hint: string;
+  let behind = 0;
+  if (!name) {
+    hint = "Enter the name of the branch on the remote.";
+  } else if (!exists) {
+    hint = `Creates the branch ${full}.`;
+  } else if (isUpstream) {
+    const track = parseTrack(local.track);
+    behind = track.behind;
+    hint = track.ahead
+      ? `Pushes ${track.ahead} ${track.ahead === 1 ? "commit" : "commits"} to ${full}.`
+      : `${full} was up to date with ${branch} at the last fetch.`;
+  } else {
+    hint = local?.upstream ? `${full} is not the upstream of ${branch} (${local.upstream}).` : `Pushes to ${full}.`;
+  }
+
+  return (
+    <Dialog
+      id="push"
+      title="Push"
+      submitLabel={force ? "Force Push" : "Push"}
+      danger={force}
+      canSubmit={valid}
+      onSubmit={submit}
+      onClose={onClose}
+    >
+      <label className="settings-label" htmlFor="push-branch">
+        Branch
+      </label>
+      <div className="settings-row">
+        <select id="push-branch" value={branch} onChange={(e) => chooseBranch(e.target.value)}>
+          {branches.local.map((b) => (
+            <option key={b.name} value={b.name}>
+              {b.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <span className="settings-label push-to-label" id="push-to">
+        To
+      </span>
+      <div className="settings-row push-target" role="group" aria-labelledby="push-to">
+        <select aria-label="Remote" value={remote} onChange={(e) => setRemote(e.target.value)}>
+          {branches.remotes.map((r) => (
+            <option key={r.name} value={r.name}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+        <span aria-hidden="true">/</span>
+        <input
+          aria-label="Remote branch"
+          aria-describedby="push-hint"
+          aria-invalid={!!name && !valid}
+          list="push-remote-branches"
+          value={remoteBranch}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          onChange={(e) => setRemoteBranch(e.target.value)}
+        />
+        <datalist id="push-remote-branches">
+          {remoteBranches.map((b) => (
+            <option key={b} value={b} />
+          ))}
+        </datalist>
+      </div>
+      <p id="push-hint" className="settings-hint">
+        {hint}
+      </p>
+      <div className="dialog-options">
+        <label className="checkbox">
+          <input type="checkbox" checked={options.tags} onChange={(e) => setOptions({ tags: e.target.checked })} />
+          Push all tags
+        </label>
+        {!isUpstream && (
+          <label className="checkbox">
+            <input type="checkbox" checked={setUpstream} onChange={(e) => setSetUpstream(e.target.checked)} />
+            Track {name ? full : "the remote branch"} (set as upstream)
+          </label>
+        )}
+        <label className="checkbox">
+          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+          Force push
+        </label>
+      </div>
+      {force && exists && (
+        <p className="settings-hint warning-text" role="note">
+          Replaces {full} with {branch}: commits on {full} that {branch} doesn't have are removed from it. To protect
+          other people's work, the push is refused if {full} has commits you haven't pulled.
+        </p>
+      )}
+      {!force && behind > 0 && (
+        <p className="settings-hint warning-text" role="note">
+          {full} has {behind} {behind === 1 ? "commit" : "commits"} that {branch} doesn't have, so the push will be
+          rejected. Pull first, or force push to overwrite {behind === 1 ? "it" : "them"}.
         </p>
       )}
     </Dialog>

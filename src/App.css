@@ -3,6 +3,8 @@
   --bg-alt: #f5f6f8;
   --bg-hover: #eceef2;
   --bg-selected: #dbe8fd;
+  /* The selected repository tab, raised above the tab bar. */
+  --bg-tab: #ffffff;
   --border: #dfe2e7;
   --text: #1f2328;
   --text-muted: #6b7280;
@@ -38,6 +40,7 @@
     --bg-alt: #26282c;
     --bg-hover: #2f3237;
     --bg-selected: #213a63;
+    --bg-tab: #3a3d43;
     --border: #36393f;
     --text: #e3e5e8;
     --text-muted: #8b919a;
@@ -150,76 +153,165 @@ button.small {
   user-select: none;
 }
 
+/* Main toolbar: icon buttons with their label underneath, as in Fork */
+
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--bg);
+}
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.toolbar-button {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 58px;
+  padding: 4px 8px 3px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+}
+.toolbar-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.toolbar-button:disabled {
+  opacity: 0.4;
+}
+.toolbar-icon {
+  display: grid;
+  place-items: center;
+  height: 22px;
+}
+.toolbar-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.toolbar-button:hover:not(:disabled) .toolbar-label {
+  color: var(--text);
+}
+/* On the top right of the icon. */
+.toolbar-badge {
+  position: absolute;
+  top: 1px;
+  left: calc(50% + 6px);
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.toolbar-badge.warning {
+  background: var(--warn-text);
+  color: var(--bg);
+}
+.toolbar-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: var(--border);
+}
+/* Repository tabs: equal-width pills under the toolbar, the selected one raised */
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: var(--bg-alt);
 }
-/* Repository tabs */
-
 .repo-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
+  flex: 1;
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 .repo-tab-item {
+  position: relative;
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
-  min-width: 70px;
-  max-width: 220px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  flex: 1 1 0;
+  min-width: 90px;
+  height: 26px;
+  border-radius: 7px;
   color: var(--text-muted);
 }
-.repo-tab-item:hover {
+/* Thin separators between unselected tabs. */
+.repo-tab-item + .repo-tab-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border);
+}
+.repo-tab-item.selected::before,
+.repo-tab-item.selected + .repo-tab-item::before,
+.repo-tab-item:hover::before,
+.repo-tab-item:hover + .repo-tab-item::before {
+  display: none;
+}
+.repo-tab-item:hover:not(.selected) {
   background: var(--bg-hover);
 }
 .repo-tab-item.selected {
-  background: var(--bg);
-  border-color: var(--border);
+  background: var(--bg-tab);
   color: var(--text);
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px rgb(0 0 0 / 0.06);
 }
 .repo-tab-label {
   flex: 1;
   min-width: 0;
+  height: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   border: none;
   background: none;
   color: inherit;
-  padding: 3px 4px 3px 10px;
-  text-align: left;
-}
-.repo-tab-item.selected .repo-tab-label {
-  font-weight: 600;
+  /* Room for the close button on both sides keeps the name centered. */
+  padding: 0 26px;
+  text-align: center;
 }
 .repo-tab-label:hover:not(:disabled),
 .repo-tab-close:hover:not(:disabled) {
   background: none;
 }
 .repo-tab-close {
-  flex: none;
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   border: none;
   background: none;
   color: var(--text-muted);
-  padding: 0 7px 1px;
-  margin-right: 2px;
+  padding: 0 5px 1px;
   border-radius: 4px;
   font-size: 15px;
-  line-height: 20px;
-  /* Hidden until the tab is hovered or selected, like in browsers. */
+  line-height: 18px;
+  /* Hidden until the tab is hovered, like in Fork and Safari. */
   opacity: 0;
 }
 .repo-tab-item:hover .repo-tab-close,
-.repo-tab-item.selected .repo-tab-close,
 .repo-tab-close:focus-visible {
   opacity: 1;
 }
@@ -229,9 +321,15 @@ button.small {
 }
 .repo-tab-add {
   flex: none;
-  padding: 1px 9px 3px;
-  font-size: 15px;
-  line-height: 18px;
+  padding: 0 8px 2px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 24px;
+}
+.repo-tab-add:hover:not(:disabled) {
+  color: var(--text);
 }
 
 .repo-tab {
@@ -383,27 +481,8 @@ button.small {
   color: var(--accent);
 }
 
-/* Fetch and pull */
+/* Fetch, pull and push */
 
-.remote-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.remote-button .count {
-  line-height: 15px;
-}
-.remote-warning {
-  display: inline-grid;
-  place-items: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--warn-text);
-  color: var(--bg);
-  font-size: 10px;
-  font-weight: 700;
-}
 .remote-status {
   display: inline-flex;
   align-items: center;
@@ -430,6 +509,17 @@ button.small {
 .remote-status.notice-warning {
   background: var(--warn-bg);
   color: var(--warn-text);
+}
+.notice-action {
+  flex: none;
+  padding: 0 7px;
+  color: inherit;
+  border-color: currentColor;
+  background: transparent;
+  line-height: 16px;
+}
+.notice-action:hover:not(:disabled) {
+  background: rgb(0 0 0 / 0.08);
 }
 .notice-dismiss {
   padding: 0 5px;
@@ -482,6 +572,15 @@ button.small {
 }
 button.danger {
   color: var(--danger);
+}
+button.primary.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  /* The page background contrasts with the danger red in both themes. */
+  color: var(--bg);
+}
+button.primary.danger:hover:not(:disabled) {
+  background: var(--danger);
 }
 .spacer {
   flex: 1;
@@ -550,7 +649,8 @@ button.danger {
   color: var(--text);
 }
 .toolbar .logo-tile {
-  margin-right: 2px;
+  flex: none;
+  margin-right: 4px;
 }
 
 .main {
@@ -1292,8 +1392,18 @@ body.resizing-vertical {
   font-size: 13px;
   color: var(--text);
 }
-.warning-text {
+.warning-text,
+.settings-hint.warning-text {
   color: var(--warn-text);
+}
+.push-to-label {
+  margin-top: 12px;
+}
+.push-target {
+  align-items: center;
+}
+.push-target select {
+  flex: 0 1 35%;
 }
 .settings-row input[aria-invalid="true"] {
   border-color: var(--danger);

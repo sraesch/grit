@@ -1,21 +1,46 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, Branches, errorMessage, FetchOptions, GitProgress, LogEntry, PullOptions, RepoChanged, RepoInfo, Status } from "../api";
+import { createPortal } from "react-dom";
+import {
+  api,
+  Branches,
+  errorMessage,
+  FetchOptions,
+  GitProgress,
+  LogEntry,
+  PullOptions,
+  PushOptions,
+  RepoChanged,
+  RepoInfo,
+  Status,
+} from "../api";
 import { switchTo, SwitchTarget } from "../branches";
-import { autoFetchDue, defaultFetchRemote, fetchSummary, NoticeKind, pullSources, pullSummary } from "../remote";
+import {
+  autoFetchDue,
+  defaultFetchRemote,
+  fetchSummary,
+  NoticeKind,
+  pullSources,
+  pullSummary,
+  pushSummary,
+  PushTarget,
+} from "../remote";
 import { relativeTime } from "../util";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { HistoryView } from "./HistoryView";
 import { OperationBanner } from "./OperationBanner";
-import { FetchDialog, PullDialog } from "./RemoteDialogs";
+import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 import { Sidebar, View } from "./Sidebar";
 import { Split } from "./Split";
+import { FetchIcon, PullIcon, PushIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
 
 interface RepoTabProps {
   repo: RepoInfo;
   /** Only the active tab is shown and reacts to keyboard shortcuts; the others keep their state. */
   active: boolean;
+  /** Where the active tab shows its fetch, pull and push buttons: the app's toolbar. */
+  actionsSlot: HTMLElement | null;
   /** Fetch in the background this often; 0 or null (settings not loaded) turns it off. */
   autoFetchMinutes: number | null;
   onError: (message: string) => void;
@@ -23,17 +48,31 @@ interface RepoTabProps {
   onClearError: () => void;
 }
 
-/** A fetch or pull that is running; background fetches don't show progress. */
+/** A fetch, pull or push that is running; background fetches don't show progress. */
 interface RemoteOp {
   label: string;
   background: boolean;
+}
+
+/** A message in the branch bar, optionally with buttons for what to do next. */
+interface Notice {
+  text: string;
+  kind: NoticeKind;
+  actions?: { label: string; run: () => void }[];
+}
+
+/** How the push dialog starts: the branch and target to preselect, and whether to force. */
+interface PushPreset {
+  branch: string;
+  target?: PushTarget;
+  force: boolean;
 }
 
 /** How long a success message stays in the branch bar. */
 const NOTICE_MS = 8000;
 
 /** One open repository: its branch bar, sidebar and changes/history views. */
-export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError }: RepoTabProps) {
+export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, onClearError }: RepoTabProps) {
   const root = repo.root;
   const [view, setView] = useState<View>("changes");
   const [status, setStatus] = useState<Status | null>(null);
@@ -41,10 +80,11 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
   const [branches, setBranches] = useState<Branches | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [dialog, setDialog] = useState<"fetch" | "pull" | null>(null);
+  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | null>(null);
+  const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [autoFetchError, setAutoFetchError] = useState<string | null>(null);
   const [operationBusy, setOperationBusy] = useState(false);
   const branchButtonRef = useRef<HTMLButtonElement>(null);
@@ -121,7 +161,7 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
     return () => clearTimeout(timer);
   }, [notice]);
 
-  /** Runs one fetch or pull at a time; resolves to null when another one is still running. */
+  /** Runs one fetch, pull or push at a time; resolves to null when another one is still running. */
   const runRemote = useCallback(
     async <T,>(op: RemoteOp, action: () => Promise<T>): Promise<T | null> => {
       if (remoteOpRef.current) {
@@ -183,6 +223,43 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
     [root, runRemote, onError, onClearError],
   );
 
+  const openPush = useCallback((preset: Partial<PushPreset> = {}) => {
+    const { status: st, branches: br } = latest.current;
+    const branch = preset.branch ?? st?.branch ?? br?.local[0]?.name;
+    if (!branch) return;
+    setPushPreset({ force: false, ...preset, branch });
+    setDialog("push");
+  }, []);
+
+  const pushNow = useCallback(
+    async (options: PushOptions) => {
+      setDialog(null);
+      const target = `${options.remote}/${options.remoteBranch}`;
+      const label = `${options.force ? "Force pushing" : "Pushing"} ${options.branch} to ${target}…`;
+      try {
+        const result = await runRemote({ label, background: false }, () => api.push(root, options));
+        if (!result || !mounted.current) return;
+        onClearError();
+        const summary: Notice = pushSummary(result, options.branch, target);
+        if (result.outcome === "rejected" || result.outcome === "stale") {
+          const again = { branch: options.branch, target: { remote: options.remote, remoteBranch: options.remoteBranch } };
+          summary.actions = [];
+          // The pull dialog pulls into the current branch.
+          if (options.branch === latest.current.status?.branch) {
+            summary.actions.push({ label: "Pull…", run: () => setDialog("pull") });
+          }
+          if (result.outcome === "rejected") {
+            summary.actions.push({ label: "Force Push…", run: () => openPush({ ...again, force: true }) });
+          }
+        }
+        setNotice(summary);
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError, openPush],
+  );
+
   // Fetch in the background when the last fetch (by grit, the command line or another tool)
   // or the last attempt is older than the interval. Failures are shown quietly on the button.
   const autoFetch = useCallback(async () => {
@@ -212,9 +289,10 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
   const canFetch = !!branches && branches.remotes.length > 0 && !remoteOp;
   const pull = branches && status ? pullSources(branches, status) : null;
   const canPull = !!status?.branch && !!pull && pull.sources.length > 0 && !status.operation && !remoteOp;
+  const canPush = !!branches && branches.remotes.length > 0 && branches.local.length > 0 && !remoteOp;
 
   // Shortcuts of the visible tab: Ctrl/Cmd+B switches branches, Ctrl/Cmd+Shift+F fetches,
-  // Ctrl/Cmd+Shift+L pulls.
+  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -223,12 +301,13 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
       if (key === "b" && !e.shiftKey) setSwitcherOpen(true);
       else if (key === "f" && e.shiftKey && canFetch) setDialog("fetch");
       else if (key === "l" && e.shiftKey && canPull) setDialog("pull");
+      else if (key === "p" && e.shiftKey && canPush) openPush();
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, canFetch, canPull]);
+  }, [active, canFetch, canPull, canPush, openPush]);
 
   // Popovers and dialogs left open in a tab that is switched away from would reappear unexpectedly.
   useEffect(() => {
@@ -318,32 +397,43 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
           </span>
         )}
         <div className="spacer" />
-        <button
-          className="small remote-button"
-          disabled={!canFetch}
-          onClick={() => setDialog("fetch")}
-          title={fetchTitle(branches, status, autoFetchError)}
-        >
-          Fetch
-          {autoFetchError && (
-            <span className="remote-warning" aria-label="automatic fetch failed">
-              !
-            </span>
-          )}
-        </button>
-        <button
-          className="small remote-button"
-          disabled={!canPull}
-          onClick={() => setDialog("pull")}
-          title={pullTitle(status, pull?.sources.length ?? 0)}
-        >
-          Pull
-          {status && status.behind > 0 && <span className="count accent">{status.behind}</span>}
-        </button>
         <button className="small" onClick={refreshAll} title="Refresh">
           ⟳ Refresh
         </button>
       </div>
+      {active &&
+        actionsSlot &&
+        createPortal(
+          <>
+            <ToolbarButton
+              icon={<FetchIcon />}
+              label="Fetch"
+              disabled={!canFetch}
+              onClick={() => setDialog("fetch")}
+              title={fetchTitle(branches, status, autoFetchError)}
+              warning={autoFetchError && "automatic fetch failed"}
+            />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<PullIcon />}
+              label="Pull"
+              badge={status?.behind}
+              disabled={!canPull}
+              onClick={() => setDialog("pull")}
+              title={pullTitle(status, pull?.sources.length ?? 0)}
+            />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<PushIcon />}
+              label="Push"
+              badge={status?.ahead}
+              disabled={!canPush}
+              onClick={() => openPush()}
+              title={pushTitle(branches, status)}
+            />
+          </>,
+          actionsSlot,
+        )}
       {status?.operation && (
         <OperationBanner
           operation={status.operation}
@@ -373,6 +463,17 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
           onClose={closeDialog}
         />
       )}
+      {dialog === "push" && branches && pushPreset && (
+        <PushDialog
+          branches={branches}
+          status={status}
+          branch={pushPreset.branch}
+          target={pushPreset.target}
+          force={pushPreset.force}
+          onPush={pushNow}
+          onClose={closeDialog}
+        />
+      )}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar view={view} onView={setView} changeCount={changeCount} branches={branches} onSwitch={switchBranch} />
         <main className="main">
@@ -390,11 +491,11 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
 interface RemoteStatusProps {
   op: RemoteOp | null;
   progress: string | null;
-  notice: { text: string; kind: NoticeKind } | null;
+  notice: Notice | null;
   onDismiss: () => void;
 }
 
-/** The running fetch or pull with git's progress, or the message about the last one. */
+/** The running fetch, pull or push with git's progress, or the message about the last one. */
 function RemoteStatus({ op, progress, notice, onDismiss }: RemoteStatusProps) {
   if (op) {
     return (
@@ -413,6 +514,11 @@ function RemoteStatus({ op, progress, notice, onDismiss }: RemoteStatusProps) {
       <span className="remote-status-text selectable" title={notice.text}>
         {notice.text}
       </span>
+      {notice.actions?.map((a) => (
+        <button key={a.label} className="small notice-action" onClick={a.run}>
+          {a.label}
+        </button>
+      ))}
       <button className="notice-dismiss" aria-label="Dismiss message" title="Dismiss" onClick={onDismiss}>
         ×
       </button>
@@ -435,6 +541,13 @@ function pullTitle(status: Status | null, sources: number): string {
   if (sources === 0) return "There are no remote branches to pull from";
   const behind = status.behind > 0 ? `\n${status.branch} is ${status.behind} behind ${status.upstream}` : "";
   return `Pull into ${status.branch} (Ctrl/Cmd+Shift+L)${behind}`;
+}
+
+function pushTitle(branches: Branches | null, status: Status | null): string {
+  if (branches && branches.remotes.length === 0) return "This repository has no remotes";
+  if (branches && branches.local.length === 0) return "There are no branches to push yet";
+  const ahead = status?.branch && status.ahead > 0 ? `\n${status.branch} is ${status.ahead} ahead of ${status.upstream}` : "";
+  return `Push a branch to a remote (Ctrl/Cmd+Shift+P)${ahead}`;
 }
 
 /** Id of a tab's panel, for aria-controls on its tab button. */

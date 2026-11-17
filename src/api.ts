@@ -144,7 +144,40 @@ export interface PullResult {
   conflicts: number;
 }
 
-/** A progress line of a running fetch or pull. */
+export interface PushOptions {
+  /** The local branch to push. */
+  branch: string;
+  remote: string;
+  /** Branch name on the remote, e.g. "main" (not "origin/main"); created if it doesn't exist. */
+  remoteBranch: string;
+  /** Make the remote branch the upstream of the local one. */
+  setUpstream: boolean;
+  /** Push all tags along with the branch. */
+  tags: boolean;
+  /**
+   * Overwrite the remote branch even if that drops commits from it. It is still refused when
+   * the remote has commits that were never pulled (--force-with-lease and --force-if-includes).
+   */
+  force: boolean;
+}
+
+/**
+ * "rejected": the remote branch has commits the local one doesn't; pull first or force push.
+ * "stale": a force push was refused because the remote has commits that were never pulled.
+ */
+export type PushOutcome = "up-to-date" | "pushed" | "new-branch" | "forced" | "rejected" | "stale";
+
+export interface PushResult {
+  outcome: PushOutcome;
+  /** Commits the remote branch gained. */
+  commits: number;
+  /** Tags created on the remote. */
+  newTags: string[];
+  /** Tags the remote refused, usually because it has a different tag of the same name. */
+  rejectedTags: string[];
+}
+
+/** A progress line of a running fetch, pull or push. */
 export interface GitProgress {
   root: string;
   text: string;
@@ -196,6 +229,8 @@ export const api = {
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */
   pull: (repo: string, options: PullOptions) => invoke<PullResult>("pull", { repo, ...options }),
+  /** Progress arrives as `git-progress` events. A rejected push resolves with outcome "rejected" or "stale". */
+  push: (repo: string, options: PushOptions) => invoke<PushResult>("push", { repo, ...options }),
   /** Aborts the merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */

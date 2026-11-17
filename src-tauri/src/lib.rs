@@ -11,7 +11,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult, RepoInfo, Status,
+    Branches, CommitDetails, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult, PushOptions,
+    PushResult, RepoInfo, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -123,7 +124,7 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
-/// A progress line of a running fetch or pull, e.g. "Receiving objects:  45% (450/1000)".
+/// A progress line of a running fetch, pull or push, e.g. "Receiving objects:  45% (450/1000)".
 #[derive(Serialize, Clone)]
 struct GitProgress {
     /// The repository root, as passed to the command, so only its tab shows the progress.
@@ -192,6 +193,33 @@ async fn pull(
     .await
 }
 
+// Flat arguments, like fetch and pull, so the frontend passes its options object spread out.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn push(
+    app: AppHandle,
+    repo: String,
+    branch: String,
+    remote: String,
+    remote_branch: String,
+    set_upstream: bool,
+    tags: bool,
+    force: bool,
+) -> GitResult<PushResult> {
+    blocking(move || {
+        let opts = PushOptions {
+            branch,
+            remote,
+            remote_branch,
+            set_upstream,
+            tags,
+            force,
+        };
+        git::push(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
@@ -252,6 +280,7 @@ pub fn run() {
             create_branch,
             fetch,
             pull,
+            push,
             abort_operation,
             continue_operation,
             skip_operation,
