@@ -1,10 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { Operation, Remote, Status } from "../api";
+import { Branch, Branches, Operation, Remote, Status } from "../api";
 import { file, makeStatus } from "../test/tauri";
 import { OperationBanner } from "./OperationBanner";
-import { FetchDialog, PullDialog } from "./RemoteDialogs";
+import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 
 const remotes: Remote[] = [
   { name: "origin", url: "git@example.com:ada/demo.git" },
@@ -117,6 +117,119 @@ describe("PullDialog", () => {
     setup({ upstream: null }, [], null);
     expect(screen.getByRole("button", { name: "Pull" })).toBeDisabled();
     expect(screen.getByText("There are no remote branches. Fetch first.")).toBeInTheDocument();
+  });
+});
+
+describe("PushDialog", () => {
+  const b = (name: string, partial: Partial<Branch> = {}): Branch => ({
+    name,
+    sha: "a",
+    current: false,
+    upstream: null,
+    track: null,
+    ...partial,
+  });
+  const branches: Branches = {
+    local: [
+      b("main", { current: true, upstream: "origin/main", track: "[ahead 2]" }),
+      b("behind", { upstream: "origin/behind", track: "[ahead 1, behind 3]" }),
+      b("feature"),
+    ],
+    remote: [b("origin/main"), b("origin/behind"), b("origin/dev"), b("upstream/main")],
+    tags: [],
+    remotes,
+  };
+
+  function setup(props: Partial<Parameters<typeof PushDialog>[0]> = {}) {
+    const onPush = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <PushDialog branches={branches} status={makeStatus()} branch="main" onPush={onPush} onClose={onClose} {...props} />,
+    );
+    return { onPush, onClose };
+  }
+
+  const remoteBranch = () => screen.getByLabelText("Remote branch");
+
+  it("pushes the current branch to its upstream on Enter", async () => {
+    const { onPush } = setup();
+    expect(screen.getByLabelText("Branch")).toHaveFocus();
+    expect(screen.getByLabelText("Remote")).toHaveDisplayValue("origin");
+    expect(remoteBranch()).toHaveValue("main");
+    expect(remoteBranch()).toHaveAccessibleDescription("Pushes 2 commits to origin/main.");
+    // Already tracked, so there is nothing to set up.
+    expect(screen.queryByLabelText(/set as upstream/)).toBeNull();
+    expect(screen.queryByRole("note")).toBeNull();
+
+    await userEvent.keyboard("{Enter}");
+    expect(onPush).toHaveBeenCalledWith({
+      branch: "main",
+      remote: "origin",
+      remoteBranch: "main",
+      setUpstream: false,
+      tags: false,
+      force: false,
+    });
+  });
+
+  it("pushes a new branch and tracks it by default", async () => {
+    const { onPush } = setup();
+    await userEvent.selectOptions(screen.getByLabelText("Branch"), "feature");
+    expect(remoteBranch()).toHaveValue("feature");
+    expect(remoteBranch()).toHaveAccessibleDescription("Creates the branch origin/feature.");
+    expect(screen.getByLabelText("Track origin/feature (set as upstream)")).toBeChecked();
+
+    await userEvent.selectOptions(screen.getByLabelText("Remote"), "upstream");
+    await userEvent.clear(remoteBranch());
+    await userEvent.type(remoteBranch(), "team/feature");
+    await userEvent.click(screen.getByLabelText("Push all tags"));
+    await userEvent.click(screen.getByRole("button", { name: "Push" }));
+    expect(onPush).toHaveBeenCalledWith({
+      branch: "feature",
+      remote: "upstream",
+      remoteBranch: "team/feature",
+      setUpstream: true,
+      tags: true,
+      force: false,
+    });
+    // Tags are remembered, force never is.
+    expect(JSON.parse(localStorage.getItem("pushOptions")!)).toEqual({ tags: true });
+  });
+
+  it("warns when the push would be rejected and explains a force push", async () => {
+    const { onPush } = setup({ branch: "behind" });
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "origin/behind has 3 commits that behind doesn't have, so the push will be rejected.",
+    );
+
+    await userEvent.click(screen.getByLabelText("Force push"));
+    expect(screen.getByRole("note")).toHaveTextContent("Replaces origin/behind with behind");
+    expect(screen.getByRole("note")).toHaveTextContent("refused if origin/behind has commits you haven't pulled");
+    await userEvent.click(screen.getByRole("button", { name: "Force Push" }));
+    expect(onPush).toHaveBeenCalledWith(expect.objectContaining({ branch: "behind", force: true }));
+  });
+
+  it("starts from a given target with force checked", () => {
+    setup({ target: { remote: "upstream", remoteBranch: "main" }, force: true });
+    expect(screen.getByLabelText("Remote")).toHaveDisplayValue("upstream");
+    expect(screen.getByLabelText("Force push")).toBeChecked();
+    expect(screen.getByRole("button", { name: "Force Push" })).toHaveClass("danger");
+    // Pushing elsewhere than the upstream doesn't change the upstream unless asked to.
+    expect(screen.getByLabelText("Track upstream/main (set as upstream)")).not.toBeChecked();
+    expect(remoteBranch()).toHaveAccessibleDescription("upstream/main is not the upstream of main (origin/main).");
+  });
+
+  it("refuses remote branch names git can't take", async () => {
+    setup();
+    for (const name of ["two words", "a:b", "-x"]) {
+      await userEvent.clear(remoteBranch());
+      await userEvent.type(remoteBranch(), name);
+      expect(remoteBranch()).toHaveAttribute("aria-invalid", "true");
+      expect(screen.getByRole("button", { name: "Push" })).toBeDisabled();
+    }
+    await userEvent.clear(remoteBranch());
+    expect(screen.getByRole("button", { name: "Push" })).toBeDisabled();
+    expect(remoteBranch()).toHaveAccessibleDescription("Enter the name of the branch on the remote.");
   });
 });
 

@@ -1,4 +1,4 @@
-import { Branches, FetchResult, Operation, PullResult, Remote, Status } from "./api";
+import { Branches, FetchResult, Operation, PullResult, PushResult, Remote, Status } from "./api";
 
 /** Value of the remote picker that fetches every remote. */
 export const ALL_REMOTES = "*";
@@ -34,6 +34,31 @@ export function pullSources(branches: Branches, status: Status | null): { source
   const preferred = candidates.find((c): c is string => !!c && sources.includes(c)) ?? null;
   // The preselected branch goes first, so it is also the first entry when the list is long.
   return { sources: preferred ? [preferred, ...sources.filter((s) => s !== preferred)] : sources, preferred };
+}
+
+/** Where a local branch is pushed to: a branch on a remote. */
+export interface PushTarget {
+  remote: string;
+  /** Branch name on the remote, e.g. "main". */
+  remoteBranch: string;
+}
+
+/**
+ * Where `branch` is pushed by default: its upstream, else the branch of the same name on the
+ * default remote.
+ */
+export function defaultPushTarget(branch: string, branches: Branches, status: Status | null): PushTarget | null {
+  const upstream = branches.local.find((b) => b.name === branch)?.upstream;
+  const split = upstream ? splitRemoteBranch(upstream, branches.remotes) : null;
+  if (split) return { remote: split.remote, remoteBranch: split.branch };
+  const remote = defaultFetchRemote(status, branches.remotes);
+  return remote ? { remote, remoteBranch: branch } : null;
+}
+
+/** Parses a branch's tracking info, e.g. "[ahead 1, behind 2]" or "[gone]". */
+export function parseTrack(track: string | null): { ahead: number; behind: number; gone: boolean } {
+  const n = (word: string) => Number(track?.match(new RegExp(`${word} (\\d+)`))?.[1] ?? 0);
+  return { ahead: n("ahead"), behind: n("behind"), gone: track === "[gone]" };
 }
 
 const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
@@ -82,6 +107,43 @@ export function pullSummary(result: PullResult, source: string, branch: string):
   }
 }
 
+/** What to tell the user after pushing `branch` to `target` (e.g. "origin/main"). */
+export function pushSummary(result: PushResult, branch: string, target: string): { text: string; kind: NoticeKind } {
+  let text: string;
+  let kind: NoticeKind = "info";
+  switch (result.outcome) {
+    case "up-to-date":
+      text = `${target} is already up to date with ${branch}`;
+      break;
+    case "pushed":
+      text = `Pushed ${plural(result.commits, "commit")} from ${branch} to ${target}`;
+      break;
+    case "new-branch":
+      text = `Pushed ${branch} to the new branch ${target}`;
+      break;
+    case "forced":
+      text = `Force pushed ${branch} to ${target}`;
+      break;
+    case "rejected":
+      kind = "warning";
+      text = `Push rejected: ${target} has commits that ${branch} doesn't have. Pull them first, or force push to overwrite them.`;
+      break;
+    case "stale":
+      kind = "warning";
+      text =
+        `Force push refused: ${target} has commits you haven't pulled, which it would throw away. ` +
+        "Pull them first, then push again.";
+      break;
+  }
+  if (result.newTags.length) text += `, with ${plural(result.newTags.length, "new tag")}`;
+  if (result.rejectedTags.length) {
+    kind = "warning";
+    const s = result.rejectedTags.length === 1 ? "" : "s";
+    text += `. The remote already has a different tag${s} ${result.rejectedTags.join(", ")}, which ${s ? "were" : "was"} not pushed`;
+  }
+  return { text, kind };
+}
+
 /** True when an automatic fetch is due: nothing was fetched or tried within the interval. */
 export function autoFetchDue(lastFetch: number | null, lastAttempt: number | null, minutes: number, now: number): boolean {
   if (minutes <= 0) return false;
@@ -125,6 +187,11 @@ export interface PullPrefs {
   autostash: boolean;
 }
 
+/** Force push is deliberately not remembered: it is chosen for one push at a time. */
+export interface PushPrefs {
+  tags: boolean;
+}
+
 function readPrefs<T extends object>(key: string, defaults: T): T {
   try {
     const stored = JSON.parse(localStorage.getItem(key) ?? "null");
@@ -147,10 +214,12 @@ function savePrefs(key: string, prefs: object) {
   }
 }
 
-/** The fetch and pull dialogs remember their options, as Fork does. */
+/** The fetch, pull and push dialogs remember their options, as Fork does. */
 export const prefs = {
   fetch: () => readPrefs<FetchPrefs>("fetchOptions", { prune: true, tags: false }),
   saveFetch: (p: FetchPrefs) => savePrefs("fetchOptions", p),
   pull: () => readPrefs<PullPrefs>("pullOptions", { rebase: false, autostash: true }),
   savePull: (p: PullPrefs) => savePrefs("pullOptions", p),
+  push: () => readPrefs<PushPrefs>("pushOptions", { tags: false }),
+  savePush: (p: PushPrefs) => savePrefs("pushOptions", p),
 };

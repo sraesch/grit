@@ -338,7 +338,7 @@ describe("App", () => {
     });
   });
 
-  describe("fetch and pull", () => {
+  describe("fetch, pull and push", () => {
     const now = () => Math.floor(Date.now() / 1000);
     let status: Status;
     let settings: Settings | null;
@@ -496,6 +496,62 @@ describe("App", () => {
       await userEvent.click(screen.getByRole("button", { name: "Abort merge" }));
       expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
       await waitFor(() => expect(screen.queryByText("Merge in progress")).toBeNull());
+    });
+
+    const pushButton = () => screen.getByRole("button", { name: /^Push/ });
+
+    it("pushes the current branch to its upstream and reports the result", async () => {
+      status = makeStatus({ upstream: "origin/main", ahead: 1, lastFetch: now() });
+      mockBackend(invokeMock, {
+        ...handlers,
+        push: () => {
+          status = makeStatus({ upstream: "origin/main", lastFetch: now() });
+          return { outcome: "pushed", commits: 1, newTags: [], rejectedTags: [] };
+        },
+      });
+      await ready();
+      expect(pushButton()).toHaveTextContent("Push1");
+
+      await userEvent.keyboard("{Control>}{Shift>}P{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Push" });
+      expect(within(dialog).getByLabelText("Branch")).toHaveDisplayValue("main");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Push" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("push", {
+        repo: "/work/demo",
+        branch: "main",
+        remote: "origin",
+        remoteBranch: "main",
+        setUpstream: false,
+        tags: false,
+        force: false,
+      });
+      expect(await screen.findByText("Pushed 1 commit from main to origin/main")).toBeInTheDocument();
+      await waitFor(() => expect(pushButton()).toHaveTextContent(/^Push$/));
+    });
+
+    it("offers to pull or force push when a push is rejected", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        push: ({ force }) =>
+          force
+            ? { outcome: "forced", commits: 1, newTags: [], rejectedTags: [] }
+            : { outcome: "rejected", commits: 0, newTags: [], rejectedTags: [] },
+      });
+      await ready();
+      await userEvent.click(pushButton());
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Push" })).getByRole("button", { name: "Push" }));
+
+      expect(await screen.findByText(/^Push rejected: origin\/main has commits/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Pull…" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Force Push…" }));
+
+      const dialog = screen.getByRole("dialog", { name: "Push" });
+      expect(within(dialog).getByLabelText("Force push")).toBeChecked();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Force Push" }));
+      expect(invokeMock).toHaveBeenCalledWith("push", expect.objectContaining({ branch: "main", force: true }));
+      expect(await screen.findByText("Force pushed main to origin/main")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Force Push…" })).toBeNull();
     });
 
     it("fetches in the background when the last fetch is older than the interval", async () => {

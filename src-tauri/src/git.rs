@@ -676,6 +676,7 @@ pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
 /// turned into an error, because a failed pull can still leave a state to report (conflicts).
 struct NetOutput {
     code: i32,
+    stdout: String,
     stderr: String,
 }
 
@@ -696,11 +697,12 @@ fn exec_streaming(
     let mut child = cmd.spawn().map_err(|e| format!("Failed to start git: {e}"))?;
 
     // Drain stdout on its own thread so a chatty merge can't fill the pipe and block git
-    // while we are reading stderr.
+    // while we are reading stderr. Push reports its result there.
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let stdout_reader = std::thread::spawn(move || {
-        let mut sink = Vec::new();
-        let _ = stdout.read_to_end(&mut sink);
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
     });
 
     let mut stderr = child.stderr.take().expect("stderr is piped");
@@ -724,9 +726,10 @@ fn exec_streaming(
     emit_line(&mut line, on_progress);
 
     let status = child.wait().map_err(|e| e.to_string())?;
-    let _ = stdout_reader.join();
+    let stdout = stdout_reader.join().unwrap_or_default();
     Ok(NetOutput {
         code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&all).into_owned(),
     })
 }
@@ -1033,6 +1036,183 @@ pub fn pull(repo: &Path, opts: &PullOptions, on_progress: &mut dyn FnMut(&str)) 
     };
     let (outcome, incoming, rebased) = outcome_and_counts;
     Ok(result(outcome, incoming, rebased))
+}
+
+// ---------------------------------------------------------------------------
+// Push
+// ---------------------------------------------------------------------------
+
+pub struct PushOptions {
+    /// The local branch to push, e.g. "main".
+    pub branch: String,
+    pub remote: String,
+    /// Branch name on the remote, e.g. "main" (not "origin/main"); created if it doesn't exist.
+    pub remote_branch: String,
+    /// Make the remote branch the local branch's upstream.
+    pub set_upstream: bool,
+    /// Push all tags along with the branch.
+    pub tags: bool,
+    /// Overwrite the remote branch even if that drops commits from it. Uses
+    /// `--force-with-lease` (and `--force-if-includes` where git supports it), so commits on
+    /// the remote that were never integrated locally are still not lost.
+    pub force: bool,
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum PushOutcome {
+    /// The remote branch already pointed at the local branch.
+    UpToDate,
+    /// The remote branch was fast-forwarded.
+    Pushed,
+    /// The remote branch didn't exist and was created.
+    NewBranch,
+    /// The remote branch was overwritten by a force push.
+    Forced,
+    /// The remote branch has commits the local branch doesn't; pull first or force push.
+    Rejected,
+    /// A force push was refused because the remote branch has commits that were never
+    /// integrated locally (someone else pushed since, or they were only fetched in the background).
+    Stale,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PushResult {
+    pub outcome: PushOutcome,
+    /// Commits the remote branch gained.
+    pub commits: u32,
+    /// Tags created on the remote.
+    pub new_tags: Vec<String>,
+    /// Tags the remote refused, usually because it has a different tag of the same name.
+    pub rejected_tags: Vec<String>,
+}
+
+/// One ref of `git push --porcelain`: `<flag>\t<src>:<dst>\t<summary>`, where the flag is
+/// ' ' (fast-forward), '+' (forced), '-' (deleted), '*' (new), '!' (rejected) or '=' (up to date).
+#[derive(Debug, PartialEq)]
+struct PushedRef<'a> {
+    flag: char,
+    dst: &'a str,
+    summary: &'a str,
+}
+
+fn parse_push_porcelain(out: &str) -> Vec<PushedRef<'_>> {
+    out.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let flag = fields.next()?;
+            let (_, dst) = fields.next()?.split_once(':')?;
+            let summary = fields.next()?;
+            let mut chars = flag.chars();
+            match (chars.next(), chars.next()) {
+                (Some(flag), None) => Some(PushedRef { flag, dst, summary }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The installed git's major and minor version, from "git version 2.39.3 (Apple Git-145)".
+fn git_version(repo: &Path) -> Option<(u32, u32)> {
+    let out = run(repo, &["version"]).ok()?;
+    let mut parts = out.split_whitespace().nth(2)?.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Pushes a local branch to a branch on a remote.
+pub fn push(repo: &Path, opts: &PushOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<PushResult> {
+    let remote = plain_arg(&opts.remote, "remote name")?;
+    let branch = plain_arg(&opts.branch, "branch name")?;
+    let target = plain_arg(&opts.remote_branch, "branch name")?;
+    let local_ref = format!("refs/heads/{branch}");
+    let remote_ref = format!("refs/heads/{target}");
+    if run(repo, &["check-ref-format", &remote_ref]).is_err() {
+        return Err(format!("'{target}' is not a valid branch name"));
+    }
+    if rev(repo, &local_ref).is_none() {
+        return Err(format!("There is no local branch '{branch}'"));
+    }
+    // What a new remote branch brings: the commits the remote doesn't have on any branch yet.
+    let remote_glob = format!("--remotes={remote}");
+    let unpushed = run(repo, &["rev-list", "--count", &local_ref, "--not", &remote_glob])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let lease = format!("--force-with-lease={remote_ref}");
+    let refspec = format!("{local_ref}:{remote_ref}");
+    let mut args = vec!["push", "--progress", "--porcelain"];
+    if opts.set_upstream {
+        args.push("--set-upstream");
+    }
+    if opts.tags {
+        args.push("--tags");
+    }
+    if opts.force {
+        // The lease names only the branch, so pushing tags never overwrites any.
+        args.push(&lease);
+        // Without it, a background fetch would make the lease pass even though nobody looked
+        // at the fetched commits (git 2.30+).
+        if git_version(repo).is_some_and(|v| v >= (2, 30)) {
+            args.push("--force-if-includes");
+        }
+    }
+    args.extend([remote, refspec.as_str()]);
+    let out = exec_streaming(repo, &args, &[], on_progress)?;
+
+    let refs = parse_push_porcelain(&out.stdout);
+    let Some(pushed) = refs.iter().find(|r| r.dst == remote_ref) else {
+        return Err(error_text(&out.stderr, "Push failed"));
+    };
+    let tags = |flag: char| -> Vec<String> {
+        refs.iter()
+            .filter(|r| r.flag == flag)
+            .filter_map(|r| r.dst.strip_prefix("refs/tags/"))
+            .map(String::from)
+            .collect()
+    };
+    let (outcome, commits) = match pushed.flag {
+        '=' => (PushOutcome::UpToDate, 0),
+        '*' => (PushOutcome::NewBranch, unpushed),
+        // "4e328f7..ad65bd3" or "f82346d...821567d (forced update)"
+        ' ' | '+' => {
+            let range = pushed.summary.split_whitespace().next().unwrap_or_default();
+            let (old, new) = range
+                .split_once("...")
+                .or_else(|| range.split_once(".."))
+                .unwrap_or_default();
+            let commits = if old.is_empty() {
+                0
+            } else {
+                count(repo, &format!("{old}..{new}"))
+            };
+            let outcome = if pushed.flag == '+' {
+                PushOutcome::Forced
+            } else {
+                PushOutcome::Pushed
+            };
+            (outcome, commits)
+        }
+        '!' if pushed.summary.starts_with("[rejected]") => {
+            if pushed.summary.contains("non-fast-forward") || pushed.summary.contains("fetch first") {
+                (PushOutcome::Rejected, 0)
+            } else if pushed.summary.contains("stale info") || pushed.summary.contains("updated since checkout") {
+                (PushOutcome::Stale, 0)
+            } else {
+                return Err(error_text(&out.stderr, pushed.summary));
+            }
+        }
+        // E.g. "[remote rejected] (protected branch hook declined)"; the remote's explanation
+        // is in its "remote:" lines.
+        _ => return Err(error_text(&out.stderr, pushed.summary)),
+    };
+    Ok(PushResult {
+        outcome,
+        commits,
+        new_tags: tags('*'),
+        rejected_tags: tags('!'),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1989,6 +2169,215 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
             pull(&clone.dir, &pull_opts(false, false), &mut no_progress)
                 .unwrap_err()
                 .contains("detached")
+        );
+    }
+
+    /// A bare repository to push to (a non-bare one refuses pushes to its checked-out branch).
+    fn bare(name: &str) -> TestRepo {
+        let dir = std::env::temp_dir().join(format!("grit-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        run(&dir, &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        TestRepo { dir }
+    }
+
+    /// A bare origin with one commit on main and two clones of it.
+    fn shared(name: &str) -> (TestRepo, TestRepo, TestRepo) {
+        let origin = bare(&format!("{name}-origin"));
+        let seed = TestRepo::clone_of(&origin, &format!("{name}-seed"));
+        seed.commit_all_initial();
+        seed.git(&["push", "-q", "origin", "main"]);
+        let ours = TestRepo::clone_of(&origin, &format!("{name}-ours"));
+        let theirs = TestRepo::clone_of(&origin, &format!("{name}-theirs"));
+        (origin, ours, theirs)
+    }
+
+    fn push_opts(branch: &str, target: &str) -> PushOptions {
+        PushOptions {
+            branch: branch.into(),
+            remote: "origin".into(),
+            remote_branch: target.into(),
+            set_upstream: false,
+            tags: false,
+            force: false,
+        }
+    }
+
+    fn remote_head(origin: &TestRepo, branch: &str) -> Option<String> {
+        rev(&origin.dir, &format!("refs/heads/{branch}"))
+    }
+
+    #[test]
+    fn pushes_new_branches_fast_forwards_and_reports_up_to_date() {
+        let (origin, ours, _theirs) = shared("push-ff");
+        ours.write("a.txt", "a\n");
+        ours.commit_all("a");
+        ours.write("b.txt", "b\n");
+        ours.commit_all("b");
+        assert_eq!(status(&ours.dir).unwrap().ahead, 2);
+
+        let mut lines = Vec::new();
+        let r = push(&ours.dir, &push_opts("main", "main"), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::Pushed, 2));
+        assert_eq!(remote_head(&origin, "main"), Some(ours.head()));
+        assert_eq!(status(&ours.dir).unwrap().ahead, 0);
+        assert!(lines.iter().any(|l| l.starts_with("Writing objects")), "{lines:?}");
+
+        let r = push(&ours.dir, &push_opts("main", "main"), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::UpToDate, 0));
+
+        // A new branch, under another name on the remote, becomes the upstream on request.
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        ours.write("c.txt", "c\n");
+        ours.commit_all("c");
+        let opts = PushOptions {
+            set_upstream: true,
+            ..push_opts("feature", "team/feature")
+        };
+        let r = push(&ours.dir, &opts, &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::NewBranch, 1));
+        assert_eq!(remote_head(&origin, "team/feature"), Some(ours.head()));
+        let st = status(&ours.dir).unwrap();
+        assert_eq!(st.upstream.as_deref(), Some("origin/team/feature"));
+        assert_eq!(st.ahead, 0);
+
+        // A branch other than the current one can be pushed too.
+        let r = push(&ours.dir, &push_opts("main", "copy"), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::NewBranch, 0));
+    }
+
+    #[test]
+    fn force_pushes_only_over_commits_that_were_integrated() {
+        let (origin, ours, theirs) = shared("push-force");
+        theirs.write("theirs.txt", "theirs\n");
+        theirs.commit_all("theirs");
+        theirs.git(&["push", "-q", "origin", "main"]);
+        let theirs_head = theirs.head();
+
+        ours.write("ours.txt", "ours\n");
+        ours.commit_all("ours");
+        let r = push(&ours.dir, &push_opts("main", "main"), &mut no_progress).unwrap();
+        assert_eq!(r.outcome, PushOutcome::Rejected);
+
+        // Never fetched: the lease protects their commit.
+        let force = PushOptions {
+            force: true,
+            ..push_opts("main", "main")
+        };
+        assert_eq!(
+            push(&ours.dir, &force, &mut no_progress).unwrap().outcome,
+            PushOutcome::Stale
+        );
+        // Fetched (as a background fetch would), but not integrated: still protected where git
+        // supports --force-if-includes.
+        fetch(&ours.dir, &fetch_opts(Some("origin"), false), &mut no_progress).unwrap();
+        if git_version(&ours.dir).is_some_and(|v| v >= (2, 30)) {
+            assert_eq!(
+                push(&ours.dir, &force, &mut no_progress).unwrap().outcome,
+                PushOutcome::Stale
+            );
+        }
+        assert_eq!(remote_head(&origin, "main"), Some(theirs_head.clone()));
+
+        // Integrated by a rebase, then rewritten: now the force push goes through.
+        pull(&ours.dir, &pull_opts(true, false), &mut no_progress).unwrap();
+        let r = push(&ours.dir, &push_opts("main", "main"), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::Pushed, 1));
+        ours.git(&["commit", "-q", "--amend", "-m", "ours, reworded"]);
+        assert_eq!(
+            push(&ours.dir, &push_opts("main", "main"), &mut no_progress)
+                .unwrap()
+                .outcome,
+            PushOutcome::Rejected
+        );
+        let r = push(&ours.dir, &force, &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::Forced, 1));
+        assert_eq!(remote_head(&origin, "main"), Some(ours.head()));
+        // Their commit is still there, below ours.
+        assert!(is_ancestor(&origin.dir, &theirs_head, &ours.head()));
+    }
+
+    #[test]
+    fn pushes_tags_without_ever_overwriting_them() {
+        let (origin, ours, theirs) = shared("push-tags");
+        theirs.git(&["tag", "v1"]);
+        theirs.git(&["push", "-q", "origin", "v1"]);
+        ours.write("a.txt", "a\n");
+        ours.commit_all("a");
+        ours.git(&["tag", "v1"]);
+        ours.git(&["tag", "v2"]);
+
+        // Not even a force push replaces their v1.
+        let opts = PushOptions {
+            tags: true,
+            force: true,
+            ..push_opts("main", "main")
+        };
+        let r = push(&ours.dir, &opts, &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.commits), (PushOutcome::Pushed, 1));
+        assert_eq!(r.new_tags, vec!["v2".to_string()]);
+        assert_eq!(r.rejected_tags, vec!["v1".to_string()]);
+        assert_eq!(rev(&origin.dir, "refs/tags/v1"), rev(&theirs.dir, "refs/tags/v1"));
+        assert_eq!(rev(&origin.dir, "refs/tags/v2"), Some(ours.head()));
+    }
+
+    #[test]
+    fn refuses_to_push_bad_arguments_and_reports_errors() {
+        let (_origin, ours, _theirs) = shared("push-errors");
+        for (opts, message) in [
+            (
+                PushOptions {
+                    remote: "--receive-pack=x".into(),
+                    ..push_opts("main", "main")
+                },
+                "not a valid remote name",
+            ),
+            (push_opts("--all", "main"), "not a valid branch name"),
+            (push_opts("main", "two words"), "'two words' is not a valid branch name"),
+            (push_opts("main", "a:b"), "not a valid branch name"),
+            (push_opts("nope", "nope"), "no local branch 'nope'"),
+            (
+                PushOptions {
+                    remote: "nowhere".into(),
+                    ..push_opts("main", "main")
+                },
+                "nowhere",
+            ),
+        ] {
+            let err = push(&ours.dir, &opts, &mut no_progress).unwrap_err();
+            assert!(err.contains(message), "{err}");
+        }
+    }
+
+    #[test]
+    fn parses_push_porcelain() {
+        let out = "To /srv/origin.git\n\
+                   =\trefs/heads/main:refs/heads/main\t[up to date]\n\
+                   +\trefs/heads/a:refs/heads/team/a\tf82346d...821567d (forced update)\n\
+                   !\trefs/tags/v1:refs/tags/v1\t[rejected] (already exists)\n\
+                   Done\n";
+        assert_eq!(
+            parse_push_porcelain(out),
+            vec![
+                PushedRef {
+                    flag: '=',
+                    dst: "refs/heads/main",
+                    summary: "[up to date]"
+                },
+                PushedRef {
+                    flag: '+',
+                    dst: "refs/heads/team/a",
+                    summary: "f82346d...821567d (forced update)"
+                },
+                PushedRef {
+                    flag: '!',
+                    dst: "refs/tags/v1",
+                    summary: "[rejected] (already exists)"
+                },
+            ]
         );
     }
 

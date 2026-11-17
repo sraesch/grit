@@ -383,7 +383,7 @@ button.small {
   color: var(--accent);
 }
 
-/* Fetch and pull */
+/* Fetch, pull and push */
 
 .remote-button {
   display: inline-flex;
@@ -430,6 +430,17 @@ button.small {
 .remote-status.notice-warning {
   background: var(--warn-bg);
   color: var(--warn-text);
+}
+.notice-action {
+  flex: none;
+  padding: 0 7px;
+  color: inherit;
+  border-color: currentColor;
+  background: transparent;
+  line-height: 16px;
+}
+.notice-action:hover:not(:disabled) {
+  background: rgb(0 0 0 / 0.08);
 }
 .notice-dismiss {
   padding: 0 5px;
@@ -482,6 +493,15 @@ button.small {
 }
 button.danger {
   color: var(--danger);
+}
+button.primary.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  /* The page background contrasts with the danger red in both themes. */
+  color: var(--bg);
+}
+button.primary.danger:hover:not(:disabled) {
+  background: var(--danger);
 }
 .spacer {
   flex: 1;
@@ -1294,6 +1314,15 @@ body.resizing-vertical {
 }
 .warning-text {
   color: var(--warn-text);
+}
+.push-to-label {
+  margin-top: 12px;
+}
+.push-target {
+  align-items: center;
+}
+.push-target select {
+  flex: 0 1 35%;
 }
 .settings-row input[aria-invalid="true"] {
   border-color: var(--danger);
