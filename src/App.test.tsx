@@ -5,7 +5,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { RepoChanged } from "./api";
+import { FetchResult, GitProgress, RepoChanged, Settings, Status } from "./api";
 import { file, makeStatus, mockBackend } from "./test/tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -17,25 +17,29 @@ const listenMock = vi.mocked(listen);
 const openMock = vi.mocked(open);
 
 let emitRepoChanged: (payload: RepoChanged) => void = () => {};
+let emitProgress: (payload: GitProgress) => void = () => {};
 
 function backend(statusFn = () => makeStatus({ unstaged: [file("a.txt")] })) {
   mockBackend(invokeMock, {
     open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
     get_status: statusFn,
     get_log: () => [],
-    get_branches: () => ({ local: [], remote: [], tags: [] }),
+    get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
   });
 }
 
 describe("App", () => {
   beforeEach(() => {
     // Every open tab subscribes; an event reaches all current subscribers, like Tauri's.
-    const handlers = new Set<(e: { payload: RepoChanged }) => void>();
-    emitRepoChanged = (payload) => handlers.forEach((h) => h({ payload }));
-    listenMock.mockImplementation(async (_event, handler) => {
-      const h = handler as (e: { payload: RepoChanged }) => void;
-      handlers.add(h);
-      return () => handlers.delete(h);
+    const handlers = new Map<string, Set<(e: { payload: unknown }) => void>>();
+    const emit = (event: string, payload: unknown) => handlers.get(event)?.forEach((h) => h({ payload }));
+    emitRepoChanged = (payload) => emit("repo-changed", payload);
+    emitProgress = (payload) => emit("git-progress", payload);
+    listenMock.mockImplementation(async (event, handler) => {
+      const h = handler as (e: { payload: unknown }) => void;
+      if (!handlers.has(event)) handlers.set(event, new Set());
+      handlers.get(event)!.add(h);
+      return () => handlers.get(event)!.delete(h);
     });
     backend();
   });
@@ -118,7 +122,7 @@ describe("App", () => {
         get_settings: () => ({ reposDir: null }),
         get_status: ({ repo }) => makeStatus({ unstaged: [file(`${nameOf(repo as string)}.txt`)] }),
         get_log: () => [],
-        get_branches: () => ({ local: [], remote: [], tags: [] }),
+        get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
       });
     });
 
@@ -228,7 +232,7 @@ describe("App", () => {
       render(<App />);
       await waitFor(() => expect(tabNames()).toHaveLength(2));
       await screen.findByText("alpha.txt");
-      await waitFor(() => expect(listenMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(listenMock.mock.calls.filter(([e]) => e === "repo-changed")).toHaveLength(2));
       invokeMock.mockClear();
 
       act(() => emitRepoChanged({ root: "/work/beta", worktree: true, refs: false }));
@@ -253,6 +257,7 @@ describe("App", () => {
       local: ["main", "develop"].map((name) => ({ name, sha: "a", current: name === current, upstream: null, track: null })),
       remote: [{ name: "origin/release", sha: "b", current: false, upstream: null, track: null }],
       tags: [],
+      remotes: [{ name: "origin", url: "/srv/demo.git" }],
     });
 
     beforeEach(() => {
@@ -320,6 +325,209 @@ describe("App", () => {
 
       expect(await screen.findByRole("alert")).toHaveTextContent("would be overwritten by checkout");
       expect(screen.getByRole("button", { name: /^main/ })).toBeEnabled();
+    });
+  });
+
+  describe("fetch and pull", () => {
+    const now = () => Math.floor(Date.now() / 1000);
+    let status: Status;
+    let settings: Settings | null;
+    let handlers: Record<string, (args: Record<string, unknown>) => unknown>;
+
+    const branchList = () => ({
+      local: [{ name: "main", sha: "a", current: true, upstream: "origin/main", track: "[behind 2]" }],
+      remote: [
+        { name: "origin/main", sha: "b", current: false, upstream: null, track: null },
+        { name: "origin/dev", sha: "c", current: false, upstream: null, track: null },
+      ],
+      tags: [],
+      remotes: [{ name: "origin", url: "git@example.com:ada/demo.git" }],
+    });
+
+    beforeEach(() => {
+      localStorage.setItem("lastRepo", "/work/demo");
+      status = makeStatus({ upstream: "origin/main", behind: 2, lastFetch: now() });
+      settings = null;
+      handlers = {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => status,
+        get_log: () => [],
+        get_branches: branchList,
+        get_settings: () => {
+          if (!settings) throw "no settings";
+          return settings;
+        },
+      };
+      mockBackend(invokeMock, handlers);
+    });
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+
+    const pullButton = () => screen.getByRole("button", { name: /^Pull/ });
+
+    async function ready() {
+      render(<App />);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Fetch" })).toBeEnabled());
+    }
+
+    it("fetches the chosen remote, showing progress and then what changed", async () => {
+      const result = deferred<FetchResult>();
+      mockBackend(invokeMock, { ...handlers, fetch: () => result.promise });
+      await ready();
+
+      await userEvent.click(screen.getByRole("button", { name: "Fetch" }));
+      const dialog = screen.getByRole("dialog", { name: "Fetch" });
+      await userEvent.click(within(dialog).getByRole("button", { name: "Fetch" }));
+      expect(invokeMock).toHaveBeenCalledWith("fetch", {
+        repo: "/work/demo",
+        remote: "origin",
+        prune: true,
+        tags: false,
+        background: false,
+      });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(await screen.findByText("Fetching origin…")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Fetch" })).toBeDisabled();
+
+      act(() => emitProgress({ root: "/work/other", text: "Receiving objects: 99%" }));
+      act(() => emitProgress({ root: "/work/demo", text: "Receiving objects:  45% (45/100)" }));
+      expect(screen.getByText(/Receiving objects: 45% \(45\/100\)/)).toBeInTheDocument();
+      expect(screen.queryByText(/99%/)).toBeNull();
+
+      await act(async () =>
+        result.resolve({ newBranches: ["origin/x"], updatedBranches: ["origin/main"], deletedBranches: [], newTags: [] }),
+      );
+      expect(await screen.findByText("Fetched origin: 1 new branch, 1 updated")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Fetch" })).toBeEnabled();
+      await userEvent.click(screen.getByRole("button", { name: "Dismiss message" }));
+      expect(screen.queryByText(/Fetched origin/)).toBeNull();
+    });
+
+    it("shows why a fetch failed", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        fetch: () => {
+          throw "fatal: Could not read from remote repository.";
+        },
+      });
+      await ready();
+      await userEvent.keyboard("{Control>}{Shift>}F{/Shift}{/Control}");
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByRole("alert")).toHaveTextContent("Could not read from remote repository");
+    });
+
+    it("pulls the upstream and reports the result", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        pull: () => {
+          status = makeStatus({ upstream: "origin/main", lastFetch: now() });
+          return { outcome: "fast-forward", incoming: 2, rebased: 0, conflicts: 0 };
+        },
+      });
+      await ready();
+      expect(pullButton()).toHaveTextContent("Pull2");
+
+      await userEvent.keyboard("{Control>}{Shift>}L{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Pull" });
+      expect(within(dialog).getByLabelText("Pull from")).toHaveDisplayValue("origin/main");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Pull" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("pull", {
+        repo: "/work/demo",
+        remote: "origin",
+        branch: "main",
+        rebase: false,
+        autostash: true,
+      });
+      expect(await screen.findByText("Pulled 2 commits from origin/main into main")).toBeInTheDocument();
+      await waitFor(() => expect(pullButton()).toHaveTextContent(/^Pull$/));
+    });
+
+    it("leads to the conflicts when a pull stops, and aborts the merge on request", async () => {
+      const merging = () =>
+        makeStatus({
+          upstream: "origin/main",
+          behind: 1,
+          ahead: 1,
+          conflicted: [file("shared.txt", "U")],
+          operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'main' of example.com" },
+        });
+      mockBackend(invokeMock, {
+        ...handlers,
+        pull: () => {
+          status = merging();
+          return { outcome: "conflicts", incoming: 1, rebased: 0, conflicts: 1 };
+        },
+        abort_operation: () => {
+          status = makeStatus({ upstream: "origin/main", behind: 1, ahead: 1 });
+        },
+      });
+      await ready();
+      await userEvent.click(screen.getByRole("button", { name: "All commits" }));
+      await userEvent.click(pullButton());
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Pull" })).getByRole("button", { name: "Pull" }));
+
+      expect(await screen.findByText(/stopped with conflicts in 1 file/)).toBeInTheDocument();
+      const banner = await screen.findByText("Merge in progress");
+      expect(banner.closest("[role=status]")).toHaveTextContent("Resolve the conflicts in 1 file");
+      // Back in Local changes, with the merge message ready to commit once resolved.
+      expect(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("Merge branch 'main' of example.com");
+      expect(screen.getByText("shared.txt")).toBeInTheDocument();
+      expect(pullButton()).toBeDisabled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Abort merge" }));
+      expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
+      await waitFor(() => expect(screen.queryByText("Merge in progress")).toBeNull());
+    });
+
+    it("fetches in the background when the last fetch is older than the interval", async () => {
+      settings = { reposDir: null, autoFetchMinutes: 10 };
+      status = makeStatus({ upstream: "origin/main", lastFetch: now() - 3600 });
+      mockBackend(invokeMock, {
+        ...handlers,
+        fetch: () => {
+          throw "ssh: Could not resolve hostname example.com";
+        },
+      });
+      render(<App />);
+
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith("fetch", {
+          repo: "/work/demo",
+          remote: null,
+          prune: false,
+          tags: false,
+          background: true,
+        }),
+      );
+      // A failed automatic fetch is reported quietly on the button, not as an error.
+      const button = await screen.findByRole("button", { name: /^Fetch/ });
+      await waitFor(() => expect(within(button).getByLabelText("automatic fetch failed")).toBeInTheDocument());
+      expect(button).toHaveAttribute("title", expect.stringContaining("Could not resolve hostname"));
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("doesn't fetch in the background when the last fetch is recent or it is turned off", async () => {
+      settings = { reposDir: null, autoFetchMinutes: 10 };
+      const { unmount } = render(<App />);
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));
+      await screen.findByRole("button", { name: "Fetch" });
+      unmount();
+
+      settings = { reposDir: null, autoFetchMinutes: 0 };
+      status = makeStatus({ lastFetch: null });
+      render(<App />);
+      await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));
+      await screen.findByRole("button", { name: "Fetch" });
+      expect(invokeMock).not.toHaveBeenCalledWith("fetch", expect.anything());
     });
   });
 

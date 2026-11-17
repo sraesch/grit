@@ -32,6 +32,47 @@ describe("ChangesView", () => {
     });
   });
 
+  it("offers the prepared message of a merge and commits it with nothing staged", async () => {
+    const merging = makeStatus({
+      operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'main' of origin" },
+    });
+    const { onChanged } = setup({ status: merging });
+    const editor = screen.getByRole("textbox", { name: "Commit message" });
+    expect(editor).toHaveValue("Merge branch 'main' of origin");
+
+    // Clearing the message sticks; it isn't offered again on the next refresh.
+    await userEvent.clear(editor);
+    expect(editor).toHaveValue("");
+    await userEvent.type(editor, "Merge upstream changes");
+    await userEvent.click(screen.getByRole("button", { name: "Commit merge" }));
+    expect(invokeMock).toHaveBeenCalledWith("commit", { repo: "/repo", message: "Merge upstream changes", amend: false });
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+  });
+
+  it("doesn't commit in the middle of a rebase", async () => {
+    const rebasing = makeStatus({
+      staged: [file("a.txt")],
+      operation: { kind: "rebase", head: "main", step: 1, total: 2, message: null },
+    });
+    setup({ status: rebasing });
+    await userEvent.type(screen.getByRole("textbox", { name: "Commit message" }), "Oops");
+    const button = screen.getByRole("button", { name: /^Commit/ });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", expect.stringContaining("Continue"));
+  });
+
+  it("keeps a typed message when a merge starts", async () => {
+    const { rerender } = render(<ChangesView repo="/repo" status={status} onChanged={vi.fn()} onError={vi.fn()} />);
+    const editor = screen.getByRole("textbox", { name: "Commit message" });
+    await userEvent.type(editor, "Mine");
+    const merging = makeStatus({
+      ...status,
+      operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'main'" },
+    });
+    rerender(<ChangesView repo="/repo" status={merging} onChanged={vi.fn()} onError={vi.fn()} />);
+    expect(editor).toHaveValue("Mine");
+  });
+
   it("lists unstaged and staged files with counts", () => {
     setup();
     expect(screen.getByText("Unstaged changes").parentElement).toHaveTextContent("2");
