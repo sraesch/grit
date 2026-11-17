@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatTrack, LANE_COLORS, laneColor, relativeTime, splitPath } from "./util";
+import { formatTrack, LANE_COLORS, laneColor, relativeTime } from "./util";
 
 describe("relativeTime", () => {
   const now = new Date("2026-01-15T12:00:00Z");
@@ -25,15 +25,6 @@ describe("relativeTime", () => {
     [800 * 86400, "2 years ago"],
   ])("formats %i seconds ago as %s", (seconds, expected) => {
     expect(relativeTime(ago(seconds))).toBe(expected);
-  });
-});
-
-describe("splitPath", () => {
-  it("splits directory and file name", () => {
-    expect(splitPath("src/components/App.tsx")).toEqual({ dir: "src/components/", name: "App.tsx" });
-  });
-  it("handles files at the root", () => {
-    expect(splitPath("README.md")).toEqual({ dir: "", name: "README.md" });
   });
 });
 

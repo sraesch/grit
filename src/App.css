@@ -841,14 +841,29 @@ button.primary.danger:hover:not(:disabled) {
   background: var(--bg-selected);
 }
 .file-name {
-  flex-shrink: 0;
-}
-.file-dir {
-  color: var(--text-muted);
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
-  font-size: 12px;
+}
+.file-list .dir-row {
+  color: var(--text-muted);
+  gap: 4px;
+}
+.file-list .chevron {
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.chevron-spacer {
+  width: 12px;
+  margin-right: -3px;
+  flex-shrink: 0;
+}
+.dir-count {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 .row-action {
   display: none;

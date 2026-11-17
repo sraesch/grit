@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Fork-style layout: Fetch, Pull and Push sit in the main toolbar as icon buttons with their label underneath, with the commits to pull and push as badges on the icons; Settings and About are on the right. The repository tabs moved to their own bar below the toolbar, where they share the width equally and the selected tab is a raised pill; a tab's close button appears on hover
+- Changed files (unstaged, staged and in a commit's details) are shown as a folder tree instead of a flat list. Folders sort before files, chains of folders with a single subfolder share one row (`src/main/java`), and clicking a folder collapses it, showing how many files it holds. Hovering a folder offers Stage, Unstage or Mark resolved for all of its files
 
 ## [0.2.0] - 2026-11-15
 
