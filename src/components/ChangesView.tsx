@@ -32,6 +32,18 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const staged = status?.staged ?? [];
   const unstaged = status?.unstaged ?? [];
   const conflicted = status?.conflicted ?? [];
+  const merging = status?.operation?.kind === "merge";
+  const mergeMessage = merging ? status?.operation?.message : null;
+
+  // Offer the prepared message of a merge in progress (e.g. after a pull with conflicts), unless
+  // something is typed already. Each message is offered once, so clearing it sticks.
+  const offeredMessage = useRef<string | null>(null);
+  useEffect(() => {
+    if (mergeMessage && mergeMessage !== offeredMessage.current) {
+      offeredMessage.current = mergeMessage;
+      setMessage((current) => (current.trim() ? current : mergeMessage));
+    }
+  }, [mergeMessage]);
 
   // Drop the selection once the file no longer appears in the list it was selected from.
   useEffect(() => {
@@ -85,9 +97,11 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const select = (f: FileChange, isStaged: boolean) =>
     setSelection({ path: f.path, staged: isStaged, untracked: f.status === "?" });
 
-  const stageFile = (f: FileChange) => run(() => api.stage(repo, [f.path]));
-  const unstageFile = (f: FileChange) =>
-    run(() => api.unstage(repo, f.origPath ? [f.origPath, f.path] : [f.path]));
+  const stageFiles = (files: FileChange[]) => run(() => api.stage(repo, files.map((f) => f.path)));
+  const unstageFiles = (files: FileChange[]) =>
+    run(() => api.unstage(repo, files.flatMap((f) => (f.origPath ? [f.origPath, f.path] : [f.path]))));
+  const stageFile = (f: FileChange) => stageFiles([f]);
+  const unstageFile = (f: FileChange) => unstageFiles([f]);
 
   async function doCommit() {
     if (!message.trim()) return;
@@ -99,7 +113,16 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     });
   }
 
-  const canCommit = !busy && message.trim().length > 0 && (staged.length > 0 || amend) && conflicted.length === 0;
+  // A merge can be committed with nothing staged: resolving may have kept our side of every file.
+  // During a rebase, cherry-pick or revert, committing would add a stray commit: they go on
+  // with Continue in the banner instead.
+  const continuing = !!status?.operation && !merging;
+  const canCommit =
+    !busy &&
+    !continuing &&
+    message.trim().length > 0 &&
+    (staged.length > 0 || amend || merging) &&
+    conflicted.length === 0;
 
   const commitOnShortcut = (e: KeyboardEvent) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -127,6 +150,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
                 onSelect={(f) => select(f, false)}
                 actionLabel="Mark resolved"
                 onAction={stageFile}
+                onFolderAction={stageFiles}
               />
             )}
             <FileList
@@ -136,6 +160,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               onActivate={stageFile}
               actionLabel="Stage"
               onAction={stageFile}
+              onFolderAction={stageFiles}
             />
             {unstaged.length + conflicted.length === 0 && <div className="empty small">Working tree clean</div>}
           </div>
@@ -157,6 +182,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               onActivate={unstageFile}
               actionLabel="Unstage"
               onAction={unstageFile}
+              onFolderAction={unstageFiles}
             />
             {staged.length === 0 && <div className="empty small">Nothing staged</div>}
           </div>
@@ -219,8 +245,13 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               <input type="checkbox" checked={amend} onChange={(e) => setAmend(e.target.checked)} />
               Amend last commit
             </label>
-            <button className="primary" disabled={!canCommit} onClick={doCommit} title="Ctrl/Cmd + Enter">
-              {amend ? "Amend" : "Commit"}
+            <button
+              className="primary"
+              disabled={!canCommit}
+              onClick={doCommit}
+              title={continuing ? "Use Continue above to go on with the operation in progress" : "Ctrl/Cmd + Enter"}
+            >
+              {amend ? "Amend" : merging ? "Commit merge" : "Commit"}
               {staged.length > 0 ? ` ${staged.length} file${staged.length === 1 ? "" : "s"}` : ""}
             </button>
           </div>

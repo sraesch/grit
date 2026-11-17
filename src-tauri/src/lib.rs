@@ -1,13 +1,19 @@
 mod git;
 mod graph;
+#[cfg(target_os = "macos")]
+mod menu;
 mod settings;
 mod watcher;
 
 use std::path::PathBuf;
 
-use tauri::{AppHandle, Manager, State, ipc::Response};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
-use git::{Branches, CommitDetails, GitResult, LogEntry, RepoInfo, Status};
+use git::{
+    Branches, CommitDetails, Divergence, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult,
+    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
+};
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
 
@@ -118,6 +124,131 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
+/// A progress line of a running fetch, pull, push or rebase, e.g. "Receiving objects:  45% (450/1000)".
+#[derive(Serialize, Clone)]
+struct GitProgress {
+    /// The repository root, as passed to the command, so only its tab shows the progress.
+    root: String,
+    text: String,
+}
+
+/// Emits git's progress output as `git-progress` events for the repository's tab.
+fn progress_emitter(app: AppHandle, root: String) -> impl FnMut(&str) {
+    move |text: &str| {
+        let _ = app.emit(
+            "git-progress",
+            GitProgress {
+                root: root.clone(),
+                text: text.to_string(),
+            },
+        );
+    }
+}
+
+#[tauri::command]
+async fn fetch(
+    app: AppHandle,
+    repo: String,
+    remote: Option<String>,
+    prune: bool,
+    tags: bool,
+    background: bool,
+) -> GitResult<FetchResult> {
+    blocking(move || {
+        let opts = FetchOptions {
+            remote,
+            prune,
+            tags,
+            background,
+        };
+        let path = PathBuf::from(&repo);
+        if background {
+            // Nobody watches an automatic fetch, so its progress isn't sent.
+            git::fetch(&path, &opts, &mut |_| {})
+        } else {
+            git::fetch(&path, &opts, &mut progress_emitter(app, repo))
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+async fn pull(
+    app: AppHandle,
+    repo: String,
+    remote: String,
+    branch: String,
+    rebase: bool,
+    autostash: bool,
+) -> GitResult<PullResult> {
+    blocking(move || {
+        let opts = PullOptions {
+            remote,
+            branch,
+            rebase,
+            autostash,
+        };
+        git::pull(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+// Flat arguments, like fetch and pull, so the frontend passes its options object spread out.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn push(
+    app: AppHandle,
+    repo: String,
+    branch: String,
+    remote: String,
+    remote_branch: String,
+    set_upstream: bool,
+    tags: bool,
+    force: bool,
+) -> GitResult<PushResult> {
+    blocking(move || {
+        let opts = PushOptions {
+            branch,
+            remote,
+            remote_branch,
+            set_upstream,
+            tags,
+            force,
+        };
+        git::push(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_divergence(repo: String, base: String) -> GitResult<Divergence> {
+    blocking(move || git::divergence(&PathBuf::from(repo), &base)).await
+}
+
+#[tauri::command]
+async fn rebase(app: AppHandle, repo: String, onto: String, autostash: bool) -> GitResult<RebaseResult> {
+    blocking(move || {
+        let opts = RebaseOptions { onto, autostash };
+        git::rebase(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn abort_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::abort_operation(&PathBuf::from(repo))).await
+}
+
+#[tauri::command]
+async fn continue_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::continue_operation(&PathBuf::from(repo))).await
+}
+
+#[tauri::command]
+async fn skip_operation(repo: String) -> GitResult<()> {
+    blocking(move || git::skip_operation(&PathBuf::from(repo))).await
+}
+
 #[tauri::command]
 fn get_settings(store: State<'_, SettingsStore>) -> Settings {
     store.get()
@@ -130,7 +261,11 @@ fn set_settings(store: State<'_, SettingsStore>, settings: Settings) -> Result<S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Elsewhere there is no app menu; the toolbar's settings button and Ctrl+, open the settings.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build).on_menu_event(menu::on_event);
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WatchState::default())
@@ -157,6 +292,14 @@ pub fn run() {
             checkout_branch,
             checkout_remote_branch,
             create_branch,
+            fetch,
+            pull,
+            push,
+            get_divergence,
+            rebase,
+            abort_operation,
+            continue_operation,
+            skip_operation,
             get_settings,
             set_settings,
         ])

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
+### Added
+
+- Fetch: the Fetch button (or Ctrl/Cmd+Shift+F) fetches one remote or all of them, optionally pruning remote branches deleted on the remote and fetching all tags. git's progress is shown while it runs, followed by a summary of new, updated and pruned branches and new tags
+- Pull: the Pull button (or Ctrl/Cmd+Shift+L) shows how far behind the upstream the branch is and pulls a remote branch into the current one, by merge or rebase, optionally stashing and reapplying local changes. The result says what happened (fast-forward, merge, rebase or already up to date). The dialogs remember their options
+- Push: the Push button (or Ctrl/Cmd+Shift+P) shows how far ahead of the upstream the branch is and pushes a local branch to a branch on a remote, creating it if needed. Optionally push all tags and set the remote branch as upstream (on by default for branches without one). Force push replaces the remote branch, but is refused when the remote has commits you haven't pulled, even if a background fetch brought them in (`--force-with-lease` with `--force-if-includes`), and never overwrites tags. When a push is rejected because the remote branch moved on, the message offers to pull or to force push
+- When a pull, merge, rebase, cherry-pick or revert stops on conflicts, a banner explains what to do and offers to continue, skip the commit or abort; a merge in progress can be committed from the banner or with its prepared message in the commit box
+- Rebase: the Rebase button (or Ctrl/Cmd+Shift+E) rebases the current branch onto a local or remote branch or a tag, optionally stashing and reapplying local changes. The dialog starts on the branch a feature branch most likely came from (develop, main, …), previews how many commits will be replayed, and warns when commits that were already pushed would be rewritten. git's progress is shown while it runs, and a rebase that stops on conflicts continues, skips or aborts from the banner
+- Automatic fetching: open repositories fetch all remotes in the background (every 10 minutes by default, configurable or off in Settings). Automatic fetches never prompt for credentials, and a failure shows quietly on the Fetch button, which also tells when the repository was last fetched
+- macOS: "Settings…" (Cmd+,) in the app menu opens the settings
+
+### Changed
+
+- Fork-style layout: Fetch, Pull and Push sit in the main toolbar as icon buttons with their label underneath, with the commits to pull and push as badges on the icons; Settings and About are on the right. The repository tabs moved to their own bar below the toolbar, where they share the width equally and the selected tab is a raised pill; a tab's close button appears on hover
+- Changed files (unstaged, staged and in a commit's details) are shown as a folder tree instead of a flat list. Folders sort before files, chains of folders with a single subfolder share one row (`src/main/java`), and clicking a folder collapses it, showing how many files it holds. Hovering a folder offers Stage, Unstage or Mark resolved for all of its files
+
 ## [0.2.0] - 2026-11-15
 
 ### Added
@@ -45,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sraesch/grit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sraesch/grit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sraesch/grit/releases/tag/v0.1.0

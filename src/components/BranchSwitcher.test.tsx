@@ -18,6 +18,7 @@ const branches: Branches = {
   local: [branch("main", { current: true }), branch("develop", { track: "[ahead 3]" }), branch("feature/login")],
   remote: [branch("origin/main"), branch("origin/release")],
   tags: [],
+  remotes: [{ name: "origin", url: "git@example.com:demo.git" }],
 };
 
 function setup() {

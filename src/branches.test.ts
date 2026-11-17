@@ -25,6 +25,7 @@ const branches: Branches = {
     branch("upstream/docs"),
   ],
   tags: [],
+  remotes: [{ name: "origin", url: "git@example.com:demo.git" }],
 };
 
 describe("localNameOf", () => {

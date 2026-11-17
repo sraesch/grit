@@ -29,6 +29,8 @@ export function makeStatus(partial: Partial<Status> = {}): Status {
     staged: [],
     unstaged: [],
     conflicted: [],
+    operation: null,
+    lastFetch: null,
     ...partial,
   };
 }

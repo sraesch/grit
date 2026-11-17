@@ -25,13 +25,13 @@ const field = () => screen.getByLabelText("Repositories folder");
 
 describe("SettingsDialog", () => {
   beforeEach(() => {
-    stored = { reposDir: "/home/ada/code" };
+    stored = { reposDir: "/home/ada/code", autoFetchMinutes: 10 };
     mockBackend(invokeMock, {
       get_settings: () => stored,
       set_settings: ({ settings }) => {
         const s = settings as Settings;
         if (s.reposDir === "/missing") throw "The folder /missing does not exist";
-        stored = { reposDir: s.reposDir?.replace(/^~/, "/home/ada") ?? null };
+        stored = { reposDir: s.reposDir?.replace(/^~/, "/home/ada") ?? null, autoFetchMinutes: s.autoFetchMinutes };
         return stored;
       },
     });
@@ -52,8 +52,8 @@ describe("SettingsDialog", () => {
     await userEvent.type(field(), "~/projects{Enter}");
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(invokeMock).toHaveBeenCalledWith("set_settings", { settings: { reposDir: "~/projects" } });
-    expect(onSaved).toHaveBeenCalledWith({ reposDir: "/home/ada/projects" });
+    expect(invokeMock).toHaveBeenCalledWith("set_settings", { settings: { reposDir: "~/projects", autoFetchMinutes: 10 } });
+    expect(onSaved).toHaveBeenCalledWith({ reposDir: "/home/ada/projects", autoFetchMinutes: 10 });
   });
 
   it("stores an empty field as no folder", async () => {
@@ -62,7 +62,7 @@ describe("SettingsDialog", () => {
     await userEvent.clear(field());
     expect(field()).toHaveAttribute("placeholder", "Your home folder");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(stored).toEqual({ reposDir: null }));
+    await waitFor(() => expect(stored).toEqual({ reposDir: null, autoFetchMinutes: 10 }));
   });
 
   it("picks the folder with the native dialog, starting at the current one", async () => {
@@ -84,11 +84,24 @@ describe("SettingsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("The folder /missing does not exist");
     expect(field()).toHaveAttribute("aria-invalid", "true");
     expect(onClose).not.toHaveBeenCalled();
-    expect(stored).toEqual({ reposDir: "/home/ada/code" });
+    expect(stored).toEqual({ reposDir: "/home/ada/code", autoFetchMinutes: 10 });
 
     // Editing clears the message.
     await userEvent.type(field(), "x");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("saves how often to fetch automatically", async () => {
+    stored = { reposDir: null, autoFetchMinutes: 45 };
+    const { onSaved } = setup();
+    const select = screen.getByLabelText("Fetch automatically");
+    // A value set outside the usual choices is kept and shown.
+    await waitFor(() => expect(select).toHaveDisplayValue("Every 45 minutes"));
+    expect(select).toHaveAccessibleDescription(/never ask for passwords/);
+
+    await userEvent.selectOptions(select, "Never");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ reposDir: null, autoFetchMinutes: 0 }));
   });
 
   it("closes without saving on Cancel and Escape", async () => {

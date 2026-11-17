@@ -1,10 +1,20 @@
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorMessage, RepoInfo } from "./api";
+import { api, errorMessage, RepoInfo, Settings } from "./api";
 import { AboutDialog } from "./components/AboutDialog";
 import { LogoLockup, LogoTile } from "./components/Logo";
 import { RepoTab, tabPanelId } from "./components/RepoTab";
 import { SettingsDialog } from "./components/SettingsDialog";
+import {
+  AboutIcon,
+  FetchIcon,
+  PullIcon,
+  PushIcon,
+  SettingsIcon,
+  ToolbarButton,
+  ToolbarDivider,
+} from "./components/Toolbar";
 import { nextActive, readOpenTabs, saveOpenTabs, tabLabels } from "./tabs";
 import "@fontsource/nunito-sans/latin-900.css";
 import "./App.css";
@@ -17,6 +27,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // The active tab puts its fetch, pull and push buttons here.
+  const [repoActions, setRepoActions] = useState<HTMLDivElement | null>(null);
   const restoreStarted = useRef(false);
 
   const onError = useCallback((message: string) => setError(message), []);
@@ -92,6 +105,29 @@ function App() {
     if (!restoring) saveOpenTabs(tabs.map((t) => t.root), active);
   }, [tabs, active, restoring]);
 
+  // The tabs need the settings (automatic fetching) once a repository is open. Without them,
+  // nothing is fetched automatically.
+  const hasTabs = tabs.length > 0;
+  useEffect(() => {
+    if (!hasTabs || settings) return;
+    let cancelled = false;
+    api
+      .getSettings()
+      .then((s) => !cancelled && setSettings(s))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hasTabs, settings]);
+
+  // "Settings…" in the macOS app menu.
+  useEffect(() => {
+    const unlisten = listen("open-settings", () => setSettingsOpen(true));
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // App-wide shortcuts: settings, opening, closing and cycling through tabs.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -121,6 +157,30 @@ function App() {
     <div className="app">
       <header className="toolbar">
         <LogoTile size={22} label="grit" />
+        <div className="toolbar-group" ref={setRepoActions}>
+          {/* Without a repository there is nothing to fetch, pull or push. */}
+          {tabs.length === 0 && (
+            <>
+              <ToolbarButton icon={<FetchIcon />} label="Fetch" disabled onClick={() => {}} />
+              <ToolbarDivider />
+              <ToolbarButton icon={<PullIcon />} label="Pull" disabled onClick={() => {}} />
+              <ToolbarDivider />
+              <ToolbarButton icon={<PushIcon />} label="Push" disabled onClick={() => {}} />
+            </>
+          )}
+        </div>
+        <div className="spacer" />
+        <div className="toolbar-group">
+          <ToolbarButton
+            icon={<SettingsIcon />}
+            label="Settings"
+            title="Settings (Ctrl/Cmd+,)"
+            onClick={() => setSettingsOpen(true)}
+          />
+          <ToolbarButton icon={<AboutIcon />} label="About" title="About grit" onClick={() => setAboutOpen(true)} />
+        </div>
+      </header>
+      <nav className="tab-bar" aria-label="Repositories">
         <div className="repo-tabs" role="tablist" aria-label="Open repositories">
           {tabs.map((t) => {
             const selected = t.root === active;
@@ -135,6 +195,15 @@ function App() {
                 onMouseDown={(e) => e.button === 1 && e.preventDefault()}
               >
                 <button
+                  className="repo-tab-close"
+                  aria-label={`Close ${label}`}
+                  title="Close (Ctrl/Cmd+W)"
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => closeTab(t.root)}
+                >
+                  ×
+                </button>
+                <button
                   role="tab"
                   aria-selected={selected}
                   aria-controls={tabPanelId(t.root)}
@@ -144,15 +213,6 @@ function App() {
                 >
                   {label}
                 </button>
-                <button
-                  className="repo-tab-close"
-                  aria-label={`Close ${label}`}
-                  title="Close (Ctrl/Cmd+W)"
-                  tabIndex={selected ? 0 : -1}
-                  onClick={() => closeTab(t.root)}
-                >
-                  ×
-                </button>
               </div>
             );
           })}
@@ -160,14 +220,7 @@ function App() {
         <button className="repo-tab-add" onClick={chooseRepo} aria-label="Open repository" title="Open repository (Ctrl/Cmd+O)">
           +
         </button>
-        <div className="spacer" />
-        <button onClick={() => setSettingsOpen(true)} title="Settings (Ctrl/Cmd+,)">
-          Settings
-        </button>
-        <button onClick={() => setAboutOpen(true)} title="About grit">
-          About
-        </button>
-      </header>
+      </nav>
 
       {error && (
         <div className="error-bar" role="alert">
@@ -177,7 +230,15 @@ function App() {
       )}
 
       {tabs.map((t) => (
-        <RepoTab key={t.root} repo={t} active={t.root === active} onError={onError} onClearError={clearError} />
+        <RepoTab
+          key={t.root}
+          repo={t}
+          active={t.root === active}
+          actionsSlot={repoActions}
+          autoFetchMinutes={settings?.autoFetchMinutes ?? null}
+          onError={onError}
+          onClearError={clearError}
+        />
       ))}
       {tabs.length === 0 && !restoring && (
         <div className="welcome">
@@ -190,7 +251,7 @@ function App() {
       )}
 
       {aboutOpen && <AboutDialog onClose={closeAbout} />}
-      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} onSaved={setSettings} />}
     </div>
   );
 }

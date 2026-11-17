@@ -8,6 +8,15 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.3.0 — 2026-11-17
+
+- Fetch, pull and push right from the toolbar, which shows how many commits are waiting to be pulled or pushed
+- Rebase your branch onto another branch or tag, with a preview of the commits that will be replayed
+- Get clear guidance when a pull, merge or rebase stops on conflicts, and continue, skip or abort with one click
+- Repositories now fetch in the background, so you see new remote changes without asking
+- Changed files are shown as a folder tree; collapse folders, or stage and unstage a whole folder at once
+- A fresh layout with a toolbar on top and your repository tabs in their own bar
+
 ## 0.2.0 — 2026-11-15
 
 - Open several repositories side by side in tabs, and pick up where you left off on the next start
