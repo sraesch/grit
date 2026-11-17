@@ -50,6 +50,10 @@ describe("App", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "grit" })).toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalled();
+    // The toolbar keeps its place, with nothing to fetch, pull or push.
+    for (const name of ["Fetch", "Pull", "Push"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
   });
 
   it("opens a repository chosen in the dialog and remembers it", async () => {
@@ -163,6 +167,37 @@ describe("App", () => {
       expect(screen.getByText("beta.txt")).not.toBeVisible();
       expect(localStorage.getItem("openRepos")).toBe(JSON.stringify(["/work/alpha", "/work/beta"]));
       expect(localStorage.getItem("activeRepo")).toBe("/work/alpha");
+    });
+
+    it("shows the active tab's fetch, pull and push in the toolbar", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: nameOf(path as string) }),
+        get_settings: () => ({ reposDir: null }),
+        get_status: ({ repo }) =>
+          makeStatus({ upstream: "origin/main", ...(repo === "/work/alpha" ? { ahead: 3 } : { behind: 4 }) }),
+        get_log: () => [],
+        get_branches: () => ({
+          local: [{ name: "main", sha: "a", current: true, upstream: "origin/main", track: null }],
+          remote: [{ name: "origin/main", sha: "b", current: false, upstream: null, track: null }],
+          tags: [],
+          remotes: [{ name: "origin", url: "/srv/repo.git" }],
+        }),
+      });
+      render(<App />);
+      await openViaDialog("/work/alpha");
+      await openViaDialog("/work/beta");
+      const toolbarButton = (name: RegExp) => within(screen.getByRole("banner")).getByRole("button", { name });
+
+      // Only the active tab's buttons are there, with its counts.
+      await waitFor(() => expect(toolbarButton(/^Pull/)).toHaveTextContent("Pull4"));
+      expect(toolbarButton(/^Push/)).toHaveTextContent(/^Push$/);
+      await userEvent.click(tab("alpha"));
+      await waitFor(() => expect(toolbarButton(/^Push/)).toHaveTextContent("Push3"));
+      expect(toolbarButton(/^Pull/)).toHaveTextContent(/^Pull$/);
+      expect(within(screen.getByRole("banner")).getAllByRole("button", { name: /^Fetch/ })).toHaveLength(1);
+
+      await userEvent.click(toolbarButton(/^Push/));
+      expect(screen.getByRole("dialog", { name: "Push" })).toBeInTheDocument();
     });
 
     it("shows the existing tab when a repository is opened again", async () => {

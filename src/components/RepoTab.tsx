@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   Branches,
@@ -32,11 +33,14 @@ import { OperationBanner } from "./OperationBanner";
 import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 import { Sidebar, View } from "./Sidebar";
 import { Split } from "./Split";
+import { FetchIcon, PullIcon, PushIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
 
 interface RepoTabProps {
   repo: RepoInfo;
   /** Only the active tab is shown and reacts to keyboard shortcuts; the others keep their state. */
   active: boolean;
+  /** Where the active tab shows its fetch, pull and push buttons: the app's toolbar. */
+  actionsSlot: HTMLElement | null;
   /** Fetch in the background this often; 0 or null (settings not loaded) turns it off. */
   autoFetchMinutes: number | null;
   onError: (message: string) => void;
@@ -68,7 +72,7 @@ interface PushPreset {
 const NOTICE_MS = 8000;
 
 /** One open repository: its branch bar, sidebar and changes/history views. */
-export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError }: RepoTabProps) {
+export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, onClearError }: RepoTabProps) {
   const root = repo.root;
   const [view, setView] = useState<View>("changes");
   const [status, setStatus] = useState<Status | null>(null);
@@ -393,41 +397,43 @@ export function RepoTab({ repo, active, autoFetchMinutes, onError, onClearError 
           </span>
         )}
         <div className="spacer" />
-        <button
-          className="small remote-button"
-          disabled={!canFetch}
-          onClick={() => setDialog("fetch")}
-          title={fetchTitle(branches, status, autoFetchError)}
-        >
-          Fetch
-          {autoFetchError && (
-            <span className="remote-warning" aria-label="automatic fetch failed">
-              !
-            </span>
-          )}
-        </button>
-        <button
-          className="small remote-button"
-          disabled={!canPull}
-          onClick={() => setDialog("pull")}
-          title={pullTitle(status, pull?.sources.length ?? 0)}
-        >
-          Pull
-          {status && status.behind > 0 && <span className="count accent">{status.behind}</span>}
-        </button>
-        <button
-          className="small remote-button"
-          disabled={!canPush}
-          onClick={() => openPush()}
-          title={pushTitle(branches, status)}
-        >
-          Push
-          {status && status.ahead > 0 && <span className="count accent">{status.ahead}</span>}
-        </button>
         <button className="small" onClick={refreshAll} title="Refresh">
           ⟳ Refresh
         </button>
       </div>
+      {active &&
+        actionsSlot &&
+        createPortal(
+          <>
+            <ToolbarButton
+              icon={<FetchIcon />}
+              label="Fetch"
+              disabled={!canFetch}
+              onClick={() => setDialog("fetch")}
+              title={fetchTitle(branches, status, autoFetchError)}
+              warning={autoFetchError && "automatic fetch failed"}
+            />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<PullIcon />}
+              label="Pull"
+              badge={status?.behind}
+              disabled={!canPull}
+              onClick={() => setDialog("pull")}
+              title={pullTitle(status, pull?.sources.length ?? 0)}
+            />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<PushIcon />}
+              label="Push"
+              badge={status?.ahead}
+              disabled={!canPush}
+              onClick={() => openPush()}
+              title={pushTitle(branches, status)}
+            />
+          </>,
+          actionsSlot,
+        )}
       {status?.operation && (
         <OperationBanner
           operation={status.operation}

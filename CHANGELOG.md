@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic fetching: open repositories fetch all remotes in the background (every 10 minutes by default, configurable or off in Settings). Automatic fetches never prompt for credentials, and a failure shows quietly on the Fetch button, which also tells when the repository was last fetched
 - macOS: "Settings…" (Cmd+,) in the app menu opens the settings
 
+### Changed
+
+- Fork-style layout: Fetch, Pull and Push sit in the main toolbar as icon buttons with their label underneath, with the commits to pull and push as badges on the icons; Settings and About are on the right. The repository tabs moved to their own bar below the toolbar, where they share the width equally and the selected tab is a raised pill; a tab's close button appears on hover
+
 ## [0.2.0] - 2026-11-15
 
 ### Added
