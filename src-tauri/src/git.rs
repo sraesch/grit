@@ -761,7 +761,7 @@ fn error_text(stderr: &str, fallback: &str) -> String {
 fn is_progress(line: &str) -> bool {
     let l = line.trim_start();
     let l = l.strip_prefix("remote:").map(str::trim_start).unwrap_or(l);
-    const PHASES: [&str; 10] = [
+    const PHASES: [&str; 11] = [
         "Enumerating objects",
         "Counting objects",
         "Compressing objects",
@@ -772,6 +772,8 @@ fn is_progress(line: &str) -> bool {
         "Updating files",
         "Checking out files",
         "Total ",
+        // A rebase's "Rebasing (2/5)".
+        "Rebasing (",
     ];
     PHASES.iter().any(|p| l.starts_with(p)) || (l.contains("% (") && l.contains(')'))
 }
@@ -962,14 +964,15 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
 pub fn pull(repo: &Path, opts: &PullOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<PullResult> {
     let remote = plain_arg(&opts.remote, "remote name")?;
     let branch = plain_arg(&opts.branch, "branch name")?;
-    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
-        return Err("Pulling needs a current branch, but HEAD is detached. Switch to a branch first.".into());
-    }
+    // A rebase in progress detaches HEAD, so check for it first.
     if let Some(op) = operation(&git_dir(repo)?) {
         return Err(format!(
             "A {} is in progress. Finish or abort it before pulling.",
             op.kind.label()
         ));
+    }
+    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("Pulling needs a current branch, but HEAD is detached. Switch to a branch first.".into());
     }
     let old = rev(repo, "HEAD");
 
@@ -1212,6 +1215,125 @@ pub fn push(repo: &Path, opts: &PushOptions, on_progress: &mut dyn FnMut(&str)) 
         commits,
         new_tags: tags('*'),
         rejected_tags: tags('!'),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Rebase
+// ---------------------------------------------------------------------------
+
+/// How far HEAD and another branch or commit have diverged.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Divergence {
+    /// Commits only on HEAD.
+    pub ahead: u32,
+    /// Commits only on the other side.
+    pub behind: u32,
+}
+
+/// Counts the commits HEAD has that `base` doesn't (ahead) and the other way round (behind).
+pub fn divergence(repo: &Path, base: &str) -> GitResult<Divergence> {
+    let base = plain_arg(base, "branch or commit")?;
+    let range = format!("{base}...HEAD");
+    // "<behind>\t<ahead>": the left side of the symmetric range is `base`.
+    let out = run(repo, &["rev-list", "--left-right", "--count", &range, "--"])?;
+    let mut counts = out.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    let behind = counts.next().unwrap_or(0);
+    let ahead = counts.next().unwrap_or(0);
+    Ok(Divergence { ahead, behind })
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum RebaseOutcome {
+    /// The branch already contains everything on the new base.
+    UpToDate,
+    /// The branch had no commits of its own and was moved to the new base.
+    FastForward,
+    /// The branch's commits were replayed on top of the new base.
+    Rebase,
+    /// The rebase stopped (usually on conflicts); `Status::operation` describes it.
+    Conflicts,
+    /// The rebase succeeded, but reapplying the stashed local changes conflicted.
+    /// The changes are kept in the stash.
+    StashConflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseResult {
+    pub outcome: RebaseOutcome,
+    /// Commits of the new base the branch didn't contain yet.
+    pub incoming: u32,
+    /// Commits of the branch on top of the new base afterwards; for `Conflicts`, the commits
+    /// being replayed.
+    pub rebased: u32,
+    /// Files with conflicts, for the `Conflicts` and `StashConflicts` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct RebaseOptions {
+    /// Branch, tag or commit to rebase onto, e.g. "main" or "origin/main".
+    pub onto: String,
+    /// Stash uncommitted changes before and reapply them after the rebase.
+    pub autostash: bool,
+}
+
+/// Replays the current branch's own commits on top of `opts.onto`.
+pub fn rebase(repo: &Path, opts: &RebaseOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<RebaseResult> {
+    let onto = plain_arg(&opts.onto, "branch or commit")?;
+    // A rebase in progress detaches HEAD, so check for it first.
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before rebasing.",
+            op.kind.label()
+        ));
+    }
+    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("Rebasing needs a current branch, but HEAD is detached. Switch to a branch first.".into());
+    }
+    let old = rev(repo, "HEAD").ok_or("The current branch has no commits to rebase yet.")?;
+    let base =
+        rev(repo, &format!("{onto}^{{commit}}")).ok_or_else(|| format!("'{onto}' is not a branch, tag or commit."))?;
+    let incoming = count(repo, &format!("{old}..{base}"));
+    let own = count(repo, &format!("{base}..{old}"));
+
+    let args = [
+        "rebase",
+        if opts.autostash {
+            "--autostash"
+        } else {
+            "--no-autostash"
+        },
+        onto,
+    ];
+    // A non-interactive rebase shouldn't open an editor, but never wait for one that can't show.
+    let out = exec_streaming(repo, &args, &[("GIT_EDITOR", "true")], on_progress)?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    let result = |outcome, rebased| RebaseResult {
+        outcome,
+        incoming,
+        rebased,
+        conflicts,
+    };
+    if st.operation.is_some() {
+        return Ok(result(RebaseOutcome::Conflicts, own));
+    }
+    if conflicts > 0 {
+        return Ok(result(
+            RebaseOutcome::StashConflicts,
+            count(repo, &format!("{base}..HEAD")),
+        ));
+    }
+    if out.code != 0 {
+        return Err(error_text(&out.stderr, "Rebase failed"));
+    }
+    Ok(match rev(repo, "HEAD") {
+        Some(new) if new == old => result(RebaseOutcome::UpToDate, 0),
+        _ if own == 0 => result(RebaseOutcome::FastForward, 0),
+        _ => result(RebaseOutcome::Rebase, count(repo, &format!("{base}..HEAD"))),
     })
 }
 
@@ -2379,6 +2501,140 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
                 },
             ]
         );
+    }
+
+    fn rebase_opts(onto: &str, autostash: bool) -> RebaseOptions {
+        RebaseOptions {
+            onto: onto.into(),
+            autostash,
+        }
+    }
+
+    /// main with one commit since `feature` branched off, and `feature` with two of its own,
+    /// checked out. With `conflict`, both sides change the same line of shared.txt.
+    fn feature_branch(name: &str, conflict: bool) -> TestRepo {
+        let repo = TestRepo::new(name);
+        repo.write("shared.txt", "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "feature"]);
+        repo.write("a.txt", "a\n");
+        repo.commit_all("feature a");
+        repo.write("shared.txt", if conflict { "feature\n" } else { "base\n" });
+        repo.write("b.txt", "b\n");
+        repo.commit_all("feature b");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("shared.txt", if conflict { "main\n" } else { "base\n" });
+        repo.write("main.txt", "main\n");
+        repo.commit_all("main moves on");
+        repo.git(&["switch", "-q", "feature"]);
+        repo
+    }
+
+    #[test]
+    fn rebases_a_branch_onto_another() {
+        let repo = feature_branch("rebase-onto", false);
+        let main = repo.git(&["rev-parse", "main"]).trim().to_string();
+        assert_eq!(
+            divergence(&repo.dir, "main").unwrap(),
+            Divergence { ahead: 2, behind: 1 }
+        );
+
+        let mut progress = Vec::new();
+        let r = rebase(&repo.dir, &rebase_opts("main", false), &mut |p| {
+            progress.push(p.to_string())
+        })
+        .unwrap();
+        assert_eq!(
+            (r.outcome, r.incoming, r.rebased, r.conflicts),
+            (RebaseOutcome::Rebase, 1, 2, 0)
+        );
+        assert_eq!(repo.git(&["rev-parse", "HEAD~2"]).trim(), main);
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "feature b");
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("feature"));
+        assert!(repo.dir.join("main.txt").exists());
+        assert!(!progress.is_empty());
+        assert_eq!(
+            divergence(&repo.dir, "main").unwrap(),
+            Divergence { ahead: 2, behind: 0 }
+        );
+
+        let r = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming, r.rebased), (RebaseOutcome::UpToDate, 0, 0));
+    }
+
+    #[test]
+    fn rebasing_a_branch_without_own_commits_fast_forwards() {
+        let repo = feature_branch("rebase-ff", false);
+        repo.git(&["switch", "-q", "-c", "behind", "main~1"]);
+        let r = rebase(&repo.dir, &rebase_opts("feature", false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming, r.rebased), (RebaseOutcome::FastForward, 2, 0));
+        assert_eq!(repo.head(), repo.git(&["rev-parse", "feature"]).trim());
+    }
+
+    #[test]
+    fn stashes_local_changes_around_a_rebase_on_request() {
+        let repo = feature_branch("rebase-stash", false);
+        repo.write("a.txt", "local edit\n");
+        let before = repo.head();
+        let err = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap_err();
+        assert!(err.to_lowercase().contains("unstaged changes"), "{err}");
+        assert!(!err.contains("Rebasing ("), "{err}");
+        assert_eq!(repo.head(), before);
+
+        let r = rebase(&repo.dir, &rebase_opts("main", true), &mut no_progress).unwrap();
+        assert_eq!(r.outcome, RebaseOutcome::Rebase);
+        assert_eq!(repo.read("a.txt"), "local edit\n");
+        assert_eq!(repo.git(&["stash", "list"]), "");
+    }
+
+    #[test]
+    fn stops_a_conflicting_rebase_onto_a_branch() {
+        let repo = feature_branch("rebase-conflict", true);
+        let before = repo.head();
+
+        let r = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap();
+        assert_eq!(
+            (r.outcome, r.incoming, r.rebased, r.conflicts),
+            (RebaseOutcome::Conflicts, 1, 2, 1)
+        );
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Rebase);
+        assert_eq!(op.head.as_deref(), Some("feature"));
+        assert_eq!((op.step, op.total), (Some(2), Some(2)));
+
+        let err = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap_err();
+        assert!(err.contains("rebase is in progress"), "{err}");
+
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.head(), before);
+        assert_eq!(repo.read("shared.txt"), "feature\n");
+
+        rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap();
+        repo.write("shared.txt", "both\n");
+        stage(&repo.dir, &["shared.txt".into()]).unwrap();
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(
+            repo.git(&["rev-parse", "HEAD~2"]).trim(),
+            repo.git(&["rev-parse", "main"]).trim()
+        );
+    }
+
+    #[test]
+    fn refuses_to_rebase_without_a_branch_or_with_bad_arguments() {
+        let repo = feature_branch("rebase-refuse", false);
+        for (onto, expected) in [
+            ("--exec=x", "not a valid"),
+            ("", "not a valid"),
+            ("nope", "'nope' is not a branch"),
+        ] {
+            let err = rebase(&repo.dir, &rebase_opts(onto, false), &mut no_progress).unwrap_err();
+            assert!(err.contains(expected), "{onto}: {err}");
+            assert!(divergence(&repo.dir, onto).is_err(), "{onto}");
+        }
+        repo.git(&["switch", "-q", "--detach", "HEAD"]);
+        let err = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap_err();
+        assert!(err.contains("detached"), "{err}");
     }
 
     #[test]

@@ -589,6 +589,60 @@ describe("App", () => {
       expect(screen.queryByRole("button", { name: "Force Push…" })).toBeNull();
     });
 
+    it("rebases onto another branch and leads to the conflicts when it stops", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 1, behind: 3 }),
+        rebase: () => {
+          status = makeStatus({
+            upstream: "origin/main",
+            conflicted: [file("shared.txt", "U")],
+            operation: { kind: "rebase", head: "main", step: 1, total: 1, message: null },
+          });
+          return { outcome: "conflicts", incoming: 3, rebased: 1, conflicts: 1 };
+        },
+        abort_operation: () => {
+          status = makeStatus({ upstream: "origin/main" });
+        },
+      });
+      await ready();
+      const rebaseButton = screen.getByRole("button", { name: "Rebase" });
+      expect(rebaseButton).toBeEnabled();
+      await userEvent.click(screen.getByRole("button", { name: "All commits" }));
+
+      await userEvent.keyboard("{Control>}{Shift>}E{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Rebase" });
+      // main is a base branch, so it starts on its upstream.
+      expect(within(dialog).getByLabelText("Onto")).toHaveDisplayValue("origin/main");
+      await userEvent.selectOptions(within(dialog).getByLabelText("Onto"), "origin/dev");
+      await waitFor(() => expect(within(dialog).getByLabelText("Onto")).toHaveAccessibleDescription(/^Replays 1 commit of main/));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Rebase" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("rebase", { repo: "/work/demo", onto: "origin/dev", autostash: true });
+      expect(await screen.findByText(/Rebasing main onto origin\/dev stopped with conflicts in 1 file/)).toBeInTheDocument();
+      expect(await screen.findByText("Rebasing main (commit 1 of 1)")).toBeInTheDocument();
+      // Back in Local changes to resolve the conflict; no second rebase meanwhile.
+      expect(screen.getByText("shared.txt")).toBeInTheDocument();
+      expect(rebaseButton).toBeDisabled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Abort rebase" }));
+      expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
+      await waitFor(() => expect(screen.queryByText(/Rebasing main \(/)).toBeNull());
+      expect(rebaseButton).toBeEnabled();
+    });
+
+    it("reports a successful rebase", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 1, behind: 3 }),
+        rebase: () => ({ outcome: "rebase", incoming: 3, rebased: 1, conflicts: 0 }),
+      });
+      await ready();
+      await userEvent.click(screen.getByRole("button", { name: "Rebase" }));
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText("Rebased 1 commit of main onto origin/main (3 new)")).toBeInTheDocument();
+    });
+
     it("fetches in the background when the last fetch is older than the interval", async () => {
       settings = { reposDir: null, autoFetchMinutes: 10 };
       status = makeStatus({ upstream: "origin/main", lastFetch: now() - 3600 });

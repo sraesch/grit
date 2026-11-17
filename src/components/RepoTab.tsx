@@ -10,11 +10,13 @@ import {
   LogEntry,
   PullOptions,
   PushOptions,
+  RebaseOptions,
   RepoChanged,
   RepoInfo,
   Status,
 } from "../api";
 import { switchTo, SwitchTarget } from "../branches";
+import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
   autoFetchDue,
   defaultFetchRemote,
@@ -30,10 +32,11 @@ import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { HistoryView } from "./HistoryView";
 import { OperationBanner } from "./OperationBanner";
+import { RebaseDialog } from "./RebaseDialog";
 import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 import { Sidebar, View } from "./Sidebar";
 import { Split } from "./Split";
-import { FetchIcon, PullIcon, PushIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
+import { FetchIcon, PullIcon, PushIcon, RebaseIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
 
 interface RepoTabProps {
   repo: RepoInfo;
@@ -48,7 +51,7 @@ interface RepoTabProps {
   onClearError: () => void;
 }
 
-/** A fetch, pull or push that is running; background fetches don't show progress. */
+/** A fetch, pull, push or rebase that is running; background fetches don't show progress. */
 interface RemoteOp {
   label: string;
   background: boolean;
@@ -80,7 +83,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [branches, setBranches] = useState<Branches | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | null>(null);
+  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "rebase" | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -144,7 +147,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     };
   }, [root, refreshStatus, refreshHistory]);
 
-  // Progress of this tab's fetch or pull ("Receiving objects: 45% (450/1000)").
+  // Progress of this tab's fetch, pull or rebase ("Receiving objects: 45% (450/1000)", "Rebasing (2/5)").
   useEffect(() => {
     const unlisten = listen<GitProgress>("git-progress", ({ payload }) => {
       if (payload.root === root && remoteOpRef.current && !remoteOpRef.current.background) setProgress(payload.text);
@@ -161,7 +164,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     return () => clearTimeout(timer);
   }, [notice]);
 
-  /** Runs one fetch, pull or push at a time; resolves to null when another one is still running. */
+  /** Runs one fetch, pull, push or rebase at a time; resolves to null when another one is still running. */
   const runRemote = useCallback(
     async <T,>(op: RemoteOp, action: () => Promise<T>): Promise<T | null> => {
       if (remoteOpRef.current) {
@@ -260,6 +263,26 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     [root, runRemote, onError, onClearError, openPush],
   );
 
+  const rebaseNow = useCallback(
+    async (options: RebaseOptions) => {
+      setDialog(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      try {
+        const result = await runRemote({ label: `Rebasing ${branch} onto ${options.onto}…`, background: false }, () =>
+          api.rebase(root, options),
+        );
+        if (!result || !mounted.current) return;
+        setNotice(rebaseSummary(result, options.onto, branch));
+        onClearError();
+        // Conflicts are resolved in the changes view.
+        if (result.outcome === "conflicts" || result.outcome === "stash-conflicts") setView("changes");
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
   // Fetch in the background when the last fetch (by grit, the command line or another tool)
   // or the last attempt is older than the interval. Failures are shown quietly on the button.
   const autoFetch = useCallback(async () => {
@@ -290,9 +313,11 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const pull = branches && status ? pullSources(branches, status) : null;
   const canPull = !!status?.branch && !!pull && pull.sources.length > 0 && !status.operation && !remoteOp;
   const canPush = !!branches && branches.remotes.length > 0 && branches.local.length > 0 && !remoteOp;
+  const rebase = branches && status ? rebaseTargets(branches, status) : null;
+  const canRebase = !!status?.branch && !!rebase && hasRebaseTargets(rebase) && !status.operation && !remoteOp;
 
   // Shortcuts of the visible tab: Ctrl/Cmd+B switches branches, Ctrl/Cmd+Shift+F fetches,
-  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork.
+  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork; Ctrl/Cmd+Shift+E rebases.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -302,12 +327,13 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       else if (key === "f" && e.shiftKey && canFetch) setDialog("fetch");
       else if (key === "l" && e.shiftKey && canPull) setDialog("pull");
       else if (key === "p" && e.shiftKey && canPush) openPush();
+      else if (key === "e" && e.shiftKey && canRebase) setDialog("rebase");
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, canFetch, canPull, canPush, openPush]);
+  }, [active, canFetch, canPull, canPush, canRebase, openPush]);
 
   // Popovers and dialogs left open in a tab that is switched away from would reappear unexpectedly.
   useEffect(() => {
@@ -431,6 +457,14 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
               onClick={() => openPush()}
               title={pushTitle(branches, status)}
             />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<RebaseIcon />}
+              label="Rebase"
+              disabled={!canRebase}
+              onClick={() => setDialog("rebase")}
+              title={rebaseTitle(status, !!rebase && hasRebaseTargets(rebase))}
+            />
           </>,
           actionsSlot,
         )}
@@ -474,6 +508,16 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeDialog}
         />
       )}
+      {dialog === "rebase" && status?.branch && rebase && (
+        <RebaseDialog
+          repo={root}
+          branch={status.branch}
+          status={status}
+          targets={rebase}
+          onRebase={rebaseNow}
+          onClose={closeDialog}
+        />
+      )}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar view={view} onView={setView} changeCount={changeCount} branches={branches} onSwitch={switchBranch} />
         <main className="main">
@@ -495,7 +539,7 @@ interface RemoteStatusProps {
   onDismiss: () => void;
 }
 
-/** The running fetch, pull or push with git's progress, or the message about the last one. */
+/** The running fetch, pull, push or rebase with git's progress, or the message about the last one. */
 function RemoteStatus({ op, progress, notice, onDismiss }: RemoteStatusProps) {
   if (op) {
     return (
@@ -548,6 +592,14 @@ function pushTitle(branches: Branches | null, status: Status | null): string {
   if (branches && branches.local.length === 0) return "There are no branches to push yet";
   const ahead = status?.branch && status.ahead > 0 ? `\n${status.branch} is ${status.ahead} ahead of ${status.upstream}` : "";
   return `Push a branch to a remote (Ctrl/Cmd+Shift+P)${ahead}`;
+}
+
+function rebaseTitle(status: Status | null, hasTargets: boolean): string {
+  if (!status) return "Rebase";
+  if (!status.branch) return "Switch to a branch to rebase";
+  if (status.operation) return "Finish or abort the operation in progress first";
+  if (!hasTargets) return "There are no other branches or tags to rebase onto";
+  return `Rebase ${status.branch} onto another branch (Ctrl/Cmd+Shift+E)`;
 }
 
 /** Id of a tab's panel, for aria-controls on its tab button. */

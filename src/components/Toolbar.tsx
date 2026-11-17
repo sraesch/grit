@@ -74,6 +74,21 @@ export function PushIcon() {
   );
 }
 
+/** Rebase: a branch lifted off the trunk and replanted on its tip. */
+export function RebaseIcon() {
+  return (
+    <Icon>
+      <g strokeWidth={1.8}>
+        <path d="M7 21V5" />
+        <circle cx="7" cy="5" r="2" />
+        <path d="M7 5c0 4 10 2 10 6v5" />
+        <circle cx="17" cy="11" r="2" fill="currentColor" />
+        <circle cx="17" cy="18" r="2" fill="currentColor" />
+      </g>
+    </Icon>
+  );
+}
+
 export function SettingsIcon() {
   return (
     <Icon>

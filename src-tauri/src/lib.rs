@@ -11,8 +11,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult, PushOptions,
-    PushResult, RepoInfo, Status,
+    Branches, CommitDetails, Divergence, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult,
+    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -124,7 +124,7 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
-/// A progress line of a running fetch, pull or push, e.g. "Receiving objects:  45% (450/1000)".
+/// A progress line of a running fetch, pull, push or rebase, e.g. "Receiving objects:  45% (450/1000)".
 #[derive(Serialize, Clone)]
 struct GitProgress {
     /// The repository root, as passed to the command, so only its tab shows the progress.
@@ -221,6 +221,20 @@ async fn push(
 }
 
 #[tauri::command]
+async fn get_divergence(repo: String, base: String) -> GitResult<Divergence> {
+    blocking(move || git::divergence(&PathBuf::from(repo), &base)).await
+}
+
+#[tauri::command]
+async fn rebase(app: AppHandle, repo: String, onto: String, autostash: bool) -> GitResult<RebaseResult> {
+    blocking(move || {
+        let opts = RebaseOptions { onto, autostash };
+        git::rebase(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -281,6 +295,8 @@ pub fn run() {
             fetch,
             pull,
             push,
+            get_divergence,
+            rebase,
             abort_operation,
             continue_operation,
             skip_operation,

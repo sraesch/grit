@@ -177,7 +177,34 @@ export interface PushResult {
   rejectedTags: string[];
 }
 
-/** A progress line of a running fetch, pull or push. */
+export interface RebaseOptions {
+  /** Branch, tag or commit to rebase the current branch onto, e.g. "main" or "origin/main". */
+  onto: string;
+  /** Stash uncommitted changes before the rebase and reapply them afterwards. */
+  autostash: boolean;
+}
+
+export type RebaseOutcome = "up-to-date" | "fast-forward" | "rebase" | "conflicts" | "stash-conflicts";
+
+export interface RebaseResult {
+  outcome: RebaseOutcome;
+  /** Commits of the new base the branch didn't contain yet. */
+  incoming: number;
+  /** The branch's own commits on top of the new base; for "conflicts", the commits being replayed. */
+  rebased: number;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
+/** How far HEAD and another branch or commit have diverged. */
+export interface Divergence {
+  /** Commits only on HEAD. */
+  ahead: number;
+  /** Commits only on the other side. */
+  behind: number;
+}
+
+/** A progress line of a running fetch, pull, push or rebase. */
 export interface GitProgress {
   root: string;
   text: string;
@@ -231,6 +258,13 @@ export const api = {
   pull: (repo: string, options: PullOptions) => invoke<PullResult>("pull", { repo, ...options }),
   /** Progress arrives as `git-progress` events. A rejected push resolves with outcome "rejected" or "stale". */
   push: (repo: string, options: PushOptions) => invoke<PushResult>("push", { repo, ...options }),
+  /** Commits HEAD has that `base` doesn't (ahead), and the other way round (behind). */
+  divergence: (repo: string, base: string) => invoke<Divergence>("get_divergence", { repo, base }),
+  /**
+   * Rebases the current branch onto `options.onto`. Progress arrives as `git-progress` events.
+   * Conflicts resolve with outcome "conflicts" rather than rejecting.
+   */
+  rebase: (repo: string, options: RebaseOptions) => invoke<RebaseResult>("rebase", { repo, ...options }),
   /** Aborts the merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
