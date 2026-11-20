@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::graph::{self, GraphRow};
 
@@ -535,6 +535,8 @@ pub struct Branches {
     pub remote: Vec<Branch>,
     pub tags: Vec<Branch>,
     pub remotes: Vec<Remote>,
+    /// The branch checked out before the current one (`@{-1}`), if it still exists.
+    pub previous: Option<String>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
@@ -581,6 +583,10 @@ pub fn branches(repo: &Path) -> GitResult<Branches> {
         }
     }
     result.remotes = remotes(repo)?;
+    result.previous = run(repo, &["rev-parse", "--abbrev-ref", "@{-1}"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|name| result.local.iter().any(|b| &b.name == name));
     Ok(result)
 }
 
@@ -1338,6 +1344,146 @@ pub fn rebase(repo: &Path, opts: &RebaseOptions, on_progress: &mut dyn FnMut(&st
 }
 
 // ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+/// How `merge` combines the other branch with the current one.
+#[derive(Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeMode {
+    /// Fast-forward when possible, else create a merge commit.
+    Ff,
+    /// Always create a merge commit.
+    NoFf,
+    /// Only fast-forward; refuse when the branches have diverged.
+    FfOnly,
+    /// Stage the other branch's changes for one ordinary commit, without committing.
+    Squash,
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeOutcome {
+    /// The current branch already contains everything on the other one.
+    UpToDate,
+    FastForward,
+    /// A merge commit was created.
+    Merge,
+    /// The changes were staged for a squash commit; `Status::operation` describes it.
+    Squash,
+    /// The merge stopped on conflicts; `Status::operation` describes it.
+    Conflicts,
+    /// The merge succeeded, but reapplying the stashed local changes conflicted.
+    /// The changes are kept in the stash.
+    StashConflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub outcome: MergeOutcome,
+    /// Commits of the other branch the current one didn't contain yet.
+    pub incoming: u32,
+    /// Files with conflicts, for the `Conflicts` and `StashConflicts` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct MergeOptions {
+    /// Branch, tag or commit to merge into the current branch, e.g. "feature" or "origin/main".
+    pub source: String,
+    pub mode: MergeMode,
+    /// Stash uncommitted changes before and reapply them after the merge. Ignored for squash
+    /// merges: git would only reapply them once the squash is committed, and never tells.
+    pub autostash: bool,
+}
+
+/// Merges `opts.source` into the current branch.
+pub fn merge(repo: &Path, opts: &MergeOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<MergeResult> {
+    let source = plain_arg(&opts.source, "branch or commit")?;
+    // A rebase in progress detaches HEAD, so check for it first.
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before merging.",
+            op.kind.label()
+        ));
+    }
+    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("Merging needs a current branch, but HEAD is detached. Switch to a branch first.".into());
+    }
+    let old = rev(repo, "HEAD").ok_or("The current branch has no commits to merge into yet.")?;
+    let theirs = rev(repo, &format!("{source}^{{commit}}"))
+        .ok_or_else(|| format!("'{source}' is not a branch, tag or commit."))?;
+    let incoming = count(repo, &format!("{old}..{theirs}"));
+
+    let squash = opts.mode == MergeMode::Squash;
+    // Explicit flags, so merge.ff or merge.autoStash in the user's config can't change what the
+    // dialog promised.
+    let args = [
+        "merge",
+        "--progress",
+        "--no-edit",
+        match opts.mode {
+            MergeMode::Ff => "--ff",
+            MergeMode::NoFf => "--no-ff",
+            MergeMode::FfOnly => "--ff-only",
+            MergeMode::Squash => "--squash",
+        },
+        if opts.autostash && !squash {
+            "--autostash"
+        } else {
+            "--no-autostash"
+        },
+        source,
+    ];
+    let out = exec_streaming(repo, &args, &[("GIT_EDITOR", "true")], on_progress)?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    let result = |outcome| MergeResult {
+        outcome,
+        incoming,
+        conflicts,
+    };
+    if conflicts > 0 {
+        return Ok(result(if st.operation.is_some() {
+            MergeOutcome::Conflicts
+        } else {
+            MergeOutcome::StashConflicts
+        }));
+    }
+    if out.code != 0 {
+        // "Not possible to fast-forward" and the files that block the merge are on stderr.
+        let text = if out.stderr.trim().is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        return Err(error_text(text, "Merge failed"));
+    }
+    if squash {
+        let staged = st.operation.is_some_and(|op| op.kind == OperationKind::Squash);
+        return Ok(result(if staged {
+            MergeOutcome::Squash
+        } else {
+            MergeOutcome::UpToDate
+        }));
+    }
+    let new = rev(repo, "HEAD").unwrap_or_default();
+    if new == old {
+        return Ok(result(MergeOutcome::UpToDate));
+    }
+    // A fast-forward can land on someone else's merge commit; ours has the old HEAD as first parent.
+    let parents = run(repo, &["rev-list", "--parents", "-n1", &new]).unwrap_or_default();
+    let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+    let merged = parents.len() > 1 && parents[0] == old;
+    Ok(result(if merged {
+        MergeOutcome::Merge
+    } else {
+        MergeOutcome::FastForward
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Merge, rebase, cherry-pick and revert in progress
 // ---------------------------------------------------------------------------
 
@@ -1348,6 +1494,8 @@ pub enum OperationKind {
     Rebase,
     CherryPick,
     Revert,
+    /// A squash merge whose changes are staged (or conflict) and wait to be committed.
+    Squash,
 }
 
 impl OperationKind {
@@ -1357,6 +1505,7 @@ impl OperationKind {
             OperationKind::Rebase => "rebase",
             OperationKind::CherryPick => "cherry-pick",
             OperationKind::Revert => "revert",
+            OperationKind::Squash => "squash merge",
         }
     }
 }
@@ -1370,7 +1519,7 @@ pub struct Operation {
     /// Rebase progress: the commit being applied (1-based) and the number of commits.
     pub step: Option<u32>,
     pub total: Option<u32>,
-    /// The prepared commit message (`MERGE_MSG` without comments), for merges.
+    /// The prepared commit message (`MERGE_MSG` or `SQUASH_MSG` without comments), for merges.
     pub message: Option<String>,
 }
 
@@ -1405,17 +1554,14 @@ fn operation(git_dir: &Path) -> Option<Operation> {
             });
         }
     }
+    let message = |file: &str| {
+        let m = std::fs::read_to_string(git_dir.join(file)).ok()?;
+        let m = m.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n");
+        Some(m.trim().to_string()).filter(|m| !m.is_empty())
+    };
     if git_dir.join("MERGE_HEAD").exists() {
-        let message = std::fs::read_to_string(git_dir.join("MERGE_MSG")).ok().map(|m| {
-            m.lines()
-                .filter(|l| !l.starts_with('#'))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        });
         return Some(Operation {
-            message: message.filter(|m| !m.is_empty()),
+            message: message("MERGE_MSG"),
             ..blank(OperationKind::Merge)
         });
     }
@@ -1424,6 +1570,13 @@ fn operation(git_dir: &Path) -> Option<Operation> {
     }
     if git_dir.join("REVERT_HEAD").exists() {
         return Some(blank(OperationKind::Revert));
+    }
+    // `merge --squash` leaves only SQUASH_MSG behind; committing or resetting removes it.
+    if git_dir.join("SQUASH_MSG").exists() {
+        return Some(Operation {
+            message: message("SQUASH_MSG"),
+            ..blank(OperationKind::Squash)
+        });
     }
     None
 }
@@ -1435,15 +1588,20 @@ fn current_operation(repo: &Path) -> GitResult<Operation> {
 /// Gives up the operation in progress and returns to the state before it started.
 pub fn abort_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
-    run(repo, &[op.kind.label(), "--abort"]).map(drop)
+    let args: &[&str] = match op.kind {
+        // Like `merge --abort`: drops the staged squash, keeps unrelated unstaged changes.
+        OperationKind::Squash => &["reset", "--merge"],
+        kind => &[kind.label(), "--abort"],
+    };
+    run(repo, args).map(drop)
 }
 
-/// Continues after the conflicts were resolved and staged. A merge is finished by committing
-/// with its prepared message.
+/// Continues after the conflicts were resolved and staged. A merge or squash merge is finished
+/// by committing with its prepared message.
 pub fn continue_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
     let args: &[&str] = match op.kind {
-        OperationKind::Merge => &["commit", "--no-edit"],
+        OperationKind::Merge | OperationKind::Squash => &["commit", "--no-edit"],
         kind => &[kind.label(), "--continue"],
     };
     // Accept the prepared messages instead of waiting for an editor that never opens.
@@ -1453,8 +1611,8 @@ pub fn continue_operation(repo: &Path) -> GitResult<()> {
 /// Skips the commit that stopped a rebase, cherry-pick or revert.
 pub fn skip_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
-    if op.kind == OperationKind::Merge {
-        return Err("A merge can't be skipped; abort it instead.".into());
+    if matches!(op.kind, OperationKind::Merge | OperationKind::Squash) {
+        return Err(format!("A {} can't be skipped; abort it instead.", op.kind.label()));
     }
     exec_with_env(repo, &[op.kind.label(), "--skip"], &[("GIT_EDITOR", "true")]).map(drop)
 }
@@ -2635,6 +2793,275 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         repo.git(&["switch", "-q", "--detach", "HEAD"]);
         let err = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap_err();
         assert!(err.contains("detached"), "{err}");
+    }
+
+    fn merge_opts(source: &str, mode: MergeMode, autostash: bool) -> MergeOptions {
+        MergeOptions {
+            source: source.into(),
+            mode,
+            autostash,
+        }
+    }
+
+    fn parent_count(repo: &TestRepo) -> usize {
+        repo.git(&["rev-list", "--parents", "-n1", "HEAD"])
+            .split_whitespace()
+            .count()
+            - 1
+    }
+
+    #[test]
+    fn merges_a_branch_with_a_merge_commit_or_fast_forward() {
+        let repo = feature_branch("merge-modes", false);
+        repo.git(&["switch", "-q", "main"]);
+        let main = repo.head();
+
+        // Diverged: --ff and --no-ff both create a merge commit, --ff-only refuses.
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::FfOnly, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("fast-forward"), "{err}");
+        assert_eq!(repo.head(), main);
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming, r.conflicts), (MergeOutcome::Merge, 2, 0));
+        assert_eq!(parent_count(&repo), 2);
+        assert_eq!(repo.git(&["rev-parse", "HEAD^1"]).trim(), main);
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "Merge branch 'feature'");
+        assert!(repo.dir.join("a.txt").exists());
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::UpToDate, 0));
+
+        // feature is behind main now: it fast-forwards, unless a merge commit is asked for.
+        repo.git(&["switch", "-q", "feature"]);
+        let r = merge(
+            &repo.dir,
+            &merge_opts("main", MergeMode::FfOnly, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::FastForward, 2));
+        assert_eq!(repo.head(), repo.git(&["rev-parse", "main"]).trim());
+
+        repo.git(&["switch", "-q", "-c", "behind", "main~1"]);
+        let r = merge(&repo.dir, &merge_opts("main", MergeMode::NoFf, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::Merge, 3));
+        assert_eq!(parent_count(&repo), 2);
+    }
+
+    #[test]
+    fn merges_remote_branches_and_ignores_the_users_merge_config() {
+        let repo = feature_branch("merge-config", false);
+        repo.git(&["config", "merge.ff", "only"]);
+        repo.git(&["update-ref", "refs/remotes/origin/feature", "feature"]);
+        repo.git(&["switch", "-q", "main"]);
+        let r = merge(
+            &repo.dir,
+            &merge_opts("origin/feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!(r.outcome, MergeOutcome::Merge);
+        assert_eq!(
+            repo.git(&["log", "-1", "--format=%s"]).trim(),
+            "Merge remote-tracking branch 'origin/feature'"
+        );
+    }
+
+    #[test]
+    fn squash_merges_stage_the_changes_for_one_commit() {
+        let repo = feature_branch("merge-squash", false);
+        repo.git(&["switch", "-q", "main"]);
+        let main = repo.head();
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, true),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::Squash, 2));
+        assert_eq!(repo.head(), main);
+        let st = status(&repo.dir).unwrap();
+        let staged: Vec<&str> = st.staged.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(staged, ["a.txt", "b.txt"]);
+        let op = st.operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Squash);
+        assert!(op.message.unwrap().starts_with("Squashed commit of the following:"));
+
+        // Nothing else starts until the squash is committed or aborted.
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("squash merge is in progress"), "{err}");
+        assert!(skip_operation(&repo.dir).unwrap_err().contains("can't be skipped"));
+
+        abort_operation(&repo.dir).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.operation.is_none() && st.staged.is_empty() && st.unstaged.is_empty());
+        assert!(!repo.dir.join("a.txt").exists());
+
+        // Committing with your own message ends it, like with the prepared one.
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        commit(&repo.dir, "Add a and b", false).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(parent_count(&repo), 1);
+        assert_eq!(repo.git(&["rev-parse", "HEAD~1"]).trim(), main);
+
+        repo.git(&["reset", "-q", "--hard", &main]);
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(
+            repo.git(&["log", "-1", "--format=%s"]).trim(),
+            "Squashed commit of the following:"
+        );
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("main~1", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!(r.outcome, MergeOutcome::UpToDate);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn stops_a_conflicting_merge_of_a_branch() {
+        let repo = feature_branch("merge-conflict", true);
+        repo.git(&["switch", "-q", "main"]);
+        let before = repo.head();
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming, r.conflicts), (MergeOutcome::Conflicts, 2, 1));
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Merge);
+        assert!(op.message.unwrap().starts_with("Merge branch 'feature'"));
+
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.head(), before);
+        assert_eq!(repo.read("shared.txt"), "main\n");
+
+        // A conflicting squash merge waits the same way and is aborted with `reset --merge`.
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.conflicts), (MergeOutcome::Conflicts, 1));
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Squash
+        );
+        assert!(
+            continue_operation(&repo.dir).is_err(),
+            "unresolved conflicts must block"
+        );
+        abort_operation(&repo.dir).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.operation.is_none() && st.conflicted.is_empty() && st.staged.is_empty());
+        assert_eq!(repo.read("shared.txt"), "main\n");
+
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::NoFf, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        repo.write("shared.txt", "both\n");
+        stage(&repo.dir, &["shared.txt".into()]).unwrap();
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(parent_count(&repo), 2);
+    }
+
+    #[test]
+    fn stashes_local_changes_around_a_merge_on_request() {
+        let repo = feature_branch("merge-stash", false);
+        repo.git(&["switch", "-q", "main"]);
+        // Touches a file the merge brings in, so git refuses without stashing.
+        repo.write("a.txt", "local\n");
+        repo.git(&["add", "a.txt"]);
+        let before = repo.head();
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(repo.head(), before);
+
+        let r = merge(&repo.dir, &merge_opts("feature", MergeMode::Ff, true), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.conflicts), (MergeOutcome::StashConflicts, 1));
+        assert_eq!(parent_count(&repo), 2);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(repo.git(&["stash", "list"]).lines().count(), 1);
+    }
+
+    #[test]
+    fn refuses_to_merge_without_a_branch_or_with_bad_arguments() {
+        let repo = feature_branch("merge-refuse", false);
+        for (source, expected) in [
+            ("--squash", "not a valid"),
+            ("", "not a valid"),
+            ("nope", "'nope' is not a branch"),
+        ] {
+            let err = merge(&repo.dir, &merge_opts(source, MergeMode::Ff, false), &mut no_progress).unwrap_err();
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        repo.git(&["switch", "-q", "--detach", "HEAD"]);
+        let err = merge(&repo.dir, &merge_opts("main", MergeMode::Ff, false), &mut no_progress).unwrap_err();
+        assert!(err.contains("detached"), "{err}");
+    }
+
+    #[test]
+    fn remembers_the_previous_branch() {
+        let repo = feature_branch("previous-branch", false);
+        assert_eq!(branches(&repo.dir).unwrap().previous.as_deref(), Some("main"));
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous.as_deref(), Some("feature"));
+        repo.git(&["switch", "-q", "--detach", "HEAD"]);
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous, None);
+        repo.git(&["switch", "-q", "feature"]);
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["branch", "-q", "-D", "feature"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous, None);
     }
 
     #[test]

@@ -13,9 +13,13 @@ export interface FileChange {
   status: string;
 }
 
-export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert";
+/** "squash" is a squash merge whose changes are staged (or conflict) and wait to be committed. */
+export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert" | "squash";
 
-/** A merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and waits for the user. */
+/**
+ * A merge, squash merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and
+ * waits for the user.
+ */
 export interface Operation {
   kind: OperationKind;
   /** The branch being rebased. */
@@ -23,7 +27,7 @@ export interface Operation {
   /** Rebase progress: the commit being applied (1-based) and the number of commits. */
   step: number | null;
   total: number | null;
-  /** The prepared merge commit message. */
+  /** The prepared commit message of a merge or squash merge. */
   message: string | null;
 }
 
@@ -103,6 +107,8 @@ export interface Branches {
   remote: Branch[];
   tags: Branch[];
   remotes: Remote[];
+  /** The branch checked out before the current one, if it still exists. */
+  previous?: string | null;
 }
 
 export interface FetchOptions {
@@ -196,6 +202,30 @@ export interface RebaseResult {
   conflicts: number;
 }
 
+/**
+ * How a merge combines the other branch with the current one: fast-forward when possible, always
+ * create a merge commit, only fast-forward, or stage the changes for one commit (squash).
+ */
+export type MergeMode = "ff" | "no-ff" | "ff-only" | "squash";
+
+export interface MergeOptions {
+  /** Branch, tag or commit to merge into the current branch, e.g. "feature" or "origin/main". */
+  source: string;
+  mode: MergeMode;
+  /** Stash uncommitted changes before the merge and reapply them afterwards; not for squash merges. */
+  autostash: boolean;
+}
+
+export type MergeOutcome = "up-to-date" | "fast-forward" | "merge" | "squash" | "conflicts" | "stash-conflicts";
+
+export interface MergeResult {
+  outcome: MergeOutcome;
+  /** Commits of the other branch the current one didn't contain yet. */
+  incoming: number;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
 /** How far HEAD and another branch or commit have diverged. */
 export interface Divergence {
   /** Commits only on HEAD. */
@@ -204,7 +234,7 @@ export interface Divergence {
   behind: number;
 }
 
-/** A progress line of a running fetch, pull, push or rebase. */
+/** A progress line of a running fetch, pull, push, rebase or merge. */
 export interface GitProgress {
   root: string;
   text: string;
@@ -265,7 +295,12 @@ export const api = {
    * Conflicts resolve with outcome "conflicts" rather than rejecting.
    */
   rebase: (repo: string, options: RebaseOptions) => invoke<RebaseResult>("rebase", { repo, ...options }),
-  /** Aborts the merge, rebase, cherry-pick or revert in progress. */
+  /**
+   * Merges `options.source` into the current branch. Progress arrives as `git-progress` events.
+   * Conflicts resolve with outcome "conflicts" rather than rejecting.
+   */
+  merge: (repo: string, options: MergeOptions) => invoke<MergeResult>("merge", { repo, ...options }),
+  /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
   continueOperation: (repo: string) => invoke<void>("continue_operation", { repo }),

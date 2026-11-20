@@ -74,6 +74,20 @@ export function PushIcon() {
   );
 }
 
+/** Merge: a branch joining back into the trunk. */
+export function MergeIcon() {
+  return (
+    <Icon>
+      <g strokeWidth={1.8}>
+        <path d="M7 3v18" />
+        <path d="M17 5v3c0 4-10 4-10 9" />
+        <circle cx="17" cy="5" r="2" fill="currentColor" />
+        <circle cx="7" cy="19" r="2" fill="currentColor" />
+      </g>
+    </Icon>
+  );
+}
+
 /** Rebase: a branch lifted off the trunk and replanted on its tip. */
 export function RebaseIcon() {
   return (
