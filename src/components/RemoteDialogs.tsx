@@ -24,7 +24,7 @@ interface DialogProps {
   children: ReactNode;
 }
 
-/** Modal form shared by the fetch, pull, push and rebase dialogs: Enter submits, Escape and Cancel close. */
+/** Modal form shared by the fetch, pull, push, rebase and merge dialogs: Enter submits, Escape and Cancel close. */
 export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
   const formRef = useRef<HTMLFormElement>(null);
 

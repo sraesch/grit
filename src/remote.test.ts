@@ -159,6 +159,7 @@ describe("operationTitle", () => {
     expect(operationTitle(op({ kind: "rebase", head: "main", step: 2, total: 3 }))).toBe("Rebasing main (commit 2 of 3)");
     expect(operationTitle(op({ kind: "rebase" }))).toBe("Rebasing");
     expect(operationTitle(op({ kind: "cherry-pick" }))).toBe("Cherry-pick in progress");
+    expect(operationTitle(op({ kind: "squash" }))).toBe("Squash merge in progress");
   });
 });
 

@@ -259,6 +259,17 @@ describe("OperationBanner", () => {
     expect(onAbort).toHaveBeenCalled();
   });
 
+  it("commits or aborts a squash merge, which can't be skipped", async () => {
+    const { onContinue, onAbort } = setup(op({ kind: "squash" }), 0);
+    expect(screen.getByRole("status")).toHaveTextContent("Squash merge in progress");
+    expect(screen.getByRole("status")).toHaveTextContent("The merged changes are staged.");
+    expect(screen.queryByRole("button", { name: "Skip commit" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Commit squash" }));
+    await userEvent.click(screen.getByRole("button", { name: "Abort squash merge" }));
+    expect(onContinue).toHaveBeenCalled();
+    expect(onAbort).toHaveBeenCalled();
+  });
+
   it("continues or skips a rebase once the conflicts are resolved", async () => {
     const { onContinue, onSkip } = setup(op({ kind: "rebase", head: "main", step: 1, total: 2 }), 0);
     expect(screen.getByRole("status")).toHaveTextContent("Rebasing main (commit 1 of 2)");

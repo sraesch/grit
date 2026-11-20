@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Merge: the Merge button (or Ctrl/Cmd+Shift+M) merges a local or remote branch or a tag into the current branch. Choose to fast-forward when possible, always create a merge commit, only fast-forward, or squash the changes into one commit you review and commit yourself; optionally stash and reapply local changes. The dialog starts on the branch you were on before (switch to develop, merge the feature you just finished), previews how many commits come in and whether it will fast-forward, and remembers its options. git's progress is shown while it runs, and a merge that stops on conflicts is committed or aborted from the banner
+- A squash merge waiting to be committed shows a banner too, with its prepared message in the commit box, and can be committed or aborted from there
+
 ## [0.3.0] - 2026-11-17
 
 ### Added

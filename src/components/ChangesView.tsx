@@ -33,9 +33,11 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const unstaged = status?.unstaged ?? [];
   const conflicted = status?.conflicted ?? [];
   const merging = status?.operation?.kind === "merge";
-  const mergeMessage = merging ? status?.operation?.message : null;
+  // A squash merge is finished with an ordinary commit of the staged changes.
+  const squashing = status?.operation?.kind === "squash";
+  const mergeMessage = merging || squashing ? status?.operation?.message : null;
 
-  // Offer the prepared message of a merge in progress (e.g. after a pull with conflicts), unless
+  // Offer the prepared message of a merge or squash merge in progress (e.g. after a pull with conflicts), unless
   // something is typed already. Each message is offered once, so clearing it sticks.
   const offeredMessage = useRef<string | null>(null);
   useEffect(() => {
@@ -116,7 +118,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   // A merge can be committed with nothing staged: resolving may have kept our side of every file.
   // During a rebase, cherry-pick or revert, committing would add a stray commit: they go on
   // with Continue in the banner instead.
-  const continuing = !!status?.operation && !merging;
+  const continuing = !!status?.operation && !merging && !squashing;
   const canCommit =
     !busy &&
     !continuing &&
