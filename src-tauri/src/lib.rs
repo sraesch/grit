@@ -12,7 +12,8 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    PullOptions, PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
+    MergeMode, MergeOptions, MergeResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
+    RebaseResult, RepoInfo, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -134,7 +135,7 @@ async fn delete_branch(repo: String, name: String, force: bool) -> GitResult<Del
     blocking(move || git::delete_branch(&PathBuf::from(repo), &name, force)).await
 }
 
-/// A progress line of a running fetch, pull, push or rebase, e.g. "Receiving objects:  45% (450/1000)".
+/// A progress line of a running fetch, pull, push, rebase or merge, e.g. "Receiving objects:  45% (450/1000)".
 #[derive(Serialize, Clone)]
 struct GitProgress {
     /// The repository root, as passed to the command, so only its tab shows the progress.
@@ -245,6 +246,25 @@ async fn rebase(app: AppHandle, repo: String, onto: String, autostash: bool) -> 
 }
 
 #[tauri::command]
+async fn merge(
+    app: AppHandle,
+    repo: String,
+    source: String,
+    mode: MergeMode,
+    autostash: bool,
+) -> GitResult<MergeResult> {
+    blocking(move || {
+        let opts = MergeOptions {
+            source,
+            mode,
+            autostash,
+        };
+        git::merge(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -309,6 +329,7 @@ pub fn run() {
             push,
             get_divergence,
             rebase,
+            merge,
             abort_operation,
             continue_operation,
             skip_operation,

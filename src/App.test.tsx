@@ -675,6 +675,75 @@ describe("App", () => {
       expect(await screen.findByText("Rebased 1 commit of main onto origin/main (3 new)")).toBeInTheDocument();
     });
 
+    it("merges a branch and leads to the conflicts when it stops", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_branches: () => {
+          const list = branchList();
+          const feature = { name: "feature", sha: "d", current: false, upstream: null, track: null };
+          return { ...list, local: [...list.local, feature], previous: "feature" };
+        },
+        get_divergence: () => ({ ahead: 1, behind: 2 }),
+        merge: () => {
+          status = makeStatus({
+            upstream: "origin/main",
+            conflicted: [file("shared.txt", "U")],
+            operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'feature'" },
+          });
+          return { outcome: "conflicts", incoming: 2, conflicts: 1 };
+        },
+        abort_operation: () => {
+          status = makeStatus({ upstream: "origin/main" });
+        },
+      });
+      await ready();
+      const mergeButton = screen.getByRole("button", { name: "Merge" });
+      await waitFor(() => expect(mergeButton).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "All commits" }));
+
+      await userEvent.keyboard("{Control>}{Shift>}M{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Merge" });
+      // It starts on the branch checked out before.
+      expect(within(dialog).getByLabelText("Branch")).toHaveDisplayValue("feature");
+      await waitFor(() => expect(within(dialog).getByLabelText("Branch")).toHaveAccessibleDescription(/^Creates a merge commit on main/));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("merge", { repo: "/work/demo", source: "feature", mode: "ff", autostash: true });
+      expect(await screen.findByText(/Merging feature into main stopped with conflicts in 1 file/)).toBeInTheDocument();
+      expect(await screen.findByText("Merge in progress")).toBeInTheDocument();
+      // Back in Local changes, with the merge message ready to commit once resolved.
+      expect(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("Merge branch 'feature'");
+      expect(mergeButton).toBeDisabled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Abort merge" }));
+      expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
+      await waitFor(() => expect(screen.queryByText("Merge in progress")).toBeNull());
+      expect(mergeButton).toBeEnabled();
+    });
+
+    it("reports a merge and shows git's reason when it is refused", async () => {
+      let refuse = false;
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 0, behind: 3 }),
+        merge: () => {
+          if (refuse) throw "error: Your local changes to the following files would be overwritten by merge:\n\ta.txt";
+          return { outcome: "fast-forward", incoming: 3, conflicts: 0 };
+        },
+      });
+      await ready();
+      await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+      // main is a base branch without a previous branch: it starts on the other base branch or the upstream.
+      expect(within(screen.getByRole("dialog", { name: "Merge" })).getByLabelText("Branch")).toHaveDisplayValue("origin/main");
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText("Moved main forward to origin/main (3 commits)")).toBeInTheDocument();
+
+      refuse = true;
+      await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText(/would be overwritten by merge/)).toBeInTheDocument();
+    });
+
     it("fetches in the background when the last fetch is older than the interval", async () => {
       settings = { reposDir: null, autoFetchMinutes: 10 };
       status = makeStatus({ upstream: "origin/main", lastFetch: now() - 3600 });

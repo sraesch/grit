@@ -9,6 +9,7 @@ import {
   FetchOptions,
   GitProgress,
   LogEntry,
+  MergeOptions,
   PullOptions,
   PushOptions,
   RebaseOptions,
@@ -17,6 +18,7 @@ import {
   Status,
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
+import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
   autoFetchDue,
@@ -33,12 +35,13 @@ import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { DeleteBranchDialog } from "./DeleteBranchDialog";
 import { HistoryView } from "./HistoryView";
+import { MergeDialog } from "./MergeDialog";
 import { OperationBanner } from "./OperationBanner";
 import { RebaseDialog } from "./RebaseDialog";
 import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 import { Sidebar, View } from "./Sidebar";
 import { Split } from "./Split";
-import { FetchIcon, PullIcon, PushIcon, RebaseIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
+import { FetchIcon, MergeIcon, PullIcon, PushIcon, RebaseIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
 
 interface RepoTabProps {
   repo: RepoInfo;
@@ -53,7 +56,7 @@ interface RepoTabProps {
   onClearError: () => void;
 }
 
-/** A fetch, pull, push or rebase that is running; background fetches don't show progress. */
+/** A fetch, pull, push, rebase or merge that is running; background fetches don't show progress. */
 interface RemoteOp {
   label: string;
   background: boolean;
@@ -85,7 +88,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [branches, setBranches] = useState<Branches | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "rebase" | null>(null);
+  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "merge" | "rebase" | null>(null);
   // The local branch whose deletion is being confirmed.
   const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
@@ -151,7 +154,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     };
   }, [root, refreshStatus, refreshHistory]);
 
-  // Progress of this tab's fetch, pull or rebase ("Receiving objects: 45% (450/1000)", "Rebasing (2/5)").
+  // Progress of this tab's fetch, pull, rebase or merge ("Receiving objects: 45% (450/1000)", "Rebasing (2/5)").
   useEffect(() => {
     const unlisten = listen<GitProgress>("git-progress", ({ payload }) => {
       if (payload.root === root && remoteOpRef.current && !remoteOpRef.current.background) setProgress(payload.text);
@@ -168,7 +171,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     return () => clearTimeout(timer);
   }, [notice]);
 
-  /** Runs one fetch, pull, push or rebase at a time; resolves to null when another one is still running. */
+  /** Runs one fetch, pull, push, rebase or merge at a time; resolves to null when another one is still running. */
   const runRemote = useCallback(
     async <T,>(op: RemoteOp, action: () => Promise<T>): Promise<T | null> => {
       if (remoteOpRef.current) {
@@ -287,6 +290,25 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     [root, runRemote, onError, onClearError],
   );
 
+  const mergeNow = useCallback(
+    async (options: MergeOptions) => {
+      setDialog(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      const label = `${options.mode === "squash" ? "Squash merging" : "Merging"} ${options.source} into ${branch}…`;
+      try {
+        const result = await runRemote({ label, background: false }, () => api.merge(root, options));
+        if (!result || !mounted.current) return;
+        setNotice(mergeSummary(result, options.source, branch));
+        onClearError();
+        // Conflicts are resolved, and a squash is committed, in the changes view.
+        if (result.conflicts > 0 || result.outcome === "squash") setView("changes");
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
   // Fetch in the background when the last fetch (by grit, the command line or another tool)
   // or the last attempt is older than the interval. Failures are shown quietly on the button.
   const autoFetch = useCallback(async () => {
@@ -317,11 +339,14 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const pull = branches && status ? pullSources(branches, status) : null;
   const canPull = !!status?.branch && !!pull && pull.sources.length > 0 && !status.operation && !remoteOp;
   const canPush = !!branches && branches.remotes.length > 0 && branches.local.length > 0 && !remoteOp;
+  const merge = branches && status ? mergeTargets(branches, status) : null;
+  const canMerge = !!status?.branch && !!merge && hasRebaseTargets(merge) && !status.operation && !remoteOp;
   const rebase = branches && status ? rebaseTargets(branches, status) : null;
   const canRebase = !!status?.branch && !!rebase && hasRebaseTargets(rebase) && !status.operation && !remoteOp;
 
   // Shortcuts of the visible tab: Ctrl/Cmd+B switches branches, Ctrl/Cmd+Shift+F fetches,
-  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork; Ctrl/Cmd+Shift+E rebases.
+  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork; Ctrl/Cmd+Shift+M merges and
+  // Ctrl/Cmd+Shift+E rebases.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -331,13 +356,14 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       else if (key === "f" && e.shiftKey && canFetch) setDialog("fetch");
       else if (key === "l" && e.shiftKey && canPull) setDialog("pull");
       else if (key === "p" && e.shiftKey && canPush) openPush();
+      else if (key === "m" && e.shiftKey && canMerge) setDialog("merge");
       else if (key === "e" && e.shiftKey && canRebase) setDialog("rebase");
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, canFetch, canPull, canPush, canRebase, openPush]);
+  }, [active, canFetch, canPull, canPush, canMerge, canRebase, openPush]);
 
   // Popovers and dialogs left open in a tab that is switched away from would reappear unexpectedly.
   useEffect(() => {
@@ -483,6 +509,13 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
             />
             <ToolbarDivider />
             <ToolbarButton
+              icon={<MergeIcon />}
+              label="Merge"
+              disabled={!canMerge}
+              onClick={() => setDialog("merge")}
+              title={mergeTitle(status, !!merge && hasRebaseTargets(merge))}
+            />
+            <ToolbarButton
               icon={<RebaseIcon />}
               label="Rebase"
               disabled={!canRebase}
@@ -529,6 +562,16 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           target={pushPreset.target}
           force={pushPreset.force}
           onPush={pushNow}
+          onClose={closeDialog}
+        />
+      )}
+      {dialog === "merge" && status?.branch && merge && (
+        <MergeDialog
+          repo={root}
+          branch={status.branch}
+          status={status}
+          targets={merge}
+          onMerge={mergeNow}
           onClose={closeDialog}
         />
       )}
@@ -586,7 +629,7 @@ interface RemoteStatusProps {
   onDismiss: () => void;
 }
 
-/** The running fetch, pull, push or rebase with git's progress, or the message about the last one. */
+/** The running fetch, pull, push, rebase or merge with git's progress, or the message about the last one. */
 function RemoteStatus({ op, progress, notice, onDismiss }: RemoteStatusProps) {
   if (op) {
     return (
@@ -639,6 +682,14 @@ function pushTitle(branches: Branches | null, status: Status | null): string {
   if (branches && branches.local.length === 0) return "There are no branches to push yet";
   const ahead = status?.branch && status.ahead > 0 ? `\n${status.branch} is ${status.ahead} ahead of ${status.upstream}` : "";
   return `Push a branch to a remote (Ctrl/Cmd+Shift+P)${ahead}`;
+}
+
+function mergeTitle(status: Status | null, hasTargets: boolean): string {
+  if (!status) return "Merge";
+  if (!status.branch) return "Switch to a branch to merge into";
+  if (status.operation) return "Finish or abort the operation in progress first";
+  if (!hasTargets) return "There are no other branches or tags to merge";
+  return `Merge another branch into ${status.branch} (Ctrl/Cmd+Shift+M)`;
 }
 
 function rebaseTitle(status: Status | null, hasTargets: boolean): string {
