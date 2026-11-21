@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The macOS installers are signed with a Developer ID and notarized by Apple, so they open without Gatekeeper warnings
+
 ## [0.4.0] - 2026-11-21
 
 ### Added

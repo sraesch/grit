@@ -187,3 +187,69 @@ jobs:
           releaseId: ${{ needs.prepare.outputs.release_id }}
           uploadWorkflowArtifacts: true
           retryAttempts: 1
+
+      # Tauri notarizes the app bundle but not the DMG around it, and Gatekeeper rejects a
+      # signed DMG that isn't notarized. Notarize and staple the DMG, then replace the copies
+      # tauri-action already uploaded to the release and as a workflow artifact.
+      - name: Notarize macOS DMG
+        id: dmg
+        if: runner.os == 'macOS' && env.APPLE_PASSWORD != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dir="src-tauri/target/$TARGET/release/bundle/dmg"
+          dmgs=("$dir"/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::Expected one DMG in $dir, found ${#dmgs[@]}"
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
+          name=$(basename "$dmg")
+          auth=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+
+          result=$(xcrun notarytool submit "$dmg" "${auth[@]}" --wait --timeout 30m --output-format json)
+          echo "$result"
+          if [ "$(jq -r .status <<< "$result")" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id <<< "$result")" "${auth[@]}" || true
+            echo "::error::Apple did not accept the notarization of $name"
+            exit 1
+          fi
+
+          # The ticket can take a moment to become available after notarization.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler staple "$dmg" && break
+            [ "$attempt" -eq 5 ] && exit 1
+            sleep 15
+          done
+          spctl --assess -vv --type open --context context:primary-signature "$dmg"
+
+          if [ -n "$RELEASE_ID" ]; then
+            assets="repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets"
+            asset_id=$(gh api "$assets" --paginate --jq ".[] | select(.name == \"$name\") | .id")
+            if [ -n "$asset_id" ]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            fi
+            gh api -X POST -H "Content-Type: application/octet-stream" --input "$dmg" --silent \
+              "https://uploads.github.com/$assets?name=$name"
+          fi
+
+          # tauri-action names its artifacts darwin-<arch>-dmg, with x64 for Intel.
+          case "$TARGET" in
+            aarch64-*) arch=aarch64 ;;
+            *) arch=x64 ;;
+          esac
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+          echo "artifact=darwin-$arch-dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Replace the DMG workflow artifact
+        if: steps.dmg.outputs.path != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.dmg.outputs.artifact }}
+          path: ${{ steps.dmg.outputs.path }}
+          overwrite: true
