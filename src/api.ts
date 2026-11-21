@@ -253,6 +253,8 @@ export const api = {
   /** Validates and saves the settings; resolves to what was stored (e.g. with "~" expanded). */
   setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
+  /** Checks out a commit without a branch (detached HEAD). */
+  checkoutCommit: (repo: string, sha: string) => invoke<void>("checkout_commit", { repo, sha }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
   /** Deletes a local branch. Without `force`, a branch with unmerged commits is kept ("not-merged"). */

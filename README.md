@@ -11,7 +11,7 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 ## Features
 
 - **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button or double-click), stage/unstage all, commit and amend (Ctrl/Cmd+Enter)
-- **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs
+- **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs; double-click a commit to check it out
 - **Branches**: local, remote and tag lists; double-click a local branch to check it out, right-click it to check it out or delete it
 - **Fetch, pull and push**: fetch one or all remotes (prune, tags), pull by merge or rebase with optional autostash,
   push any local branch to any remote branch (tags, set upstream, force push with lease), live progress and result

@@ -1,4 +1,4 @@
-import { api, Branch, Branches } from "./api";
+import { api, Branch, Branches, LogEntry } from "./api";
 
 /** Something the branch switcher can switch to. */
 export type SwitchTarget =
@@ -6,9 +6,12 @@ export type SwitchTarget =
   /** A remote branch without a local branch of the same name; switching creates one that tracks it. */
   | { kind: "remote"; name: string; localName: string }
   /** A new branch at HEAD. */
-  | { kind: "create"; name: string };
+  | { kind: "create"; name: string }
+  /** A commit, checked out without a branch (detached HEAD); `name` is its sha. */
+  | { kind: "commit"; name: string };
 
-export type SwitchOption = SwitchTarget & { current?: boolean; track?: string | null };
+/** Something the branch switcher lists; it never offers bare commits. */
+export type SwitchOption = Exclude<SwitchTarget, { kind: "commit" }> & { current?: boolean; track?: string | null };
 
 /** The target of an option, without its display-only fields. */
 export function targetOf(option: SwitchOption): SwitchTarget {
@@ -36,6 +39,16 @@ export function targetForRemote(branches: Branches, remote: Branch): SwitchTarge
   const localName = localNameOf(remote.name);
   const local = branches.local.find((b) => b.upstream === remote.name) ?? branches.local.find((b) => b.name === localName);
   return local ? { kind: "local", name: local.name } : { kind: "remote", name: remote.name, localName };
+}
+
+/**
+ * What double-clicking a commit in the history checks out: a local branch pointing at it (as
+ * Fork does), otherwise the commit itself as a detached HEAD. Null when it is checked out already.
+ */
+export function targetForCommit(entry: LogEntry): SwitchTarget | null {
+  if (entry.refs.some((r) => r.current)) return null;
+  const local = entry.refs.find((r) => r.kind === "local");
+  return local ? { kind: "local", name: local.name } : { kind: "commit", name: entry.sha };
 }
 
 /** The switcher's options for `filter`: local branches, untracked remote branches, then "create". */
@@ -69,5 +82,7 @@ export function switchTo(repo: string, target: SwitchTarget): Promise<void> {
       return api.checkoutRemote(repo, target.name);
     case "create":
       return api.createBranch(repo, target.name);
+    case "commit":
+      return api.checkoutCommit(repo, target.name);
   }
 }

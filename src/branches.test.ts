@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Branch, Branches } from "./api";
-import { localNameOf, switchOptions, targetForRemote, toBranchName } from "./branches";
+import { localNameOf, switchOptions, targetForCommit, targetForRemote, toBranchName } from "./branches";
+import { makeCommit } from "./test/tauri";
 
 const branch = (name: string, partial: Partial<Branch> = {}): Branch => ({
   name,
@@ -79,5 +80,28 @@ describe("switchOptions", () => {
     expect(names("main")).toEqual(["local:main"]);
     expect(names("release/1.0")).toEqual(["remote:origin/release/1.0"]);
     expect(names("origin/release/1.0")).toEqual(["remote:origin/release/1.0"]);
+  });
+});
+
+describe("targetForCommit", () => {
+  it("prefers a local branch pointing at the commit", () => {
+    const entry = makeCommit("abc", "x", {
+      refs: [
+        { name: "origin/feature", kind: "remote", current: false },
+        { name: "feature", kind: "local", current: false },
+      ],
+    });
+    expect(targetForCommit(entry)).toEqual({ kind: "local", name: "feature" });
+  });
+
+  it("checks out other commits detached, even with remote branches or tags on them", () => {
+    const entry = makeCommit("abc", "x", { refs: [{ name: "v1.0", kind: "tag", current: false }] });
+    expect(targetForCommit(entry)).toEqual({ kind: "commit", name: "abc" });
+    expect(targetForCommit(makeCommit("def", "y"))).toEqual({ kind: "commit", name: "def" });
+  });
+
+  it("does nothing for what is checked out already", () => {
+    expect(targetForCommit(makeCommit("abc", "x", { refs: [{ name: "main", kind: "local", current: true }] }))).toBeNull();
+    expect(targetForCommit(makeCommit("abc", "x", { refs: [{ name: "HEAD", kind: "head", current: true }] }))).toBeNull();
   });
 });

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Right-clicking a local branch in the sidebar opens a menu to check it out or delete it
+- Double-clicking a commit in the history checks it out: the local branch pointing at it if there is one, otherwise the commit itself (detached HEAD)
 - Delete a local branch: right-click it in the sidebar and choose "Delete Branch…". A branch with commits that aren't merged yet is only deleted after a second confirmation, and the message afterwards names the commit it pointed at, in case it has to be restored. The current branch can't be deleted
 
 ## [0.3.0] - 2026-11-17

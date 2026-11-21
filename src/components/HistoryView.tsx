@@ -14,6 +14,8 @@ interface HistoryViewProps {
   repo: string;
   log: LogEntry[] | null;
   onError: (message: string) => void;
+  /** Double-click on a commit. */
+  onCheckout: (entry: LogEntry) => void;
 }
 
 function RefBadge({ r }: { r: RefLabel }) {
@@ -25,7 +27,7 @@ function RefBadge({ r }: { r: RefLabel }) {
   );
 }
 
-export function HistoryView({ repo, log, onError }: HistoryViewProps) {
+export function HistoryView({ repo, log, onError, onCheckout }: HistoryViewProps) {
   const entries = log ?? [];
   const [selectedSha, setSelectedSha] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -81,6 +83,8 @@ export function HistoryView({ repo, log, onError }: HistoryViewProps) {
                   className={`commit-row${c.sha === selectedSha ? " selected" : ""}`}
                   style={{ transform: `translateY(${item.start}px)`, height: ROW_HEIGHT }}
                   onClick={() => setSelectedSha(c.sha)}
+                  onDoubleClick={() => onCheckout(c)}
+                  title={c.sha === headSha ? undefined : "Double-click to check out"}
                 >
                   <GraphCell row={c.graph} isMerge={c.parents.length > 1} isHead={c.sha === headSha} width={width} />
                   <span className="col-subject">

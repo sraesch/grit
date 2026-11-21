@@ -16,7 +16,7 @@ import {
   RepoInfo,
   Status,
 } from "../api";
-import { switchTo, SwitchTarget } from "../branches";
+import { switchTo, SwitchTarget, targetForCommit } from "../branches";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
   autoFetchDue,
@@ -563,7 +563,15 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           {view === "changes" ? (
             <ChangesView repo={root} status={status} onChanged={refreshAll} onError={onError} />
           ) : (
-            <HistoryView repo={root} log={log} onError={onError} />
+            <HistoryView
+              repo={root}
+              log={log}
+              onError={onError}
+              onCheckout={(entry) => {
+                const target = targetForCommit(entry);
+                if (target) switchBranch(target);
+              }}
+            />
           )}
         </main>
       </Split>

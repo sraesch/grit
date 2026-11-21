@@ -120,6 +120,11 @@ async fn checkout_remote_branch(repo: String, branch: String) -> GitResult<()> {
 }
 
 #[tauri::command]
+async fn checkout_commit(repo: String, sha: String) -> GitResult<()> {
+    blocking(move || git::checkout_commit(&PathBuf::from(repo), &sha)).await
+}
+
+#[tauri::command]
 async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
@@ -296,6 +301,7 @@ pub fn run() {
             commit,
             checkout_branch,
             checkout_remote_branch,
+            checkout_commit,
             create_branch,
             delete_branch,
             fetch,

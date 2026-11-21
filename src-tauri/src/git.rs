@@ -663,6 +663,13 @@ pub fn checkout_remote(repo: &Path, remote_branch: &str) -> GitResult<()> {
     run(repo, &["switch", "--track", branch_arg(remote_branch)?]).map(drop)
 }
 
+/// Checks out a commit without a branch (detached HEAD). Like switching branches, uncommitted
+/// changes are carried over and git refuses when they would be overwritten.
+pub fn checkout_commit(repo: &Path, sha: &str) -> GitResult<()> {
+    let sha = plain_arg(sha, "commit")?;
+    run(repo, &["switch", "--detach", &format!("{sha}^{{commit}}")]).map(drop)
+}
+
 /// Creates a branch at HEAD and switches to it.
 pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
     run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
@@ -1709,6 +1716,27 @@ mod tests {
         let head = entries.iter().find(|e| e.sha == first).unwrap();
         assert!(head.refs.iter().any(|r| r.kind == "head" && r.current));
         assert!(entries[0].refs.iter().any(|r| r.name == "main" && !r.current));
+    }
+
+    #[test]
+    fn checks_out_commits_detached() {
+        let repo = TestRepo::new("checkout-commit");
+        let first = repo.commit_all_initial();
+        repo.write("b.txt", "b\n");
+        repo.commit_all("second");
+
+        checkout_commit(&repo.dir, &first).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch, None);
+        assert_eq!(repo.head(), first);
+        assert!(!repo.dir.join("b.txt").exists());
+
+        // Back on the branch, everything is there again.
+        checkout(&repo.dir, "main").unwrap();
+        assert!(repo.dir.join("b.txt").exists());
+
+        assert!(checkout_commit(&repo.dir, "0000000000000000000000000000000000000000").is_err());
+        assert!(checkout_commit(&repo.dir, "--orphan").is_err());
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("main"));
     }
 
     #[test]
