@@ -8,6 +8,10 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.4.1 — 2026-11-21
+
+- The macOS installers are now signed and notarized by Apple, so grit opens without security warnings
+
 ## 0.4.0 — 2026-11-21
 
 - Merge a branch or tag into your current branch with Ctrl/Cmd+Shift+M: fast-forward, always create a merge commit, or squash, with a preview of what comes in
