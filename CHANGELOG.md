@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The image preview in the history shows images stored in Git LFS instead of failing on their pointer file. Git LFS downloads them if needed, the size limit applies to the real image, and when Git LFS isn't installed the preview says so
+
 ## [0.4.1] - 2026-11-21
 
 ### Changed

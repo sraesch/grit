@@ -494,8 +494,14 @@ pub fn commit_file_diff(repo: &Path, sha: &str, path: &str, orig_path: Option<&s
     run(repo, &args)
 }
 
+/// Git LFS pointer files are always smaller than this, per the LFS specification.
+const LFS_POINTER_MAX_BYTES: u64 = 1024;
+
 /// Contents of `path` (relative to the repository root) as of `rev`, as raw bytes.
 /// Files over `max_bytes` are refused, so a huge asset can't flood the UI.
+///
+/// Files stored in Git LFS are committed as a small pointer; for those the real content
+/// is returned, which Git LFS may have to download first.
 pub fn file_at_revision(repo: &Path, rev: &str, path: &str, max_bytes: u64) -> GitResult<Vec<u8>> {
     // "rev:path" reads the path from the root of rev's tree, independent of the working directory.
     let object = format!("{rev}:{path}");
@@ -503,6 +509,30 @@ pub fn file_at_revision(repo: &Path, rev: &str, path: &str, max_bytes: u64) -> G
         .trim()
         .parse()
         .map_err(|_| format!("Unexpected size for {object}"))?;
+    if size >= LFS_POINTER_MAX_BYTES {
+        check_preview_size(size, max_bytes)?;
+        return run_bytes(repo, &["cat-file", "blob", &object]);
+    }
+
+    let blob = run_bytes(repo, &["cat-file", "blob", &object])?;
+    let Some(lfs_size) = lfs_pointer_size(&blob) else {
+        check_preview_size(size, max_bytes)?;
+        return Ok(blob);
+    };
+    check_preview_size(lfs_size, max_bytes)?;
+    // `--filters` runs the smudge filter that the path's attributes name (`filter=lfs`, set up by
+    // `git lfs track`), which turns the pointer back into the file, as a checkout would.
+    let content = run_bytes(repo, &["cat-file", "--filters", &object])?;
+    if lfs_pointer_size(&content).is_some() {
+        return Err(
+            "This file is stored in Git LFS, which didn't provide its content. Is Git LFS installed (git lfs install)?"
+                .into(),
+        );
+    }
+    Ok(content)
+}
+
+fn check_preview_size(size: u64, max_bytes: u64) -> GitResult<()> {
     if size > max_bytes {
         return Err(format!(
             "File is too large to preview ({:.1} MB, limit {:.0} MB)",
@@ -510,7 +540,36 @@ pub fn file_at_revision(repo: &Path, rev: &str, path: &str, max_bytes: u64) -> G
             max_bytes as f64 / 1_048_576.0
         ));
     }
-    run_bytes(repo, &["cat-file", "blob", &object])
+    Ok(())
+}
+
+/// The size of the real file if `blob` is a Git LFS pointer, which looks like:
+///
+/// ```text
+/// version https://git-lfs.github.com/spec/v1
+/// oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393
+/// size 12345
+/// ```
+fn lfs_pointer_size(blob: &[u8]) -> Option<u64> {
+    if blob.len() as u64 >= LFS_POINTER_MAX_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(blob).ok()?;
+    let mut lines = text.lines();
+    let version = lines.next()?.strip_prefix("version ")?;
+    // "hawser" is an early name of Git LFS; Git LFS still reads pointers that use it.
+    if version != "https://git-lfs.github.com/spec/v1" && version != "https://hawser.github.com/spec/v1" {
+        return None;
+    }
+    let (mut oid, mut size) = (false, None);
+    for line in lines {
+        if line.starts_with("oid sha256:") {
+            oid = true;
+        } else if let Some(value) = line.strip_prefix("size ") {
+            size = value.parse().ok();
+        }
+    }
+    size.filter(|_| oid)
 }
 
 // ---------------------------------------------------------------------------
@@ -2541,6 +2600,59 @@ mod tests {
         let too_large = file_at_revision(&repo.dir, &first, "logo.png", 4).unwrap_err();
         assert!(too_large.contains("too large"), "{too_large}");
         assert!(file_at_revision(&repo.dir, &first, "missing.png", 1024).is_err());
+    }
+
+    fn lfs_pointer(size: u64) -> String {
+        format!(
+            "version https://git-lfs.github.com/spec/v1\n\
+             oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+             size {size}\n"
+        )
+    }
+
+    #[test]
+    fn recognizes_lfs_pointers() {
+        assert_eq!(lfs_pointer_size(lfs_pointer(9).as_bytes()), Some(9));
+        let legacy = lfs_pointer(9).replace("git-lfs.github.com", "hawser.github.com");
+        assert_eq!(lfs_pointer_size(legacy.as_bytes()), Some(9));
+
+        assert_eq!(lfs_pointer_size(b"version https://example.com/spec/v1\nsize 9\n"), None);
+        assert_eq!(
+            lfs_pointer_size(b"version https://git-lfs.github.com/spec/v1\nsize 9\n"),
+            None
+        );
+        let no_size = lfs_pointer(9).replace("size 9\n", "");
+        assert_eq!(lfs_pointer_size(no_size.as_bytes()), None);
+        assert_eq!(
+            lfs_pointer_size(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+            None
+        );
+        assert_eq!(lfs_pointer_size(b""), None);
+    }
+
+    #[test]
+    fn reads_files_stored_in_git_lfs() {
+        let repo = TestRepo::new("lfs");
+        // Stands in for Git LFS's smudge filter, so the test runs without Git LFS installed. A driver
+        // name of its own keeps a Git LFS that is set up on this machine out of the test.
+        repo.git(&["config", "filter.fakelfs.smudge", "cat >/dev/null; printf 'real file'"]);
+        repo.write(".gitattributes", "*.png filter=fakelfs\n");
+        repo.write("logo.png", &lfs_pointer(9));
+        repo.write("huge.png", &lfs_pointer(50 * 1_048_576));
+        // No attribute names a filter for GIFs, as when Git LFS isn't set up.
+        repo.write("anim.gif", &lfs_pointer(9));
+        let sha = repo.commit_all("add files stored in LFS");
+
+        assert_eq!(
+            file_at_revision(&repo.dir, &sha, "logo.png", 1024).unwrap(),
+            b"real file"
+        );
+        // The size limit applies to the real file, not to its much smaller pointer.
+        let too_large = file_at_revision(&repo.dir, &sha, "huge.png", 1024).unwrap_err();
+        assert!(too_large.contains("too large to preview (50.0 MB"), "{too_large}");
+        // Returning the pointer would show as a broken image; explain instead.
+        let not_set_up = file_at_revision(&repo.dir, &sha, "anim.gif", 1024).unwrap_err();
+        assert!(not_set_up.contains("Git LFS"), "{not_set_up}");
     }
 
     #[test]
