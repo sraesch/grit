@@ -5,8 +5,8 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { FetchResult, GitProgress, RepoChanged, Settings, Status } from "./api";
-import { file, makeStatus, mockBackend } from "./test/tauri";
+import { FetchResult, GitProgress, RepoChanged, Settings, Stash, StashOptions, Status } from "./api";
+import { file, makeCommit, makeStash, makeStatus, mockBackend } from "./test/tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -430,6 +430,53 @@ describe("App", () => {
         deleteRemote: true,
       });
       expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch feature and origin/feature (was b).");
+    });
+
+    it("stashes local changes, shows the stash and pops it", async () => {
+      let stashes: Stash[] = [];
+      let changes = [file("a.txt")];
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main", unstaged: changes }),
+        get_log: () => [],
+        get_branches: branchList,
+        get_stashes: () => stashes,
+        stash: ({ options }) => {
+          stashes = [makeStash("s1", (options as StashOptions).message)];
+          changes = [];
+          return stashes[0];
+        },
+        get_commit_details: ({ sha }) => ({ ...makeCommit(sha as string, "x"), files: [file("a.txt")], message: "" }),
+        get_commit_file_diff: () => "@@ -1 +1 @@\n-old\n+stashed\n",
+        apply_stash: () => {
+          stashes = [];
+          changes = [file("a.txt")];
+          return { outcome: "applied", conflicts: 0 };
+        },
+      });
+      render(<App />);
+      await screen.findByRole("button", { name: /^main/ });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Stash" })).toBeEnabled());
+
+      await userEvent.keyboard("{Control>}{Shift>}s{/Shift}{/Control}");
+      await userEvent.type(within(screen.getByRole("dialog", { name: "Stash" })).getByRole("textbox"), "wip{Enter}");
+      expect(invokeMock).toHaveBeenCalledWith("stash", {
+        repo: "/work/demo",
+        options: expect.objectContaining({ message: "wip" }),
+      });
+      expect(await screen.findByRole("status")).toHaveTextContent("Stashed local changes as \u201cwip\u201d.");
+
+      // Nothing left to stash; the stash is in the sidebar and shows its changes.
+      await waitFor(() => expect(screen.getByRole("button", { name: "Stash" })).toBeDisabled());
+      await userEvent.click(await screen.findByText("wip", { selector: ".branch-group .branch-name" }));
+      expect(await screen.findByText("stashed")).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Pop" }));
+      expect(invokeMock).toHaveBeenCalledWith("apply_stash", { repo: "/work/demo", sha: "s1", pop: true });
+      expect(await screen.findByRole("status")).toHaveTextContent("Applied and deleted stash \u201cwip\u201d.");
+      // Back in the changes view, with the changes restored.
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Pop" })).not.toBeInTheDocument());
+      expect(screen.getByRole("button", { name: /Local changes/ })).toHaveClass("active");
     });
 
     it("shows why git refused to switch", async () => {

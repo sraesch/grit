@@ -215,7 +215,8 @@ function CommitPanel({ repo, sha, onError }: { repo: string; sha: string | null;
       {file && imageType(file.path) ? (
         <ImageChange
           repo={repo}
-          details={details}
+          rev={details.sha}
+          parent={details.parents[0] ?? null}
           file={file}
           showDiff={showImageDiff}
           onShowDiff={setShowImageDiff}
@@ -231,7 +232,10 @@ function CommitPanel({ repo, sha, onError }: { repo: string; sha: string | null;
 
 interface ImageChangeProps {
   repo: string;
-  details: CommitDetails;
+  /** The commit that changed the file. */
+  rev: string;
+  /** What it is compared to, its first parent; null for a root commit. */
+  parent: string | null;
   file: FileChange;
   showDiff: boolean;
   onShowDiff: (show: boolean) => void;
@@ -240,12 +244,11 @@ interface ImageChangeProps {
 }
 
 /** An image file changed by a commit: a before/after preview, or its diff on request (useful for SVG). */
-function ImageChange({ repo, details, file, showDiff, onShowDiff, diff, diffError }: ImageChangeProps) {
+export function ImageChange({ repo, rev, parent, file, showDiff, onShowDiff, diff, diffError }: ImageChangeProps) {
   // Like the diff, the preview compares against the first parent.
-  const parent = details.parents[0];
   const before: ImageVersion | null =
-    file.status !== "A" && parent ? { rev: parent, path: file.origPath ?? file.path } : null;
-  const after: ImageVersion | null = file.status !== "D" ? { rev: details.sha, path: file.path } : null;
+    file.status !== "A" && file.status !== "?" && parent ? { rev: parent, path: file.origPath ?? file.path } : null;
+  const after: ImageVersion | null = file.status !== "D" ? { rev, path: file.path } : null;
 
   const toggle = (
     <button className="small" aria-pressed={showDiff} onClick={() => onShowDiff(!showDiff)}>

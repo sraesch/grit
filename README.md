@@ -19,6 +19,8 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 - **Merge**: merge a local or remote branch or a tag into the current branch: fast-forward if possible, always create
   a merge commit, fast-forward only, or squash; with a preview, optional autostash, live progress and the same
   commit/abort banner on conflicts
+- **Stash**: stash local changes with a message, optionally with untracked files or keeping staged changes;
+  browse stashes with their files and diffs, and apply, pop or delete them
 - **Rebase**: rebase the current branch onto a local or remote branch or a tag, with a preview of the commits to
   replay, optional autostash, live progress and the same continue/skip/abort banner on conflicts
 - **Live refresh**: the working tree and `.git` are watched; the UI updates automatically

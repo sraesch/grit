@@ -791,6 +791,151 @@ pub fn delete_branch(
 }
 
 // ---------------------------------------------------------------------------
+// Stashes
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Stash {
+    /// Position in the stash list: 0 is the newest, `stash@{0}`.
+    pub index: usize,
+    /// The stash commit. Unlike the index it doesn't change when other stashes are added or deleted.
+    pub sha: String,
+    /// The message given when stashing, or git's "WIP on main: abc1234 subject" without one.
+    pub message: String,
+    /// The branch that was checked out when stashing; None for a detached HEAD.
+    pub branch: Option<String>,
+    pub time: i64,
+    /// Untracked files were stashed too; they are in the stash commit's third parent.
+    pub untracked: bool,
+}
+
+pub fn stashes(repo: &Path) -> GitResult<Vec<Stash>> {
+    let out = run(repo, &["stash", "list", "--format=%H%x1f%P%x1f%ct%x1f%gs"])?;
+    Ok(parse_stashes(&out))
+}
+
+fn parse_stashes(out: &str) -> Vec<Stash> {
+    let mut list = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.splitn(4, FIELD_SEP).collect();
+        let [sha, parents, time, subject] = f.as_slice() else {
+            continue;
+        };
+        // "On main: message" with a message, "WIP on main: abc1234 subject" without one;
+        // "(no branch)" for a detached HEAD.
+        let (custom, rest) = match subject.strip_prefix("On ") {
+            Some(rest) => (true, rest),
+            None => (false, subject.strip_prefix("WIP on ").unwrap_or(subject)),
+        };
+        let (branch, text) = rest.split_once(": ").unwrap_or(("", rest));
+        list.push(Stash {
+            index: list.len(),
+            sha: sha.to_string(),
+            message: if custom { text } else { subject }.to_string(),
+            branch: (!branch.is_empty() && branch != "(no branch)").then(|| branch.to_string()),
+            time: time.parse().unwrap_or(0),
+            untracked: parents.split(' ').filter(|p| !p.is_empty()).count() >= 3,
+        });
+    }
+    list
+}
+
+/// The stash with commit `sha`, so actions keep their target when the list changed meanwhile.
+fn find_stash(repo: &Path, sha: &str) -> GitResult<Stash> {
+    stashes(repo)?
+        .into_iter()
+        .find(|s| s.sha == sha)
+        .ok_or_else(|| "This stash doesn't exist anymore. It may have been applied or deleted elsewhere.".into())
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StashOptions {
+    /// Empty for git's default "WIP on <branch>: <commit>".
+    pub message: String,
+    pub include_untracked: bool,
+    /// Leave the staged changes in place (and in the stash).
+    pub keep_index: bool,
+}
+
+/// Stashes the local changes and reverts them, like `git stash push`; returns the new stash.
+pub fn stash_push(repo: &Path, opts: &StashOptions) -> GitResult<Stash> {
+    let before = rev(repo, "refs/stash");
+    let mut args = vec!["stash", "push"];
+    let message = opts.message.trim();
+    if !message.is_empty() {
+        args.extend(["-m", message]);
+    }
+    if opts.include_untracked {
+        args.push("--include-untracked");
+    }
+    if opts.keep_index {
+        args.push("--keep-index");
+    }
+    run(repo, &args)?;
+    // git succeeds without doing anything when there is nothing to stash.
+    if rev(repo, "refs/stash") == before {
+        return Err(if opts.include_untracked {
+            "There are no local changes to stash.".into()
+        } else {
+            "There are no changes to tracked files to stash. Include untracked files to stash new files.".into()
+        });
+    }
+    stashes(repo)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "The stash wasn't saved".into())
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum StashApplyOutcome {
+    Applied,
+    /// Applied, but some files have conflicts to resolve; the stash is kept, even when popping.
+    Conflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StashApplyResult {
+    pub outcome: StashApplyOutcome,
+    /// Files with conflicts.
+    pub conflicts: u32,
+}
+
+/// Applies the stash with commit `sha` to the working tree and, with `pop`, deletes it once it
+/// applied cleanly. git refuses (and reports the files) when local changes would be overwritten.
+pub fn stash_apply(repo: &Path, sha: &str, pop: bool) -> GitResult<StashApplyResult> {
+    let stash = find_stash(repo, plain_arg(sha, "stash")?)?;
+    // Untranslated messages, as other git errors are passed on as they are.
+    if let Err(e) = exec_with_env(repo, &["stash", "apply", &stash.sha], &[("LC_ALL", "C")]) {
+        let conflicts = status(repo)?.conflicted.len() as u32;
+        if conflicts == 0 {
+            return Err(e);
+        }
+        return Ok(StashApplyResult {
+            outcome: StashApplyOutcome::Conflicts,
+            conflicts,
+        });
+    }
+    if pop {
+        stash_drop(repo, &stash.sha)?;
+    }
+    Ok(StashApplyResult {
+        outcome: StashApplyOutcome::Applied,
+        conflicts: 0,
+    })
+}
+
+/// Deletes the stash with commit `sha`. Its commit stays in the repository until git cleans up,
+/// so `git stash apply <sha>` still brings it back for a while.
+pub fn stash_drop(repo: &Path, sha: &str) -> GitResult<()> {
+    let stash = find_stash(repo, plain_arg(sha, "stash")?)?;
+    run(repo, &["stash", "drop", "-q", &format!("stash@{{{}}}", stash.index)]).map(drop)
+}
+
+// ---------------------------------------------------------------------------
 // Fetch and pull
 // ---------------------------------------------------------------------------
 
@@ -2239,6 +2384,122 @@ mod tests {
         // The current branch is refused before anything is deleted.
         assert!(delete("main", true).is_err());
         assert!(on_origin("main"));
+    }
+
+    #[test]
+    fn parses_stash_list() {
+        let out = [
+            "aaa\x1fp1 p2 p3\x1f100\x1fOn main: my message: with colon",
+            "bbb\x1fp1 p2\x1f90\x1fWIP on feature/x: abc1234 Subject",
+            "ccc\x1fp1 p2\x1f80\x1fOn (no branch): detached",
+        ]
+        .join("\n");
+        let s = parse_stashes(&out);
+        assert_eq!(s.len(), 3);
+        assert_eq!((s[0].index, s[0].sha.as_str(), s[0].time), (0, "aaa", 100));
+        assert_eq!(s[0].message, "my message: with colon");
+        assert_eq!(s[0].branch.as_deref(), Some("main"));
+        assert!(s[0].untracked);
+        assert_eq!(s[1].message, "WIP on feature/x: abc1234 Subject");
+        assert_eq!(s[1].branch.as_deref(), Some("feature/x"));
+        assert!(!s[1].untracked);
+        assert_eq!((s[2].index, s[2].branch.as_deref()), (2, None));
+    }
+
+    #[test]
+    fn stashes_applies_and_deletes() {
+        let repo = TestRepo::new("stash");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        let opts = |message: &str, include_untracked: bool| StashOptions {
+            message: message.into(),
+            include_untracked,
+            keep_index: false,
+        };
+        assert!(
+            stash_push(&repo.dir, &opts("", true))
+                .unwrap_err()
+                .contains("no local changes")
+        );
+
+        // Without untracked files, a new file stays behind.
+        repo.write("a.txt", "two\n");
+        repo.write("new.txt", "new\n");
+        stash_push(&repo.dir, &opts("tracked only", false)).unwrap();
+        assert_eq!(repo.read("a.txt"), "one\n");
+        assert!(repo.dir.join("new.txt").exists());
+        assert!(
+            stash_push(&repo.dir, &opts("", false))
+                .unwrap_err()
+                .contains("untracked")
+        );
+
+        let newest = stash_push(&repo.dir, &opts("with new file", true)).unwrap();
+        assert_eq!((newest.index, newest.message.as_str()), (0, "with new file"));
+        assert!(!repo.dir.join("new.txt").exists());
+        let list = stashes(&repo.dir).unwrap();
+        assert_eq!(
+            list.iter().map(|s| s.message.as_str()).collect::<Vec<_>>(),
+            ["with new file", "tracked only"]
+        );
+        assert!(list[0].untracked && !list[1].untracked);
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        // The untracked file is in the third parent, where the history view shows it from.
+        let untracked = commit_details(&repo.dir, &format!("{}^3", list[0].sha)).unwrap();
+        assert_eq!(untracked.files[0].path, "new.txt");
+
+        // Pop the older one by its commit: the newer one keeps its place.
+        let result = stash_apply(&repo.dir, &list[1].sha, true).unwrap();
+        assert_eq!(result.outcome, StashApplyOutcome::Applied);
+        assert_eq!(repo.read("a.txt"), "two\n");
+        let left = stashes(&repo.dir).unwrap();
+        assert_eq!((left.len(), left[0].sha.as_str()), (1, list[0].sha.as_str()));
+        assert!(
+            stash_apply(&repo.dir, &list[1].sha, false)
+                .unwrap_err()
+                .contains("doesn't exist")
+        );
+
+        // Applying keeps the stash.
+        repo.git(&["checkout", "--", "a.txt"]);
+        stash_apply(&repo.dir, &list[0].sha, false).unwrap();
+        assert_eq!(repo.read("new.txt"), "new\n");
+        assert_eq!(stashes(&repo.dir).unwrap().len(), 1);
+
+        stash_drop(&repo.dir, &list[0].sha).unwrap();
+        assert!(stashes(&repo.dir).unwrap().is_empty());
+        assert!(stash_drop(&repo.dir, &list[0].sha).is_err());
+        assert!(stash_drop(&repo.dir, "--all").is_err());
+    }
+
+    #[test]
+    fn keeps_the_stash_when_applying_conflicts() {
+        let repo = TestRepo::new("stash-conflict");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.write("a.txt", "stashed\n");
+        stash_push(
+            &repo.dir,
+            &StashOptions {
+                message: "change".into(),
+                include_untracked: false,
+                keep_index: false,
+            },
+        )
+        .unwrap();
+        let sha = stashes(&repo.dir).unwrap()[0].sha.clone();
+
+        // Uncommitted changes to the same file: git refuses and nothing changes.
+        repo.write("a.txt", "local\n");
+        assert!(stash_apply(&repo.dir, &sha, true).unwrap_err().contains("a.txt"));
+        assert_eq!(repo.read("a.txt"), "local\n");
+
+        // Committed changes to the same file: applied with conflicts, the stash stays.
+        repo.commit_all("committed");
+        let result = stash_apply(&repo.dir, &sha, true).unwrap();
+        assert_eq!((result.outcome, result.conflicts), (StashApplyOutcome::Conflicts, 1));
+        assert_eq!(status(&repo.dir).unwrap().conflicted[0].path, "a.txt");
+        assert_eq!(stashes(&repo.dir).unwrap().len(), 1);
     }
 
     #[test]

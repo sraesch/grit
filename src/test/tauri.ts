@@ -1,7 +1,12 @@
 import { vi } from "vitest";
-import type { FileChange, LogEntry, Status } from "../api";
+import type { FileChange, LogEntry, Stash, Status } from "../api";
 
 type Handler = (args: Record<string, unknown>) => unknown;
+
+/** Commands most tests don't care about, answered as for a repository without stashes. */
+const DEFAULT_HANDLERS: Record<string, Handler> = {
+  get_stashes: () => [],
+};
 
 /**
  * Routes `invoke(command, args)` calls to per-command handlers so tests can
@@ -10,7 +15,7 @@ type Handler = (args: Record<string, unknown>) => unknown;
  */
 export function mockBackend(invoke: ReturnType<typeof vi.fn>, handlers: Record<string, Handler>) {
   invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-    const handler = handlers[cmd];
+    const handler = handlers[cmd] ?? DEFAULT_HANDLERS[cmd];
     if (!handler) throw `unexpected command: ${cmd}`;
     return handler(args ?? {});
   });
@@ -33,6 +38,10 @@ export function makeStatus(partial: Partial<Status> = {}): Status {
     lastFetch: null,
     ...partial,
   };
+}
+
+export function makeStash(sha: string, message: string, partial: Partial<Stash> = {}): Stash {
+  return { index: 0, sha, message, branch: "main", time: 1_700_000_000, untracked: false, ...partial };
 }
 
 export function makeCommit(sha: string, subject: string, partial: Partial<LogEntry> = {}): LogEntry {

@@ -102,6 +102,37 @@ export interface Branch {
  */
 export type DeleteBranchOutcome = "deleted" | "not-merged";
 
+export interface Stash {
+  /** Position in the stash list: 0 is the newest, `stash@{0}`. */
+  index: number;
+  /** The stash commit, which identifies it even when other stashes are added or deleted. */
+  sha: string;
+  /** The message given when stashing, or git's "WIP on main: abc1234 subject" without one. */
+  message: string;
+  /** The branch that was checked out when stashing; null for a detached HEAD. */
+  branch: string | null;
+  time: number;
+  /** Untracked files were stashed too; they are in the stash commit's third parent. */
+  untracked: boolean;
+}
+
+export interface StashOptions {
+  /** Empty for git's default "WIP on <branch>: <commit>". */
+  message: string;
+  includeUntracked: boolean;
+  /** Leave the staged changes in place (they are stashed too). */
+  keepIndex: boolean;
+}
+
+/** "conflicts": applied, but files have conflicts to resolve; the stash is kept, even when popping. */
+export type StashApplyOutcome = "applied" | "conflicts";
+
+export interface StashApplyResult {
+  outcome: StashApplyOutcome;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
 export interface Remote {
   name: string;
   /** The fetch URL. */
@@ -297,6 +328,13 @@ export const api = {
    */
   deleteBranch: (repo: string, name: string, force: boolean, deleteRemote: boolean) =>
     invoke<DeleteBranchOutcome>("delete_branch", { repo, name, force, deleteRemote }),
+  /** Newest first. */
+  stashes: (repo: string) => invoke<Stash[]>("get_stashes", { repo }),
+  /** Stashes the local changes and reverts them; resolves to the new stash. */
+  stash: (repo: string, options: StashOptions) => invoke<Stash>("stash", { repo, options }),
+  /** Applies a stash and, with `pop`, deletes it if it applied without conflicts. */
+  applyStash: (repo: string, sha: string, pop: boolean) => invoke<StashApplyResult>("apply_stash", { repo, sha, pop }),
+  dropStash: (repo: string, sha: string) => invoke<void>("drop_stash", { repo, sha }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */

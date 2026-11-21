@@ -777,6 +777,20 @@ button.primary.danger:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.branch-group li.selected {
+  background: var(--bg-selected);
+}
+.stash-time {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.stash-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
 .track {
   margin-left: auto;
   color: var(--accent);

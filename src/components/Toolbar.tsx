@@ -103,6 +103,18 @@ export function RebaseIcon() {
   );
 }
 
+/** Stash: changes put away in a tray. */
+export function StashIcon() {
+  return (
+    <Icon>
+      <g strokeWidth={1.8}>
+        <path d="M4 13.5 6.2 5.8A1 1 0 0 1 7.2 5h9.6a1 1 0 0 1 1 .8l2.2 7.7V18a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" />
+        <path d="M4 13.5h4.5l1.2 2.5h4.6l1.2-2.5H20" />
+      </g>
+    </Icon>
+  );
+}
+
 export function SettingsIcon() {
   return (
     <Icon>

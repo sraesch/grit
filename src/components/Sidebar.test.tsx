@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Branches } from "../api";
+import { makeStash } from "../test/tauri";
 import { Sidebar } from "./Sidebar";
 
 const branches: Branches = {
@@ -18,14 +19,30 @@ const branches: Branches = {
   remotes: [{ name: "origin", url: "git@example.com:demo.git" }],
 };
 
-function setup() {
-  const onView = vi.fn();
-  const onSwitch = vi.fn();
-  const onDelete = vi.fn();
+const stashes = [makeStash("s1", "half-done login"), makeStash("s2", "experiment", { index: 1 })];
+
+function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
+  const handlers = {
+    onView: vi.fn(),
+    onSwitch: vi.fn(),
+    onDelete: vi.fn(),
+    onSelectStash: vi.fn(),
+    onApplyStash: vi.fn(),
+    onDropStash: vi.fn(),
+  };
   render(
-    <Sidebar view="changes" onView={onView} changeCount={3} branches={branches} onSwitch={onSwitch} onDelete={onDelete} />,
+    <Sidebar
+      view="changes"
+      changeCount={3}
+      branches={branches}
+      stashes={stashes}
+      selectedStash={null}
+      applyBlocked={null}
+      {...handlers}
+      {...props}
+    />,
   );
-  return { onView, onSwitch, onDelete };
+  return handlers;
 }
 
 describe("Sidebar", () => {
@@ -100,6 +117,38 @@ describe("Sidebar", () => {
     await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
     await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("origin/new-work") });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("lists stashes, shows one on click and applies, pops or deletes it from its context menu", async () => {
+    const { onSelectStash, onApplyStash, onDropStash } = setup();
+    expect(screen.getByRole("button", { name: /Stashes/ })).toHaveTextContent("2");
+    await userEvent.click(screen.getByText("experiment"));
+    expect(onSelectStash).toHaveBeenCalledWith(stashes[1]);
+
+    const openMenu = () => userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("half-done login") });
+    await openMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Apply Stash" }));
+    expect(onApplyStash).toHaveBeenLastCalledWith(stashes[0], false);
+    await openMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Pop Stash" }));
+    expect(onApplyStash).toHaveBeenLastCalledWith(stashes[0], true);
+    await openMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete Stash…" }));
+    expect(onDropStash).toHaveBeenCalledWith(stashes[0]);
+  });
+
+  it("marks the shown stash and disables applying when it can't be applied", async () => {
+    setup({ view: "stash", selectedStash: "s2", applyBlocked: "Resolve the conflicts first" });
+    expect(screen.getByText("experiment").closest("li")).toHaveClass("selected");
+    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("experiment") });
+    expect(screen.getByRole("menuitem", { name: "Apply Stash" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Pop Stash" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Delete Stash…" })).toBeEnabled();
+  });
+
+  it("hides the stash group without stashes", () => {
+    setup({ stashes: [] });
+    expect(screen.queryByRole("button", { name: /Stashes/ })).not.toBeInTheDocument();
   });
 
   it("collapses remotes and tags by default", async () => {

@@ -199,6 +199,11 @@ export interface RebasePrefs {
   autostash: boolean;
 }
 
+export interface StashPrefs {
+  includeUntracked: boolean;
+  keepIndex: boolean;
+}
+
 export interface MergePrefs {
   mode: MergeMode;
   autostash: boolean;
@@ -226,7 +231,7 @@ function savePrefs(key: string, prefs: object) {
   }
 }
 
-/** The fetch, pull, push, rebase and merge dialogs remember their options, as Fork does. */
+/** The fetch, pull, push, rebase, merge and stash dialogs remember their options, as Fork does. */
 export const prefs = {
   fetch: () => readPrefs<FetchPrefs>("fetchOptions", { prune: true, tags: false }),
   saveFetch: (p: FetchPrefs) => savePrefs("fetchOptions", p),
@@ -238,4 +243,6 @@ export const prefs = {
   saveRebase: (p: RebasePrefs) => savePrefs("rebaseOptions", p),
   merge: () => readPrefs<MergePrefs>("mergeOptions", { mode: "ff", autostash: true }),
   saveMerge: (p: MergePrefs) => savePrefs("mergeOptions", p),
+  stash: () => readPrefs<StashPrefs>("stashOptions", { includeUntracked: true, keepIndex: false }),
+  saveStash: (p: StashPrefs) => savePrefs("stashOptions", p),
 };
