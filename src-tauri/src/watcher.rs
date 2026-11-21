@@ -38,6 +38,11 @@ fn classify(path: &Path, git_dir: &Path, changes: &mut Changes) {
         return;
     };
     let rel_str = rel.to_string_lossy().replace('\\', "/");
+    // Deleting a stash other than the newest only rewrites the stash reflog, which lists them.
+    if rel_str == "logs/refs/stash" {
+        changes.refs = true;
+        return;
+    }
     if rel_str.starts_with("objects") || rel_str.starts_with("logs") || rel_str.ends_with(".lock") {
         return;
     }
@@ -114,6 +119,8 @@ mod tests {
         assert_eq!(classify_one("/repo/.git/HEAD"), (true, true));
         assert_eq!(classify_one("/repo/.git/refs/heads/main"), (true, true));
         assert_eq!(classify_one("/repo/.git/packed-refs"), (true, true));
+        assert_eq!(classify_one("/repo/.git/refs/stash"), (true, true));
+        assert_eq!(classify_one("/repo/.git/logs/refs/stash"), (false, true));
     }
 
     #[test]

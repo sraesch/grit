@@ -11,8 +11,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, Divergence, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult,
-    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
+    Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
+    MergeMode, MergeOptions, MergeResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
+    RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -120,11 +121,16 @@ async fn checkout_remote_branch(repo: String, branch: String) -> GitResult<()> {
 }
 
 #[tauri::command]
+async fn checkout_commit(repo: String, sha: String) -> GitResult<()> {
+    blocking(move || git::checkout_commit(&PathBuf::from(repo), &sha)).await
+}
+
+#[tauri::command]
 async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
-/// A progress line of a running fetch, pull, push or rebase, e.g. "Receiving objects:  45% (450/1000)".
+/// A progress line of a running fetch, pull, push, rebase or merge, e.g. "Receiving objects:  45% (450/1000)".
 #[derive(Serialize, Clone)]
 struct GitProgress {
     /// The repository root, as passed to the command, so only its tab shows the progress.
@@ -221,6 +227,42 @@ async fn push(
 }
 
 #[tauri::command]
+async fn get_stashes(repo: String) -> GitResult<Vec<Stash>> {
+    blocking(move || git::stashes(&PathBuf::from(repo))).await
+}
+
+#[tauri::command]
+async fn stash(repo: String, options: StashOptions) -> GitResult<Stash> {
+    blocking(move || git::stash_push(&PathBuf::from(repo), &options)).await
+}
+
+#[tauri::command]
+async fn apply_stash(repo: String, sha: String, pop: bool) -> GitResult<StashApplyResult> {
+    blocking(move || git::stash_apply(&PathBuf::from(repo), &sha, pop)).await
+}
+
+#[tauri::command]
+async fn drop_stash(repo: String, sha: String) -> GitResult<()> {
+    blocking(move || git::stash_drop(&PathBuf::from(repo), &sha)).await
+}
+
+/// Progress of deleting the remote branch arrives as `git-progress` events.
+#[tauri::command]
+async fn delete_branch(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    force: bool,
+    delete_remote: bool,
+) -> GitResult<DeleteBranchOutcome> {
+    blocking(move || {
+        let path = PathBuf::from(&repo);
+        git::delete_branch(&path, &name, force, delete_remote, &mut progress_emitter(app, repo))
+    })
+    .await
+}
+
+#[tauri::command]
 async fn get_divergence(repo: String, base: String) -> GitResult<Divergence> {
     blocking(move || git::divergence(&PathBuf::from(repo), &base)).await
 }
@@ -230,6 +272,25 @@ async fn rebase(app: AppHandle, repo: String, onto: String, autostash: bool) -> 
     blocking(move || {
         let opts = RebaseOptions { onto, autostash };
         git::rebase(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn merge(
+    app: AppHandle,
+    repo: String,
+    source: String,
+    mode: MergeMode,
+    autostash: bool,
+) -> GitResult<MergeResult> {
+    blocking(move || {
+        let opts = MergeOptions {
+            source,
+            mode,
+            autostash,
+        };
+        git::merge(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
     })
     .await
 }
@@ -291,12 +352,19 @@ pub fn run() {
             commit,
             checkout_branch,
             checkout_remote_branch,
+            checkout_commit,
             create_branch,
+            delete_branch,
+            get_stashes,
+            stash,
+            apply_stash,
+            drop_stash,
             fetch,
             pull,
             push,
             get_divergence,
             rebase,
+            merge,
             abort_operation,
             continue_operation,
             skip_operation,

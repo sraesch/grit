@@ -49,6 +49,21 @@ describe("ChangesView", () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
+  it("offers the prepared message of a squash merge and commits the staged changes", async () => {
+    const squashing = makeStatus({
+      staged: [file("a.txt")],
+      operation: { kind: "squash", head: null, step: null, total: null, message: "Squashed commit of the following:" },
+    });
+    setup({ status: squashing });
+    expect(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("Squashed commit of the following:");
+    await userEvent.click(screen.getByRole("button", { name: "Commit 1 file" }));
+    expect(invokeMock).toHaveBeenCalledWith("commit", {
+      repo: "/repo",
+      message: "Squashed commit of the following:",
+      amend: false,
+    });
+  });
+
   it("doesn't commit in the middle of a rebase", async () => {
     const rebasing = makeStatus({
       staged: [file("a.txt")],

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Branch, Branches } from "./api";
-import { localNameOf, switchOptions, targetForRemote, toBranchName } from "./branches";
+import { Branch, Branches, LogEntry } from "./api";
+import { localNameOf, switchOptions, targetForCommit, targetForRemote, toBranchName } from "./branches";
+import { makeCommit } from "./test/tauri";
 
 const branch = (name: string, partial: Partial<Branch> = {}): Branch => ({
   name,
@@ -79,5 +80,46 @@ describe("switchOptions", () => {
     expect(names("main")).toEqual(["local:main"]);
     expect(names("release/1.0")).toEqual(["remote:origin/release/1.0"]);
     expect(names("origin/release/1.0")).toEqual(["remote:origin/release/1.0"]);
+  });
+});
+
+describe("targetForCommit", () => {
+  const remote = (name: string) => ({ name, kind: "remote" as const, current: false });
+  const at = (...refs: LogEntry["refs"]) => makeCommit("abc", "x", { refs });
+
+  it("prefers a local branch pointing at the commit", () => {
+    const entry = at(remote("origin/feature"), { name: "feature", kind: "local", current: false });
+    expect(targetForCommit(entry, branches)).toEqual({ kind: "local", name: "feature" });
+  });
+
+  it("checks out the branch of a remote branch at the commit, creating it if needed", () => {
+    // A local branch tracks it, under another name.
+    expect(targetForCommit(at(remote("origin/old-name")), branches)).toEqual({ kind: "local", name: "renamed" });
+    // No local branch yet.
+    expect(targetForCommit(at(remote("origin/new-work")), branches)).toEqual({
+      kind: "remote",
+      name: "origin/new-work",
+      localName: "new-work",
+    });
+    // Of several remote branches, one with a local branch wins.
+    const both = at(remote("origin/new-work"), remote("origin/feature/login"));
+    expect(targetForCommit(both, branches)).toEqual({ kind: "local", name: "feature/login" });
+  });
+
+  it("checks out other commits detached, even with tags on them", () => {
+    expect(targetForCommit(at({ name: "v1.0", kind: "tag", current: false }), branches)).toEqual({
+      kind: "commit",
+      name: "abc",
+    });
+    expect(targetForCommit(at(), branches)).toEqual({ kind: "commit", name: "abc" });
+    // Before the branches are loaded, remote branches can't be matched.
+    expect(targetForCommit(at(remote("origin/new-work")), null)).toEqual({ kind: "commit", name: "abc" });
+  });
+
+  it("does nothing for what is checked out already", () => {
+    expect(targetForCommit(at({ name: "main", kind: "local", current: true }), branches)).toBeNull();
+    expect(targetForCommit(at({ name: "HEAD", kind: "head", current: true }), branches)).toBeNull();
+    // origin/main may be ahead, but its branch main is the current one.
+    expect(targetForCommit(at(remote("origin/main")), branches)).toBeNull();
   });
 });

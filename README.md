@@ -11,11 +11,16 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 ## Features
 
 - **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button or double-click), stage/unstage all, commit and amend (Ctrl/Cmd+Enter)
-- **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs
-- **Branches**: local, remote and tag lists; double-click a local branch to check it out
+- **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs; double-click a commit to check it out
+- **Branches**: local, remote and tag lists; double-click a local branch to check it out, right-click it to check it out or delete it
 - **Fetch, pull and push**: fetch one or all remotes (prune, tags), pull by merge or rebase with optional autostash,
   push any local branch to any remote branch (tags, set upstream, force push with lease), live progress and result
   summaries, a banner to continue/skip/abort a merge or rebase stopped on conflicts, and automatic background fetching
+- **Merge**: merge a local or remote branch or a tag into the current branch: fast-forward if possible, always create
+  a merge commit, fast-forward only, or squash; with a preview, optional autostash, live progress and the same
+  commit/abort banner on conflicts
+- **Stash**: stash local changes with a message, optionally with untracked files or keeping staged changes;
+  browse stashes with their files and diffs, and apply, pop or delete them
 - **Rebase**: rebase the current branch onto a local or remote branch or a tag, with a preview of the commits to
   replay, optional autostash, live progress and the same continue/skip/abort banner on conflicts
 - **Live refresh**: the working tree and `.git` are watched; the UI updates automatically
@@ -25,7 +30,7 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 - `src-tauri/src/git.rs`: runs the installed `git` executable for all operations, so hooks, credentials, SSH and signing behave like the CLI
 - `src-tauri/src/graph.rs`: commit graph lane layout, computed in Rust and sent per row to the frontend
 - `src-tauri/src/watcher.rs`: debounced file watcher that emits `repo-changed` events
-- Fetch, pull, push and rebase stream git's progress output to the frontend as `git-progress` events; background fetches run
+- Fetch, pull, push, rebase and merge stream git's progress output to the frontend as `git-progress` events; background fetches run
   with ssh in batch mode and Git Credential Manager non-interactive, so they never prompt
 - `src/`: React frontend (`components/` holds the views, `api.ts` the typed command bindings)
 

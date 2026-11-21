@@ -13,9 +13,13 @@ export interface FileChange {
   status: string;
 }
 
-export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert";
+/** "squash" is a squash merge whose changes are staged (or conflict) and wait to be committed. */
+export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert" | "squash";
 
-/** A merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and waits for the user. */
+/**
+ * A merge, squash merge, rebase, cherry-pick or revert that stopped (usually on conflicts) and
+ * waits for the user.
+ */
 export interface Operation {
   kind: OperationKind;
   /** The branch being rebased. */
@@ -23,7 +27,7 @@ export interface Operation {
   /** Rebase progress: the commit being applied (1-based) and the number of commits. */
   step: number | null;
   total: number | null;
-  /** The prepared merge commit message. */
+  /** The prepared commit message of a merge or squash merge. */
   message: string | null;
 }
 
@@ -92,6 +96,43 @@ export interface Branch {
   track: string | null;
 }
 
+/**
+ * "not-merged": nothing was deleted because the branch has unmerged commits; deleting it needs `force`.
+ * With the remote branch, merged means into the current branch, as the upstream goes away too.
+ */
+export type DeleteBranchOutcome = "deleted" | "not-merged";
+
+export interface Stash {
+  /** Position in the stash list: 0 is the newest, `stash@{0}`. */
+  index: number;
+  /** The stash commit, which identifies it even when other stashes are added or deleted. */
+  sha: string;
+  /** The message given when stashing, or git's "WIP on main: abc1234 subject" without one. */
+  message: string;
+  /** The branch that was checked out when stashing; null for a detached HEAD. */
+  branch: string | null;
+  time: number;
+  /** Untracked files were stashed too; they are in the stash commit's third parent. */
+  untracked: boolean;
+}
+
+export interface StashOptions {
+  /** Empty for git's default "WIP on <branch>: <commit>". */
+  message: string;
+  includeUntracked: boolean;
+  /** Leave the staged changes in place (they are stashed too). */
+  keepIndex: boolean;
+}
+
+/** "conflicts": applied, but files have conflicts to resolve; the stash is kept, even when popping. */
+export type StashApplyOutcome = "applied" | "conflicts";
+
+export interface StashApplyResult {
+  outcome: StashApplyOutcome;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
 export interface Remote {
   name: string;
   /** The fetch URL. */
@@ -103,6 +144,8 @@ export interface Branches {
   remote: Branch[];
   tags: Branch[];
   remotes: Remote[];
+  /** The branch checked out before the current one, if it still exists. */
+  previous?: string | null;
 }
 
 export interface FetchOptions {
@@ -196,6 +239,30 @@ export interface RebaseResult {
   conflicts: number;
 }
 
+/**
+ * How a merge combines the other branch with the current one: fast-forward when possible, always
+ * create a merge commit, only fast-forward, or stage the changes for one commit (squash).
+ */
+export type MergeMode = "ff" | "no-ff" | "ff-only" | "squash";
+
+export interface MergeOptions {
+  /** Branch, tag or commit to merge into the current branch, e.g. "feature" or "origin/main". */
+  source: string;
+  mode: MergeMode;
+  /** Stash uncommitted changes before the merge and reapply them afterwards; not for squash merges. */
+  autostash: boolean;
+}
+
+export type MergeOutcome = "up-to-date" | "fast-forward" | "merge" | "squash" | "conflicts" | "stash-conflicts";
+
+export interface MergeResult {
+  outcome: MergeOutcome;
+  /** Commits of the other branch the current one didn't contain yet. */
+  incoming: number;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
 /** How far HEAD and another branch or commit have diverged. */
 export interface Divergence {
   /** Commits only on HEAD. */
@@ -204,7 +271,7 @@ export interface Divergence {
   behind: number;
 }
 
-/** A progress line of a running fetch, pull, push or rebase. */
+/** A progress line of a running fetch, pull, push, rebase or merge. */
 export interface GitProgress {
   root: string;
   text: string;
@@ -250,8 +317,24 @@ export const api = {
   /** Validates and saves the settings; resolves to what was stored (e.g. with "~" expanded). */
   setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
+  /** Checks out a commit without a branch (detached HEAD). */
+  checkoutCommit: (repo: string, sha: string) => invoke<void>("checkout_commit", { repo, sha }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
+  /**
+   * Deletes a local branch and, with `deleteRemote`, the remote branch it tracks (first; progress
+   * arrives as `git-progress` events). Without `force`, a branch with unmerged commits is kept
+   * ("not-merged"). The remote branch is never deleted when it has commits that weren't fetched.
+   */
+  deleteBranch: (repo: string, name: string, force: boolean, deleteRemote: boolean) =>
+    invoke<DeleteBranchOutcome>("delete_branch", { repo, name, force, deleteRemote }),
+  /** Newest first. */
+  stashes: (repo: string) => invoke<Stash[]>("get_stashes", { repo }),
+  /** Stashes the local changes and reverts them; resolves to the new stash. */
+  stash: (repo: string, options: StashOptions) => invoke<Stash>("stash", { repo, options }),
+  /** Applies a stash and, with `pop`, deletes it if it applied without conflicts. */
+  applyStash: (repo: string, sha: string, pop: boolean) => invoke<StashApplyResult>("apply_stash", { repo, sha, pop }),
+  dropStash: (repo: string, sha: string) => invoke<void>("drop_stash", { repo, sha }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */
@@ -265,7 +348,12 @@ export const api = {
    * Conflicts resolve with outcome "conflicts" rather than rejecting.
    */
   rebase: (repo: string, options: RebaseOptions) => invoke<RebaseResult>("rebase", { repo, ...options }),
-  /** Aborts the merge, rebase, cherry-pick or revert in progress. */
+  /**
+   * Merges `options.source` into the current branch. Progress arrives as `git-progress` events.
+   * Conflicts resolve with outcome "conflicts" rather than rejecting.
+   */
+  merge: (repo: string, options: MergeOptions) => invoke<MergeResult>("merge", { repo, ...options }),
+  /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
   continueOperation: (repo: string) => invoke<void>("continue_operation", { repo }),

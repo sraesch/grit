@@ -11,7 +11,7 @@ export interface RebaseTargets {
 }
 
 /** Branches that other branches usually start from, most likely first. */
-const BASE_BRANCHES = ["develop", "main", "master", "trunk"];
+export const BASE_BRANCHES = ["develop", "main", "master", "trunk"];
 
 /**
  * Branches and tags to rebase the current branch onto. A feature branch starts on the branch it

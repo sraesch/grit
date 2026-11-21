@@ -74,6 +74,20 @@ export function PushIcon() {
   );
 }
 
+/** Merge: a branch joining back into the trunk. */
+export function MergeIcon() {
+  return (
+    <Icon>
+      <g strokeWidth={1.8}>
+        <path d="M7 3v18" />
+        <path d="M17 5v3c0 4-10 4-10 9" />
+        <circle cx="17" cy="5" r="2" fill="currentColor" />
+        <circle cx="7" cy="19" r="2" fill="currentColor" />
+      </g>
+    </Icon>
+  );
+}
+
 /** Rebase: a branch lifted off the trunk and replanted on its tip. */
 export function RebaseIcon() {
   return (
@@ -84,6 +98,18 @@ export function RebaseIcon() {
         <path d="M7 5c0 4 10 2 10 6v5" />
         <circle cx="17" cy="11" r="2" fill="currentColor" />
         <circle cx="17" cy="18" r="2" fill="currentColor" />
+      </g>
+    </Icon>
+  );
+}
+
+/** Stash: changes put away in a tray. */
+export function StashIcon() {
+  return (
+    <Icon>
+      <g strokeWidth={1.8}>
+        <path d="M4 13.5 6.2 5.8A1 1 0 0 1 7.2 5h9.6a1 1 0 0 1 1 .8l2.2 7.7V18a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" />
+        <path d="M4 13.5h4.5l1.2 2.5h4.6l1.2-2.5H20" />
       </g>
     </Icon>
   );

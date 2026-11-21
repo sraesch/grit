@@ -61,7 +61,7 @@ describe("HistoryView", () => {
   });
 
   it("lists commits with their refs", async () => {
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     expect(await screen.findByText("Merge feature")).toBeInTheDocument();
     expect(screen.getByText("Initial commit")).toBeInTheDocument();
     expect(screen.getByText("main")).toHaveClass("ref-local", "ref-current");
@@ -69,7 +69,7 @@ describe("HistoryView", () => {
   });
 
   it("selects HEAD and shows its details, files and first file diff", async () => {
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     expect(await screen.findByText("Subject of c3")).toBeInTheDocument();
     expect(screen.getByText("Longer body of c3")).toBeInTheDocument();
     expect(within(document.querySelector(".file-list")! as HTMLElement).getByText("c3.txt")).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("HistoryView", () => {
   });
 
   it("loads another commit on click and another file diff on file click", async () => {
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     await userEvent.click(await screen.findByText("Second commit"));
     expect(await screen.findByText("Subject of c2")).toBeInTheDocument();
 
@@ -91,8 +91,15 @@ describe("HistoryView", () => {
     });
   });
 
+  it("checks out a commit on double-click", async () => {
+    const onCheckout = vi.fn();
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={onCheckout} />);
+    await userEvent.dblClick(await screen.findByText("Second commit"));
+    expect(onCheckout).toHaveBeenCalledWith(log[1]);
+  });
+
   it("moves the selection with the arrow keys", async () => {
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     await screen.findByText("Subject of c3");
     const list = document.querySelector(".history-scroll")!;
 
@@ -111,7 +118,7 @@ describe("HistoryView", () => {
       get_commit_details: ({ sha }) => ({ ...details(sha as string), message: "Subject\n\n- **bold** item" }),
       get_commit_file_diff: () => "",
     });
-    const { unmount } = render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    const { unmount } = render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     expect(await screen.findByText("bold")).toHaveProperty("tagName", "STRONG");
     const toggle = screen.getByRole("button", { name: "Markdown" });
     expect(toggle).toHaveAttribute("aria-pressed", "true");
@@ -121,7 +128,7 @@ describe("HistoryView", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "false");
 
     unmount();
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     expect(await screen.findByText("- **bold** item")).toHaveClass("commit-body");
   });
 
@@ -130,7 +137,7 @@ describe("HistoryView", () => {
       get_commit_details: ({ sha }) => ({ ...details(sha as string), message: "Just a subject\n" }),
       get_commit_file_diff: () => "",
     });
-    render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     expect(await screen.findByText("Just a subject")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Markdown" })).toBeNull();
   });
@@ -155,7 +162,7 @@ describe("HistoryView", () => {
 
     it("shows a modified image before and after the commit", async () => {
       withFiles([file("logo.png")]);
-      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
 
       const before = await screen.findByRole("img", { name: "Before: logo.png" });
       const after = screen.getByRole("img", { name: "After: logo.png" });
@@ -168,7 +175,7 @@ describe("HistoryView", () => {
 
     it("reads a renamed image from its old path and shows added and deleted images alone", async () => {
       withFiles([file("new.png", "R", "old.png"), file("added.svg", "A"), file("gone.gif", "D")]);
-      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
       await screen.findByRole("img", { name: "Before: old.png" });
       expect(screen.getByRole("img", { name: "After: new.png" })).toBeInTheDocument();
       expect(invokeMock).toHaveBeenCalledWith("get_file_at_revision", { repo: "/repo", rev: "p1", path: "old.png" });
@@ -184,13 +191,13 @@ describe("HistoryView", () => {
 
     it("shows images of a root commit as added", async () => {
       withFiles([file("logo.png", "A")], []);
-      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
       expect(await screen.findByRole("img", { name: "Added: logo.png" })).toBeInTheDocument();
     });
 
     it("switches between the image and the diff", async () => {
       withFiles([file("logo.png")]);
-      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
       await screen.findByRole("img", { name: "After: logo.png" });
 
       await userEvent.click(screen.getByRole("button", { name: "Show diff" }));
@@ -209,7 +216,7 @@ describe("HistoryView", () => {
           throw "File is too large to preview (30.0 MB, limit 25 MB)";
         },
       });
-      render(<HistoryView repo="/repo" log={log} onError={() => {}} />);
+      render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
       expect(await screen.findByText("File is too large to preview (30.0 MB, limit 25 MB)")).toBeInTheDocument();
     });
   });
@@ -221,12 +228,12 @@ describe("HistoryView", () => {
       },
     });
     const onError = vi.fn();
-    render(<HistoryView repo="/repo" log={log} onError={onError} />);
+    render(<HistoryView repo="/repo" log={log} onError={onError} onCheckout={() => {}} />);
     await waitFor(() => expect(onError).toHaveBeenCalledWith("bad object"));
   });
 
   it("shows an empty state for repositories without commits", () => {
-    render(<HistoryView repo="/repo" log={[]} onError={() => {}} />);
+    render(<HistoryView repo="/repo" log={[]} onError={() => {}} onCheckout={() => {}} />);
     expect(screen.getByText("No commits yet")).toBeInTheDocument();
   });
 });

@@ -3,19 +3,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   api,
+  Branch,
   Branches,
   errorMessage,
   FetchOptions,
   GitProgress,
   LogEntry,
+  MergeOptions,
   PullOptions,
   PushOptions,
   RebaseOptions,
   RepoChanged,
   RepoInfo,
+  Stash,
+  StashOptions,
   Status,
 } from "../api";
-import { switchTo, SwitchTarget } from "../branches";
+import { switchTo, SwitchTarget, targetForCommit } from "../branches";
+import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
   autoFetchDue,
@@ -27,16 +32,30 @@ import {
   pushSummary,
   PushTarget,
 } from "../remote";
+import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
+import { DeleteBranchDialog } from "./DeleteBranchDialog";
 import { HistoryView } from "./HistoryView";
+import { MergeDialog } from "./MergeDialog";
 import { OperationBanner } from "./OperationBanner";
 import { RebaseDialog } from "./RebaseDialog";
 import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 import { Sidebar, View } from "./Sidebar";
 import { Split } from "./Split";
-import { FetchIcon, PullIcon, PushIcon, RebaseIcon, ToolbarButton, ToolbarDivider } from "./Toolbar";
+import { DropStashDialog, StashDialog } from "./StashDialog";
+import { StashView } from "./StashView";
+import {
+  FetchIcon,
+  MergeIcon,
+  PullIcon,
+  PushIcon,
+  RebaseIcon,
+  StashIcon,
+  ToolbarButton,
+  ToolbarDivider,
+} from "./Toolbar";
 
 interface RepoTabProps {
   repo: RepoInfo;
@@ -51,7 +70,7 @@ interface RepoTabProps {
   onClearError: () => void;
 }
 
-/** A fetch, pull, push or rebase that is running; background fetches don't show progress. */
+/** A fetch, pull, push, rebase or merge that is running; background fetches don't show progress. */
 interface RemoteOp {
   label: string;
   background: boolean;
@@ -81,9 +100,16 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [status, setStatus] = useState<Status | null>(null);
   const [log, setLog] = useState<LogEntry[] | null>(null);
   const [branches, setBranches] = useState<Branches | null>(null);
+  const [stashes, setStashes] = useState<Stash[] | null>(null);
+  // The stash shown in the stash view.
+  const [selectedStash, setSelectedStash] = useState<string | null>(null);
+  // The stash whose deletion is being confirmed.
+  const [dropping, setDropping] = useState<Stash | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "rebase" | null>(null);
+  const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "merge" | "rebase" | "stash" | null>(null);
+  // The local branch whose deletion is being confirmed.
+  const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean; withRemote: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -116,10 +142,11 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
 
   const refreshHistory = useCallback(async () => {
     try {
-      const [l, b] = await Promise.all([api.log(root), api.branches(root)]);
+      const [l, b, s] = await Promise.all([api.log(root), api.branches(root), api.stashes(root)]);
       if (mounted.current) {
         setLog(l);
         setBranches(b);
+        setStashes(s);
       }
     } catch (e) {
       if (mounted.current) onError(errorMessage(e));
@@ -147,7 +174,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     };
   }, [root, refreshStatus, refreshHistory]);
 
-  // Progress of this tab's fetch, pull or rebase ("Receiving objects: 45% (450/1000)", "Rebasing (2/5)").
+  // Progress of this tab's fetch, pull, rebase or merge ("Receiving objects: 45% (450/1000)", "Rebasing (2/5)").
   useEffect(() => {
     const unlisten = listen<GitProgress>("git-progress", ({ payload }) => {
       if (payload.root === root && remoteOpRef.current && !remoteOpRef.current.background) setProgress(payload.text);
@@ -164,7 +191,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     return () => clearTimeout(timer);
   }, [notice]);
 
-  /** Runs one fetch, pull, push or rebase at a time; resolves to null when another one is still running. */
+  /** Runs one fetch, pull, push, rebase or merge at a time; resolves to null when another one is still running. */
   const runRemote = useCallback(
     async <T,>(op: RemoteOp, action: () => Promise<T>): Promise<T | null> => {
       if (remoteOpRef.current) {
@@ -283,6 +310,25 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     [root, runRemote, onError, onClearError],
   );
 
+  const mergeNow = useCallback(
+    async (options: MergeOptions) => {
+      setDialog(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      const label = `${options.mode === "squash" ? "Squash merging" : "Merging"} ${options.source} into ${branch}…`;
+      try {
+        const result = await runRemote({ label, background: false }, () => api.merge(root, options));
+        if (!result || !mounted.current) return;
+        setNotice(mergeSummary(result, options.source, branch));
+        onClearError();
+        // Conflicts are resolved, and a squash is committed, in the changes view.
+        if (result.conflicts > 0 || result.outcome === "squash") setView("changes");
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
   // Fetch in the background when the last fetch (by grit, the command line or another tool)
   // or the last attempt is older than the interval. Failures are shown quietly on the button.
   const autoFetch = useCallback(async () => {
@@ -313,11 +359,17 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const pull = branches && status ? pullSources(branches, status) : null;
   const canPull = !!status?.branch && !!pull && pull.sources.length > 0 && !status.operation && !remoteOp;
   const canPush = !!branches && branches.remotes.length > 0 && branches.local.length > 0 && !remoteOp;
+  const merge = branches && status ? mergeTargets(branches, status) : null;
+  const canMerge = !!status?.branch && !!merge && hasRebaseTargets(merge) && !status.operation && !remoteOp;
   const rebase = branches && status ? rebaseTargets(branches, status) : null;
   const canRebase = !!status?.branch && !!rebase && hasRebaseTargets(rebase) && !status.operation && !remoteOp;
+  const changeCount = status ? new Set([...status.staged, ...status.unstaged, ...status.conflicted].map((f) => f.path)).size : 0;
+  const canStash = !!status && changeCount > 0 && status.conflicted.length === 0 && !status.operation && !remoteOp;
+  const applyBlocked = stashApplyBlocked(status, !!remoteOp);
 
   // Shortcuts of the visible tab: Ctrl/Cmd+B switches branches, Ctrl/Cmd+Shift+F fetches,
-  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork; Ctrl/Cmd+Shift+E rebases.
+  // Ctrl/Cmd+Shift+L pulls and Ctrl/Cmd+Shift+P pushes, as in Fork; Ctrl/Cmd+Shift+M merges,
+  // Ctrl/Cmd+Shift+E rebases and Ctrl/Cmd+Shift+S stashes.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -327,19 +379,23 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       else if (key === "f" && e.shiftKey && canFetch) setDialog("fetch");
       else if (key === "l" && e.shiftKey && canPull) setDialog("pull");
       else if (key === "p" && e.shiftKey && canPush) openPush();
+      else if (key === "m" && e.shiftKey && canMerge) setDialog("merge");
       else if (key === "e" && e.shiftKey && canRebase) setDialog("rebase");
+      else if (key === "s" && e.shiftKey && canStash) setDialog("stash");
       else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, canFetch, canPull, canPush, canRebase, openPush]);
+  }, [active, canFetch, canPull, canPush, canMerge, canRebase, canStash, openPush]);
 
   // Popovers and dialogs left open in a tab that is switched away from would reappear unexpectedly.
   useEffect(() => {
     if (!active) {
       setSwitcherOpen(false);
       setDialog(null);
+      setDeleting(null);
+      setDropping(null);
     }
   }, [active]);
 
@@ -383,7 +439,90 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     }
   }
 
-  const changeCount = status ? new Set([...status.staged, ...status.unstaged, ...status.conflicted].map((f) => f.path)).size : 0;
+  const closeDelete = useCallback(() => setDeleting(null), []);
+
+  async function deleteBranch(branch: Branch, force: boolean, withRemote: boolean) {
+    setDeleting(null);
+    try {
+      const run = () => api.deleteBranch(root, branch.name, force, withRemote);
+      // Deleting the remote branch talks to the remote, like a push: one at a time, with progress.
+      const outcome = withRemote
+        ? await runRemote({ label: `Deleting ${branch.name} and ${branch.upstream}…`, background: false }, run)
+        : await run();
+      if (!outcome || !mounted.current) return;
+      onClearError();
+      // Nothing was deleted; ask again before dropping the unmerged commits.
+      if (outcome === "not-merged") setDeleting({ branch, unmerged: true, withRemote });
+      else {
+        const what = withRemote ? `${branch.name} and ${branch.upstream}` : branch.name;
+        // The commit it pointed at brings the branch back if it was deleted by mistake.
+        setNotice({ kind: "info", text: `Deleted branch ${what} (was ${branch.sha.slice(0, 7)}).` });
+      }
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshHistory();
+    }
+  }
+
+  // A stash that was applied and deleted, or deleted elsewhere, leaves the stash view.
+  const shownStash = stashes?.find((s) => s.sha === selectedStash) ?? null;
+  useEffect(() => {
+    if (view === "stash" && stashes && !shownStash) setView("changes");
+  }, [view, stashes, shownStash]);
+
+  const stashNow = useCallback(
+    async (options: StashOptions) => {
+      setDialog(null);
+      try {
+        const stash = await runRemote({ label: "Stashing local changes…", background: false }, () =>
+          api.stash(root, options),
+        );
+        if (!stash || !mounted.current) return;
+        onClearError();
+        setNotice({ kind: "info", text: `Stashed local changes as ${stashName(stash)}.` });
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  const applyStash = useCallback(
+    async (stash: Stash, pop: boolean) => {
+      try {
+        const label = `${pop ? "Popping" : "Applying"} stash ${stashName(stash)}…`;
+        const result = await runRemote({ label, background: false }, () => api.applyStash(root, stash.sha, pop));
+        if (!result || !mounted.current) return;
+        onClearError();
+        setNotice(stashApplySummary(result, stash, pop));
+        // The applied changes, and any conflicts to resolve, are in the changes view.
+        if (pop || result.outcome === "conflicts") setView("changes");
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  const dropStash = useCallback(
+    async (stash: Stash) => {
+      setDropping(null);
+      try {
+        const label = `Deleting stash ${stashName(stash)}…`;
+        const done = await runRemote({ label, background: false }, () => api.dropStash(root, stash.sha).then(() => true));
+        if (!done || !mounted.current) return;
+        onClearError();
+        // `git stash apply <sha>` still brings it back for a while.
+        setNotice({ kind: "info", text: `Deleted stash ${stashName(stash)} (was ${stash.sha.slice(0, 7)}).` });
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  const closeDrop = useCallback(() => setDropping(null), []);
 
   return (
     <div className="repo-tab" id={tabPanelId(root)} role="tabpanel" aria-label={repo.name} hidden={!active}>
@@ -459,11 +598,26 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
             />
             <ToolbarDivider />
             <ToolbarButton
+              icon={<MergeIcon />}
+              label="Merge"
+              disabled={!canMerge}
+              onClick={() => setDialog("merge")}
+              title={mergeTitle(status, !!merge && hasRebaseTargets(merge))}
+            />
+            <ToolbarButton
               icon={<RebaseIcon />}
               label="Rebase"
               disabled={!canRebase}
               onClick={() => setDialog("rebase")}
               title={rebaseTitle(status, !!rebase && hasRebaseTargets(rebase))}
+            />
+            <ToolbarDivider />
+            <ToolbarButton
+              icon={<StashIcon />}
+              label="Stash"
+              disabled={!canStash}
+              onClick={() => setDialog("stash")}
+              title={stashTitle(status, changeCount)}
             />
           </>,
           actionsSlot,
@@ -508,6 +662,16 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeDialog}
         />
       )}
+      {dialog === "merge" && status?.branch && merge && (
+        <MergeDialog
+          repo={root}
+          branch={status.branch}
+          status={status}
+          targets={merge}
+          onMerge={mergeNow}
+          onClose={closeDialog}
+        />
+      )}
       {dialog === "rebase" && status?.branch && rebase && (
         <RebaseDialog
           repo={root}
@@ -518,13 +682,64 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeDialog}
         />
       )}
+      {deleting && (
+        <DeleteBranchDialog
+          branch={deleting.branch}
+          remoteBranch={
+            deleting.branch.upstream && branches?.remote.some((b) => b.name === deleting.branch.upstream)
+              ? deleting.branch.upstream
+              : null
+          }
+          withRemote={deleting.withRemote}
+          unmerged={deleting.unmerged}
+          onDelete={deleteBranch}
+          onClose={closeDelete}
+        />
+      )}
+      {dialog === "stash" && status && <StashDialog status={status} onStash={stashNow} onClose={closeDialog} />}
+      {dropping && <DropStashDialog stash={dropping} onDrop={dropStash} onClose={closeDrop} />}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
-        <Sidebar view={view} onView={setView} changeCount={changeCount} branches={branches} onSwitch={switchBranch} />
+        <Sidebar
+          view={view}
+          onView={setView}
+          changeCount={changeCount}
+          branches={branches}
+          onSwitch={switchBranch}
+          onDelete={(branch) => setDeleting({ branch, unmerged: false, withRemote: false })}
+          stashes={stashes}
+          selectedStash={selectedStash}
+          onSelectStash={(stash) => {
+            setSelectedStash(stash.sha);
+            setView("stash");
+          }}
+          applyBlocked={applyBlocked}
+          onApplyStash={applyStash}
+          onDropStash={setDropping}
+        />
         <main className="main">
           {view === "changes" ? (
             <ChangesView repo={root} status={status} onChanged={refreshAll} onError={onError} />
+          ) : view === "stash" ? (
+            shownStash && (
+              <StashView
+                repo={root}
+                stash={shownStash}
+                applyBlocked={applyBlocked}
+                onApply={applyStash}
+                onDrop={setDropping}
+                onError={onError}
+              />
+            )
           ) : (
-            <HistoryView repo={root} log={log} onError={onError} />
+            <HistoryView
+              repo={root}
+              log={log}
+              onError={onError}
+              onCheckout={(entry) => {
+                const target = targetForCommit(entry, branches);
+                if (target) switchBranch(target);
+              }}
+            />
           )}
         </main>
       </Split>
@@ -539,7 +754,7 @@ interface RemoteStatusProps {
   onDismiss: () => void;
 }
 
-/** The running fetch, pull, push or rebase with git's progress, or the message about the last one. */
+/** The running fetch, pull, push, rebase or merge with git's progress, or the message about the last one. */
 function RemoteStatus({ op, progress, notice, onDismiss }: RemoteStatusProps) {
   if (op) {
     return (
@@ -592,6 +807,31 @@ function pushTitle(branches: Branches | null, status: Status | null): string {
   if (branches && branches.local.length === 0) return "There are no branches to push yet";
   const ahead = status?.branch && status.ahead > 0 ? `\n${status.branch} is ${status.ahead} ahead of ${status.upstream}` : "";
   return `Push a branch to a remote (Ctrl/Cmd+Shift+P)${ahead}`;
+}
+
+function stashTitle(status: Status | null, changeCount: number): string {
+  if (!status) return "Stash";
+  if (status.operation) return "Finish or abort the operation in progress first";
+  if (status.conflicted.length > 0) return "Resolve the conflicts first";
+  if (changeCount === 0) return "There are no local changes to stash";
+  return "Stash the local changes (Ctrl/Cmd+Shift+S)";
+}
+
+/** Why stashes can't be applied right now; null when they can. */
+function stashApplyBlocked(status: Status | null, busy: boolean): string | null {
+  if (!status) return "Loading…";
+  if (status.operation) return "Finish or abort the operation in progress first";
+  if (status.conflicted.length > 0) return "Resolve the conflicts first";
+  if (busy) return "Wait for the running operation to finish";
+  return null;
+}
+
+function mergeTitle(status: Status | null, hasTargets: boolean): string {
+  if (!status) return "Merge";
+  if (!status.branch) return "Switch to a branch to merge into";
+  if (status.operation) return "Finish or abort the operation in progress first";
+  if (!hasTargets) return "There are no other branches or tags to merge";
+  return `Merge another branch into ${status.branch} (Ctrl/Cmd+Shift+M)`;
 }
 
 function rebaseTitle(status: Status | null, hasTargets: boolean): string {

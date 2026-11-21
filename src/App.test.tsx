@@ -5,8 +5,8 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { FetchResult, GitProgress, RepoChanged, Settings, Status } from "./api";
-import { file, makeStatus, mockBackend } from "./test/tauri";
+import { FetchResult, GitProgress, RepoChanged, Settings, Stash, StashOptions, Status } from "./api";
+import { file, makeCommit, makeStash, makeStatus, mockBackend } from "./test/tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -353,6 +353,132 @@ describe("App", () => {
       expect(await screen.findByRole("button", { name: /^hotfix/ })).toBeInTheDocument();
     });
 
+    it("deletes a branch from the sidebar, asking again when it has unmerged commits", async () => {
+      let branchNames = ["main", "develop"];
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main" }),
+        get_log: () => [],
+        get_branches: () => ({ ...branchList(), local: branchList().local.filter((b) => branchNames.includes(b.name)) }),
+        delete_branch: ({ force }) => {
+          if (!force) return "not-merged";
+          branchNames = ["main"];
+          return "deleted";
+        },
+      });
+      render(<App />);
+      await userEvent.pointer({ keys: "[MouseRight]", target: await screen.findByText("develop") });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Delete Branch…" }));
+
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Delete Branch" })).getByRole("button", { name: "Delete" }));
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "develop",
+        force: false,
+        deleteRemote: false,
+      });
+
+      // git kept the branch: deleting it anyway has to be confirmed.
+      const again = await screen.findByRole("dialog", { name: "Delete Branch" });
+      expect(within(again).getByRole("note")).toHaveTextContent("aren't merged");
+      expect(screen.getByText("develop", { selector: ".branch-group .branch-name" })).toBeInTheDocument();
+      await userEvent.click(within(again).getByRole("button", { name: "Delete Anyway" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "develop",
+        force: true,
+        deleteRemote: false,
+      });
+      expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch develop (was a).");
+      await waitFor(() => expect(screen.queryByText("develop")).not.toBeInTheDocument());
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("deletes the remote branch along when asked", async () => {
+      let deleted = false;
+      const feature = { name: "feature", sha: "b", current: false, upstream: "origin/feature", track: null };
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main" }),
+        get_log: () => [],
+        get_branches: () => ({
+          local: [
+            { name: "main", sha: "a", current: true, upstream: null, track: null },
+            ...(deleted ? [] : [feature]),
+          ],
+          remote: deleted ? [] : [{ name: "origin/feature", sha: "b", current: false, upstream: null, track: null }],
+          tags: [],
+          remotes: [{ name: "origin", url: "/srv/demo.git" }],
+        }),
+        delete_branch: () => {
+          deleted = true;
+          return "deleted";
+        },
+      });
+      render(<App />);
+      await userEvent.pointer({ keys: "[MouseRight]", target: await screen.findByText("feature") });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Delete Branch…" }));
+      const dialog = screen.getByRole("dialog", { name: "Delete Branch" });
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /origin\/feature/ }));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "feature",
+        force: false,
+        deleteRemote: true,
+      });
+      expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch feature and origin/feature (was b).");
+    });
+
+    it("stashes local changes, shows the stash and pops it", async () => {
+      let stashes: Stash[] = [];
+      let changes = [file("a.txt")];
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main", unstaged: changes }),
+        get_log: () => [],
+        get_branches: branchList,
+        get_stashes: () => stashes,
+        stash: ({ options }) => {
+          stashes = [makeStash("s1", (options as StashOptions).message)];
+          changes = [];
+          return stashes[0];
+        },
+        get_commit_details: ({ sha }) => ({ ...makeCommit(sha as string, "x"), files: [file("a.txt")], message: "" }),
+        get_commit_file_diff: () => "@@ -1 +1 @@\n-old\n+stashed\n",
+        apply_stash: () => {
+          stashes = [];
+          changes = [file("a.txt")];
+          return { outcome: "applied", conflicts: 0 };
+        },
+      });
+      render(<App />);
+      await screen.findByRole("button", { name: /^main/ });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Stash" })).toBeEnabled());
+
+      await userEvent.keyboard("{Control>}{Shift>}s{/Shift}{/Control}");
+      await userEvent.type(within(screen.getByRole("dialog", { name: "Stash" })).getByRole("textbox"), "wip{Enter}");
+      expect(invokeMock).toHaveBeenCalledWith("stash", {
+        repo: "/work/demo",
+        options: expect.objectContaining({ message: "wip" }),
+      });
+      expect(await screen.findByRole("status")).toHaveTextContent("Stashed local changes as \u201cwip\u201d.");
+
+      // Nothing left to stash; the stash is in the sidebar and shows its changes.
+      await waitFor(() => expect(screen.getByRole("button", { name: "Stash" })).toBeDisabled());
+      await userEvent.click(await screen.findByText("wip", { selector: ".branch-group .branch-name" }));
+      expect(await screen.findByText("stashed")).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Pop" }));
+      expect(invokeMock).toHaveBeenCalledWith("apply_stash", { repo: "/work/demo", sha: "s1", pop: true });
+      expect(await screen.findByRole("status")).toHaveTextContent("Applied and deleted stash \u201cwip\u201d.");
+      // Back in the changes view, with the changes restored.
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Pop" })).not.toBeInTheDocument());
+      expect(screen.getByRole("button", { name: /Local changes/ })).toHaveClass("active");
+    });
+
     it("shows why git refused to switch", async () => {
       mockBackend(invokeMock, {
         open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
@@ -641,6 +767,75 @@ describe("App", () => {
       await userEvent.click(screen.getByRole("button", { name: "Rebase" }));
       await userEvent.keyboard("{Enter}");
       expect(await screen.findByText("Rebased 1 commit of main onto origin/main (3 new)")).toBeInTheDocument();
+    });
+
+    it("merges a branch and leads to the conflicts when it stops", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_branches: () => {
+          const list = branchList();
+          const feature = { name: "feature", sha: "d", current: false, upstream: null, track: null };
+          return { ...list, local: [...list.local, feature], previous: "feature" };
+        },
+        get_divergence: () => ({ ahead: 1, behind: 2 }),
+        merge: () => {
+          status = makeStatus({
+            upstream: "origin/main",
+            conflicted: [file("shared.txt", "U")],
+            operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'feature'" },
+          });
+          return { outcome: "conflicts", incoming: 2, conflicts: 1 };
+        },
+        abort_operation: () => {
+          status = makeStatus({ upstream: "origin/main" });
+        },
+      });
+      await ready();
+      const mergeButton = screen.getByRole("button", { name: "Merge" });
+      await waitFor(() => expect(mergeButton).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "All commits" }));
+
+      await userEvent.keyboard("{Control>}{Shift>}M{/Shift}{/Control}");
+      const dialog = screen.getByRole("dialog", { name: "Merge" });
+      // It starts on the branch checked out before.
+      expect(within(dialog).getByLabelText("Branch")).toHaveDisplayValue("feature");
+      await waitFor(() => expect(within(dialog).getByLabelText("Branch")).toHaveAccessibleDescription(/^Creates a merge commit on main/));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("merge", { repo: "/work/demo", source: "feature", mode: "ff", autostash: true });
+      expect(await screen.findByText(/Merging feature into main stopped with conflicts in 1 file/)).toBeInTheDocument();
+      expect(await screen.findByText("Merge in progress")).toBeInTheDocument();
+      // Back in Local changes, with the merge message ready to commit once resolved.
+      expect(screen.getByRole("textbox", { name: "Commit message" })).toHaveValue("Merge branch 'feature'");
+      expect(mergeButton).toBeDisabled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Abort merge" }));
+      expect(invokeMock).toHaveBeenCalledWith("abort_operation", { repo: "/work/demo" });
+      await waitFor(() => expect(screen.queryByText("Merge in progress")).toBeNull());
+      expect(mergeButton).toBeEnabled();
+    });
+
+    it("reports a merge and shows git's reason when it is refused", async () => {
+      let refuse = false;
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 0, behind: 3 }),
+        merge: () => {
+          if (refuse) throw "error: Your local changes to the following files would be overwritten by merge:\n\ta.txt";
+          return { outcome: "fast-forward", incoming: 3, conflicts: 0 };
+        },
+      });
+      await ready();
+      await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+      // main is a base branch without a previous branch: it starts on the other base branch or the upstream.
+      expect(within(screen.getByRole("dialog", { name: "Merge" })).getByLabelText("Branch")).toHaveDisplayValue("origin/main");
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText("Moved main forward to origin/main (3 commits)")).toBeInTheDocument();
+
+      refuse = true;
+      await userEvent.click(screen.getByRole("button", { name: "Merge" }));
+      await userEvent.keyboard("{Enter}");
+      expect(await screen.findByText(/would be overwritten by merge/)).toBeInTheDocument();
     });
 
     it("fetches in the background when the last fetch is older than the interval", async () => {

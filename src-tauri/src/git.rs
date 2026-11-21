@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::graph::{self, GraphRow};
 
@@ -535,6 +535,8 @@ pub struct Branches {
     pub remote: Vec<Branch>,
     pub tags: Vec<Branch>,
     pub remotes: Vec<Remote>,
+    /// The branch checked out before the current one (`@{-1}`), if it still exists.
+    pub previous: Option<String>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
@@ -581,6 +583,10 @@ pub fn branches(repo: &Path) -> GitResult<Branches> {
         }
     }
     result.remotes = remotes(repo)?;
+    result.previous = run(repo, &["rev-parse", "--abbrev-ref", "@{-1}"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|name| result.local.iter().any(|b| &b.name == name));
     Ok(result)
 }
 
@@ -663,9 +669,270 @@ pub fn checkout_remote(repo: &Path, remote_branch: &str) -> GitResult<()> {
     run(repo, &["switch", "--track", branch_arg(remote_branch)?]).map(drop)
 }
 
+/// Checks out a commit without a branch (detached HEAD). Like switching branches, uncommitted
+/// changes are carried over and git refuses when they would be overwritten.
+pub fn checkout_commit(repo: &Path, sha: &str) -> GitResult<()> {
+    let sha = plain_arg(sha, "commit")?;
+    run(repo, &["switch", "--detach", &format!("{sha}^{{commit}}")]).map(drop)
+}
+
 /// Creates a branch at HEAD and switches to it.
 pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
     run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeleteBranchOutcome {
+    Deleted,
+    /// Nothing was deleted because the branch has commits that aren't merged; deleting it needs
+    /// `force`. Merged means into its upstream (or HEAD when it has none), as `git branch -d`
+    /// checks, and into HEAD when the remote branch is deleted too, since the upstream goes away.
+    NotMerged,
+}
+
+/// The remote branch a local branch tracks: the remote, the branch's ref there and the
+/// remote-tracking ref, e.g. ("origin", "refs/heads/feature", "refs/remotes/origin/feature").
+fn upstream_of(repo: &Path, local_ref: &str) -> Option<(String, String, String)> {
+    let out = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:remotename)%1f%(upstream:remoteref)%1f%(upstream)",
+            local_ref,
+        ],
+    )
+    .ok()?;
+    let mut f = out.trim_end().splitn(3, FIELD_SEP).map(str::to_string);
+    let (remote, remote_ref, tracking) = (f.next()?, f.next()?, f.next()?);
+    // "." is a local upstream, not a remote; a missing tracking ref means the branch is gone.
+    let valid = !remote.is_empty() && remote != "." && remote_ref.starts_with("refs/heads/");
+    (valid && rev(repo, &tracking).is_some()).then_some((remote, remote_ref, tracking))
+}
+
+/// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
+///
+/// Without `force`, a branch with unmerged commits is kept and reported as `NotMerged`. git
+/// refuses to delete the branch that is checked out, here or in another worktree. The remote
+/// branch is deleted first, so nothing changes when that fails. It is only deleted if it still
+/// points where it was last fetched (`--force-with-lease`), so commits pushed by others since are
+/// never lost, even with `force`.
+pub fn delete_branch(
+    repo: &Path,
+    name: &str,
+    force: bool,
+    delete_remote: bool,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<DeleteBranchOutcome> {
+    let name = branch_arg(name)?;
+    let local_ref = format!("refs/heads/{name}");
+    if rev(repo, &local_ref).is_none() {
+        return Err(format!("There is no local branch '{name}'"));
+    }
+    if !delete_remote {
+        let flag = if force { "-D" } else { "-d" };
+        // Untranslated messages, so the refusal can be recognized.
+        return match exec_with_env(repo, &["branch", flag, name], &[("LC_ALL", "C")]) {
+            Ok(_) => Ok(DeleteBranchOutcome::Deleted),
+            Err(e) if !force && e.contains("not fully merged") => Ok(DeleteBranchOutcome::NotMerged),
+            Err(e) => Err(e),
+        };
+    }
+
+    let (remote, remote_ref, tracking) =
+        upstream_of(repo, &local_ref).ok_or_else(|| format!("'{name}' doesn't track a remote branch to delete"))?;
+    if status(repo)?.branch.as_deref() == Some(name) {
+        return Err(format!(
+            "Cannot delete '{name}' while it is checked out. Switch to another branch first."
+        ));
+    }
+    if !force && !(is_ancestor(repo, &local_ref, "HEAD") && is_ancestor(repo, &tracking, "HEAD")) {
+        return Ok(DeleteBranchOutcome::NotMerged);
+    }
+
+    let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
+    let lease = format!("--force-with-lease={remote_ref}");
+    let out = exec_streaming(
+        repo,
+        &[
+            "push",
+            "--progress",
+            "--porcelain",
+            &lease,
+            &remote,
+            "--delete",
+            &remote_ref,
+        ],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let refs = parse_push_porcelain(&out.stdout);
+    match refs.iter().find(|r| r.dst == remote_ref) {
+        Some(r) if r.flag == '-' => {}
+        // The lease also fails when the branch is gone from the remote already: then there is
+        // nothing left to delete but the stale remote-tracking ref.
+        Some(r) if r.summary.contains("stale info") => {
+            let listed = run(repo, &["ls-remote", "--heads", &remote, &remote_ref])?;
+            if !listed.trim().is_empty() {
+                return Err(format!(
+                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
+                     Fetch to see them."
+                ));
+            }
+            run(repo, &["update-ref", "-d", &tracking])?;
+        }
+        _ => return Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
+    }
+
+    // Unmerged commits were checked (or forced) above.
+    run(repo, &["branch", "-D", name])
+        .map_err(|e| format!("Deleted {remote_name}, but not the local branch '{name}': {e}"))?;
+    Ok(DeleteBranchOutcome::Deleted)
+}
+
+// ---------------------------------------------------------------------------
+// Stashes
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Stash {
+    /// Position in the stash list: 0 is the newest, `stash@{0}`.
+    pub index: usize,
+    /// The stash commit. Unlike the index it doesn't change when other stashes are added or deleted.
+    pub sha: String,
+    /// The message given when stashing, or git's "WIP on main: abc1234 subject" without one.
+    pub message: String,
+    /// The branch that was checked out when stashing; None for a detached HEAD.
+    pub branch: Option<String>,
+    pub time: i64,
+    /// Untracked files were stashed too; they are in the stash commit's third parent.
+    pub untracked: bool,
+}
+
+pub fn stashes(repo: &Path) -> GitResult<Vec<Stash>> {
+    let out = run(repo, &["stash", "list", "--format=%H%x1f%P%x1f%ct%x1f%gs"])?;
+    Ok(parse_stashes(&out))
+}
+
+fn parse_stashes(out: &str) -> Vec<Stash> {
+    let mut list = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.splitn(4, FIELD_SEP).collect();
+        let [sha, parents, time, subject] = f.as_slice() else {
+            continue;
+        };
+        // "On main: message" with a message, "WIP on main: abc1234 subject" without one;
+        // "(no branch)" for a detached HEAD.
+        let (custom, rest) = match subject.strip_prefix("On ") {
+            Some(rest) => (true, rest),
+            None => (false, subject.strip_prefix("WIP on ").unwrap_or(subject)),
+        };
+        let (branch, text) = rest.split_once(": ").unwrap_or(("", rest));
+        list.push(Stash {
+            index: list.len(),
+            sha: sha.to_string(),
+            message: if custom { text } else { subject }.to_string(),
+            branch: (!branch.is_empty() && branch != "(no branch)").then(|| branch.to_string()),
+            time: time.parse().unwrap_or(0),
+            untracked: parents.split(' ').filter(|p| !p.is_empty()).count() >= 3,
+        });
+    }
+    list
+}
+
+/// The stash with commit `sha`, so actions keep their target when the list changed meanwhile.
+fn find_stash(repo: &Path, sha: &str) -> GitResult<Stash> {
+    stashes(repo)?
+        .into_iter()
+        .find(|s| s.sha == sha)
+        .ok_or_else(|| "This stash doesn't exist anymore. It may have been applied or deleted elsewhere.".into())
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StashOptions {
+    /// Empty for git's default "WIP on <branch>: <commit>".
+    pub message: String,
+    pub include_untracked: bool,
+    /// Leave the staged changes in place (and in the stash).
+    pub keep_index: bool,
+}
+
+/// Stashes the local changes and reverts them, like `git stash push`; returns the new stash.
+pub fn stash_push(repo: &Path, opts: &StashOptions) -> GitResult<Stash> {
+    let before = rev(repo, "refs/stash");
+    let mut args = vec!["stash", "push"];
+    let message = opts.message.trim();
+    if !message.is_empty() {
+        args.extend(["-m", message]);
+    }
+    if opts.include_untracked {
+        args.push("--include-untracked");
+    }
+    if opts.keep_index {
+        args.push("--keep-index");
+    }
+    run(repo, &args)?;
+    // git succeeds without doing anything when there is nothing to stash.
+    if rev(repo, "refs/stash") == before {
+        return Err(if opts.include_untracked {
+            "There are no local changes to stash.".into()
+        } else {
+            "There are no changes to tracked files to stash. Include untracked files to stash new files.".into()
+        });
+    }
+    stashes(repo)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "The stash wasn't saved".into())
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum StashApplyOutcome {
+    Applied,
+    /// Applied, but some files have conflicts to resolve; the stash is kept, even when popping.
+    Conflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StashApplyResult {
+    pub outcome: StashApplyOutcome,
+    /// Files with conflicts.
+    pub conflicts: u32,
+}
+
+/// Applies the stash with commit `sha` to the working tree and, with `pop`, deletes it once it
+/// applied cleanly. git refuses (and reports the files) when local changes would be overwritten.
+pub fn stash_apply(repo: &Path, sha: &str, pop: bool) -> GitResult<StashApplyResult> {
+    let stash = find_stash(repo, plain_arg(sha, "stash")?)?;
+    // Untranslated messages, as other git errors are passed on as they are.
+    if let Err(e) = exec_with_env(repo, &["stash", "apply", &stash.sha], &[("LC_ALL", "C")]) {
+        let conflicts = status(repo)?.conflicted.len() as u32;
+        if conflicts == 0 {
+            return Err(e);
+        }
+        return Ok(StashApplyResult {
+            outcome: StashApplyOutcome::Conflicts,
+            conflicts,
+        });
+    }
+    if pop {
+        stash_drop(repo, &stash.sha)?;
+    }
+    Ok(StashApplyResult {
+        outcome: StashApplyOutcome::Applied,
+        conflicts: 0,
+    })
+}
+
+/// Deletes the stash with commit `sha`. Its commit stays in the repository until git cleans up,
+/// so `git stash apply <sha>` still brings it back for a while.
+pub fn stash_drop(repo: &Path, sha: &str) -> GitResult<()> {
+    let stash = find_stash(repo, plain_arg(sha, "stash")?)?;
+    run(repo, &["stash", "drop", "-q", &format!("stash@{{{}}}", stash.index)]).map(drop)
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1605,146 @@ pub fn rebase(repo: &Path, opts: &RebaseOptions, on_progress: &mut dyn FnMut(&st
 }
 
 // ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+/// How `merge` combines the other branch with the current one.
+#[derive(Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeMode {
+    /// Fast-forward when possible, else create a merge commit.
+    Ff,
+    /// Always create a merge commit.
+    NoFf,
+    /// Only fast-forward; refuse when the branches have diverged.
+    FfOnly,
+    /// Stage the other branch's changes for one ordinary commit, without committing.
+    Squash,
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeOutcome {
+    /// The current branch already contains everything on the other one.
+    UpToDate,
+    FastForward,
+    /// A merge commit was created.
+    Merge,
+    /// The changes were staged for a squash commit; `Status::operation` describes it.
+    Squash,
+    /// The merge stopped on conflicts; `Status::operation` describes it.
+    Conflicts,
+    /// The merge succeeded, but reapplying the stashed local changes conflicted.
+    /// The changes are kept in the stash.
+    StashConflicts,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub outcome: MergeOutcome,
+    /// Commits of the other branch the current one didn't contain yet.
+    pub incoming: u32,
+    /// Files with conflicts, for the `Conflicts` and `StashConflicts` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct MergeOptions {
+    /// Branch, tag or commit to merge into the current branch, e.g. "feature" or "origin/main".
+    pub source: String,
+    pub mode: MergeMode,
+    /// Stash uncommitted changes before and reapply them after the merge. Ignored for squash
+    /// merges: git would only reapply them once the squash is committed, and never tells.
+    pub autostash: bool,
+}
+
+/// Merges `opts.source` into the current branch.
+pub fn merge(repo: &Path, opts: &MergeOptions, on_progress: &mut dyn FnMut(&str)) -> GitResult<MergeResult> {
+    let source = plain_arg(&opts.source, "branch or commit")?;
+    // A rebase in progress detaches HEAD, so check for it first.
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before merging.",
+            op.kind.label()
+        ));
+    }
+    if run(repo, &["symbolic-ref", "-q", "HEAD"]).is_err() {
+        return Err("Merging needs a current branch, but HEAD is detached. Switch to a branch first.".into());
+    }
+    let old = rev(repo, "HEAD").ok_or("The current branch has no commits to merge into yet.")?;
+    let theirs = rev(repo, &format!("{source}^{{commit}}"))
+        .ok_or_else(|| format!("'{source}' is not a branch, tag or commit."))?;
+    let incoming = count(repo, &format!("{old}..{theirs}"));
+
+    let squash = opts.mode == MergeMode::Squash;
+    // Explicit flags, so merge.ff or merge.autoStash in the user's config can't change what the
+    // dialog promised.
+    let args = [
+        "merge",
+        "--progress",
+        "--no-edit",
+        match opts.mode {
+            MergeMode::Ff => "--ff",
+            MergeMode::NoFf => "--no-ff",
+            MergeMode::FfOnly => "--ff-only",
+            MergeMode::Squash => "--squash",
+        },
+        if opts.autostash && !squash {
+            "--autostash"
+        } else {
+            "--no-autostash"
+        },
+        source,
+    ];
+    let out = exec_streaming(repo, &args, &[("GIT_EDITOR", "true")], on_progress)?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    let result = |outcome| MergeResult {
+        outcome,
+        incoming,
+        conflicts,
+    };
+    if conflicts > 0 {
+        return Ok(result(if st.operation.is_some() {
+            MergeOutcome::Conflicts
+        } else {
+            MergeOutcome::StashConflicts
+        }));
+    }
+    if out.code != 0 {
+        // "Not possible to fast-forward" and the files that block the merge are on stderr.
+        let text = if out.stderr.trim().is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        return Err(error_text(text, "Merge failed"));
+    }
+    if squash {
+        let staged = st.operation.is_some_and(|op| op.kind == OperationKind::Squash);
+        return Ok(result(if staged {
+            MergeOutcome::Squash
+        } else {
+            MergeOutcome::UpToDate
+        }));
+    }
+    let new = rev(repo, "HEAD").unwrap_or_default();
+    if new == old {
+        return Ok(result(MergeOutcome::UpToDate));
+    }
+    // A fast-forward can land on someone else's merge commit; ours has the old HEAD as first parent.
+    let parents = run(repo, &["rev-list", "--parents", "-n1", &new]).unwrap_or_default();
+    let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+    let merged = parents.len() > 1 && parents[0] == old;
+    Ok(result(if merged {
+        MergeOutcome::Merge
+    } else {
+        MergeOutcome::FastForward
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Merge, rebase, cherry-pick and revert in progress
 // ---------------------------------------------------------------------------
 
@@ -1348,6 +1755,8 @@ pub enum OperationKind {
     Rebase,
     CherryPick,
     Revert,
+    /// A squash merge whose changes are staged (or conflict) and wait to be committed.
+    Squash,
 }
 
 impl OperationKind {
@@ -1357,6 +1766,7 @@ impl OperationKind {
             OperationKind::Rebase => "rebase",
             OperationKind::CherryPick => "cherry-pick",
             OperationKind::Revert => "revert",
+            OperationKind::Squash => "squash merge",
         }
     }
 }
@@ -1370,7 +1780,7 @@ pub struct Operation {
     /// Rebase progress: the commit being applied (1-based) and the number of commits.
     pub step: Option<u32>,
     pub total: Option<u32>,
-    /// The prepared commit message (`MERGE_MSG` without comments), for merges.
+    /// The prepared commit message (`MERGE_MSG` or `SQUASH_MSG` without comments), for merges.
     pub message: Option<String>,
 }
 
@@ -1405,17 +1815,14 @@ fn operation(git_dir: &Path) -> Option<Operation> {
             });
         }
     }
+    let message = |file: &str| {
+        let m = std::fs::read_to_string(git_dir.join(file)).ok()?;
+        let m = m.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n");
+        Some(m.trim().to_string()).filter(|m| !m.is_empty())
+    };
     if git_dir.join("MERGE_HEAD").exists() {
-        let message = std::fs::read_to_string(git_dir.join("MERGE_MSG")).ok().map(|m| {
-            m.lines()
-                .filter(|l| !l.starts_with('#'))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        });
         return Some(Operation {
-            message: message.filter(|m| !m.is_empty()),
+            message: message("MERGE_MSG"),
             ..blank(OperationKind::Merge)
         });
     }
@@ -1424,6 +1831,13 @@ fn operation(git_dir: &Path) -> Option<Operation> {
     }
     if git_dir.join("REVERT_HEAD").exists() {
         return Some(blank(OperationKind::Revert));
+    }
+    // `merge --squash` leaves only SQUASH_MSG behind; committing or resetting removes it.
+    if git_dir.join("SQUASH_MSG").exists() {
+        return Some(Operation {
+            message: message("SQUASH_MSG"),
+            ..blank(OperationKind::Squash)
+        });
     }
     None
 }
@@ -1435,15 +1849,20 @@ fn current_operation(repo: &Path) -> GitResult<Operation> {
 /// Gives up the operation in progress and returns to the state before it started.
 pub fn abort_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
-    run(repo, &[op.kind.label(), "--abort"]).map(drop)
+    let args: &[&str] = match op.kind {
+        // Like `merge --abort`: drops the staged squash, keeps unrelated unstaged changes.
+        OperationKind::Squash => &["reset", "--merge"],
+        kind => &[kind.label(), "--abort"],
+    };
+    run(repo, args).map(drop)
 }
 
-/// Continues after the conflicts were resolved and staged. A merge is finished by committing
-/// with its prepared message.
+/// Continues after the conflicts were resolved and staged. A merge or squash merge is finished
+/// by committing with its prepared message.
 pub fn continue_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
     let args: &[&str] = match op.kind {
-        OperationKind::Merge => &["commit", "--no-edit"],
+        OperationKind::Merge | OperationKind::Squash => &["commit", "--no-edit"],
         kind => &[kind.label(), "--continue"],
     };
     // Accept the prepared messages instead of waiting for an editor that never opens.
@@ -1453,8 +1872,8 @@ pub fn continue_operation(repo: &Path) -> GitResult<()> {
 /// Skips the commit that stopped a rebase, cherry-pick or revert.
 pub fn skip_operation(repo: &Path) -> GitResult<()> {
     let op = current_operation(repo)?;
-    if op.kind == OperationKind::Merge {
-        return Err("A merge can't be skipped; abort it instead.".into());
+    if matches!(op.kind, OperationKind::Merge | OperationKind::Squash) {
+        return Err(format!("A {} can't be skipped; abort it instead.", op.kind.label()));
     }
     exec_with_env(repo, &[op.kind.label(), "--skip"], &[("GIT_EDITOR", "true")]).map(drop)
 }
@@ -1691,6 +2110,27 @@ mod tests {
     }
 
     #[test]
+    fn checks_out_commits_detached() {
+        let repo = TestRepo::new("checkout-commit");
+        let first = repo.commit_all_initial();
+        repo.write("b.txt", "b\n");
+        repo.commit_all("second");
+
+        checkout_commit(&repo.dir, &first).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch, None);
+        assert_eq!(repo.head(), first);
+        assert!(!repo.dir.join("b.txt").exists());
+
+        // Back on the branch, everything is there again.
+        checkout(&repo.dir, "main").unwrap();
+        assert!(repo.dir.join("b.txt").exists());
+
+        assert!(checkout_commit(&repo.dir, "0000000000000000000000000000000000000000").is_err());
+        assert!(checkout_commit(&repo.dir, "--orphan").is_err());
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("main"));
+    }
+
+    #[test]
     fn tracks_upstream_ahead_and_behind() {
         let origin = TestRepo::new("origin");
         origin.commit_all_initial();
@@ -1862,6 +2302,204 @@ mod tests {
             assert!(create_branch(&clone.dir, name).is_err());
             assert!(checkout_remote(&clone.dir, name).is_err());
         }
+    }
+
+    #[test]
+    fn deletes_local_branches() {
+        let repo = TestRepo::new("delete-branch");
+        repo.commit_all_initial();
+        repo.git(&["branch", "merged"]);
+        repo.git(&["switch", "-q", "-c", "unmerged"]);
+        repo.write("a.txt", "one\n");
+        repo.commit_all("only on unmerged");
+        repo.git(&["switch", "-q", "main"]);
+        let delete = |name: &str, force: bool| delete_branch(&repo.dir, name, force, false, &mut |_| {});
+        let names = || -> Vec<String> { branches(&repo.dir).unwrap().local.into_iter().map(|b| b.name).collect() };
+
+        assert_eq!(delete("merged", false).unwrap(), DeleteBranchOutcome::Deleted);
+        assert_eq!(names(), ["main", "unmerged"]);
+
+        // Unmerged commits are only dropped when forced.
+        assert_eq!(delete("unmerged", false).unwrap(), DeleteBranchOutcome::NotMerged);
+        assert_eq!(names(), ["main", "unmerged"]);
+        assert_eq!(delete("unmerged", true).unwrap(), DeleteBranchOutcome::Deleted);
+        assert_eq!(names(), ["main"]);
+
+        // The current branch, missing branches and option-like names are refused.
+        assert!(delete("main", true).is_err());
+        assert!(delete("does-not-exist", false).is_err());
+        assert!(delete("-D", false).unwrap_err().contains("not a valid branch name"));
+        assert_eq!(names(), ["main"]);
+    }
+
+    #[test]
+    fn deletes_remote_branches_along() {
+        let origin = TestRepo::new("delete-remote-origin");
+        origin.commit_all_initial();
+        for name in ["merged", "unmerged", "moved", "gone", "local-only"] {
+            origin.git(&["branch", name]);
+        }
+        origin.git(&["switch", "-q", "unmerged"]);
+        origin.write("u.txt", "u\n");
+        origin.commit_all("only on unmerged");
+        origin.git(&["switch", "-q", "main"]);
+
+        let clone = TestRepo::clone_of(&origin, "delete-remote-clone");
+        for name in ["merged", "unmerged", "moved", "gone"] {
+            checkout_remote(&clone.dir, &format!("origin/{name}")).unwrap();
+        }
+        clone.git(&["branch", "--no-track", "local-only", "main"]);
+        checkout(&clone.dir, "main").unwrap();
+        let delete = |name: &str, force: bool| delete_branch(&clone.dir, name, force, true, &mut |_| {});
+        let local = |name: &str| rev(&clone.dir, &format!("refs/heads/{name}")).is_some();
+        let tracking = |name: &str| rev(&clone.dir, &format!("refs/remotes/origin/{name}")).is_some();
+        let on_origin = |name: &str| rev(&origin.dir, &format!("refs/heads/{name}")).is_some();
+
+        assert_eq!(delete("merged", false).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("merged") && !tracking("merged") && !on_origin("merged"));
+
+        // Merged into its upstream isn't enough when the upstream goes too: nothing is deleted.
+        assert_eq!(delete("unmerged", false).unwrap(), DeleteBranchOutcome::NotMerged);
+        assert!(local("unmerged") && tracking("unmerged") && on_origin("unmerged"));
+        assert_eq!(delete("unmerged", true).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("unmerged") && !tracking("unmerged") && !on_origin("unmerged"));
+
+        // Someone pushed to it since the last fetch: even forced, nothing is deleted.
+        origin.git(&["switch", "-q", "moved"]);
+        origin.write("m.txt", "m\n");
+        origin.commit_all("pushed by someone else");
+        origin.git(&["switch", "-q", "main"]);
+        let err = delete("moved", true).unwrap_err();
+        assert!(err.contains("Fetch"), "{err}");
+        assert!(local("moved") && on_origin("moved"));
+
+        // Already deleted on the remote: the stale remote-tracking branch goes with the local one.
+        origin.git(&["branch", "-D", "gone"]);
+        assert_eq!(delete("gone", false).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("gone") && !tracking("gone"));
+
+        // Without an upstream there is no remote branch to delete.
+        assert!(delete("local-only", false).unwrap_err().contains("remote branch"));
+        assert!(local("local-only") && on_origin("local-only"));
+        // The current branch is refused before anything is deleted.
+        assert!(delete("main", true).is_err());
+        assert!(on_origin("main"));
+    }
+
+    #[test]
+    fn parses_stash_list() {
+        let out = [
+            "aaa\x1fp1 p2 p3\x1f100\x1fOn main: my message: with colon",
+            "bbb\x1fp1 p2\x1f90\x1fWIP on feature/x: abc1234 Subject",
+            "ccc\x1fp1 p2\x1f80\x1fOn (no branch): detached",
+        ]
+        .join("\n");
+        let s = parse_stashes(&out);
+        assert_eq!(s.len(), 3);
+        assert_eq!((s[0].index, s[0].sha.as_str(), s[0].time), (0, "aaa", 100));
+        assert_eq!(s[0].message, "my message: with colon");
+        assert_eq!(s[0].branch.as_deref(), Some("main"));
+        assert!(s[0].untracked);
+        assert_eq!(s[1].message, "WIP on feature/x: abc1234 Subject");
+        assert_eq!(s[1].branch.as_deref(), Some("feature/x"));
+        assert!(!s[1].untracked);
+        assert_eq!((s[2].index, s[2].branch.as_deref()), (2, None));
+    }
+
+    #[test]
+    fn stashes_applies_and_deletes() {
+        let repo = TestRepo::new("stash");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        let opts = |message: &str, include_untracked: bool| StashOptions {
+            message: message.into(),
+            include_untracked,
+            keep_index: false,
+        };
+        assert!(
+            stash_push(&repo.dir, &opts("", true))
+                .unwrap_err()
+                .contains("no local changes")
+        );
+
+        // Without untracked files, a new file stays behind.
+        repo.write("a.txt", "two\n");
+        repo.write("new.txt", "new\n");
+        stash_push(&repo.dir, &opts("tracked only", false)).unwrap();
+        assert_eq!(repo.read("a.txt"), "one\n");
+        assert!(repo.dir.join("new.txt").exists());
+        assert!(
+            stash_push(&repo.dir, &opts("", false))
+                .unwrap_err()
+                .contains("untracked")
+        );
+
+        let newest = stash_push(&repo.dir, &opts("with new file", true)).unwrap();
+        assert_eq!((newest.index, newest.message.as_str()), (0, "with new file"));
+        assert!(!repo.dir.join("new.txt").exists());
+        let list = stashes(&repo.dir).unwrap();
+        assert_eq!(
+            list.iter().map(|s| s.message.as_str()).collect::<Vec<_>>(),
+            ["with new file", "tracked only"]
+        );
+        assert!(list[0].untracked && !list[1].untracked);
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        // The untracked file is in the third parent, where the history view shows it from.
+        let untracked = commit_details(&repo.dir, &format!("{}^3", list[0].sha)).unwrap();
+        assert_eq!(untracked.files[0].path, "new.txt");
+
+        // Pop the older one by its commit: the newer one keeps its place.
+        let result = stash_apply(&repo.dir, &list[1].sha, true).unwrap();
+        assert_eq!(result.outcome, StashApplyOutcome::Applied);
+        assert_eq!(repo.read("a.txt"), "two\n");
+        let left = stashes(&repo.dir).unwrap();
+        assert_eq!((left.len(), left[0].sha.as_str()), (1, list[0].sha.as_str()));
+        assert!(
+            stash_apply(&repo.dir, &list[1].sha, false)
+                .unwrap_err()
+                .contains("doesn't exist")
+        );
+
+        // Applying keeps the stash.
+        repo.git(&["checkout", "--", "a.txt"]);
+        stash_apply(&repo.dir, &list[0].sha, false).unwrap();
+        assert_eq!(repo.read("new.txt"), "new\n");
+        assert_eq!(stashes(&repo.dir).unwrap().len(), 1);
+
+        stash_drop(&repo.dir, &list[0].sha).unwrap();
+        assert!(stashes(&repo.dir).unwrap().is_empty());
+        assert!(stash_drop(&repo.dir, &list[0].sha).is_err());
+        assert!(stash_drop(&repo.dir, "--all").is_err());
+    }
+
+    #[test]
+    fn keeps_the_stash_when_applying_conflicts() {
+        let repo = TestRepo::new("stash-conflict");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("first");
+        repo.write("a.txt", "stashed\n");
+        stash_push(
+            &repo.dir,
+            &StashOptions {
+                message: "change".into(),
+                include_untracked: false,
+                keep_index: false,
+            },
+        )
+        .unwrap();
+        let sha = stashes(&repo.dir).unwrap()[0].sha.clone();
+
+        // Uncommitted changes to the same file: git refuses and nothing changes.
+        repo.write("a.txt", "local\n");
+        assert!(stash_apply(&repo.dir, &sha, true).unwrap_err().contains("a.txt"));
+        assert_eq!(repo.read("a.txt"), "local\n");
+
+        // Committed changes to the same file: applied with conflicts, the stash stays.
+        repo.commit_all("committed");
+        let result = stash_apply(&repo.dir, &sha, true).unwrap();
+        assert_eq!((result.outcome, result.conflicts), (StashApplyOutcome::Conflicts, 1));
+        assert_eq!(status(&repo.dir).unwrap().conflicted[0].path, "a.txt");
+        assert_eq!(stashes(&repo.dir).unwrap().len(), 1);
     }
 
     #[test]
@@ -2635,6 +3273,275 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         repo.git(&["switch", "-q", "--detach", "HEAD"]);
         let err = rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap_err();
         assert!(err.contains("detached"), "{err}");
+    }
+
+    fn merge_opts(source: &str, mode: MergeMode, autostash: bool) -> MergeOptions {
+        MergeOptions {
+            source: source.into(),
+            mode,
+            autostash,
+        }
+    }
+
+    fn parent_count(repo: &TestRepo) -> usize {
+        repo.git(&["rev-list", "--parents", "-n1", "HEAD"])
+            .split_whitespace()
+            .count()
+            - 1
+    }
+
+    #[test]
+    fn merges_a_branch_with_a_merge_commit_or_fast_forward() {
+        let repo = feature_branch("merge-modes", false);
+        repo.git(&["switch", "-q", "main"]);
+        let main = repo.head();
+
+        // Diverged: --ff and --no-ff both create a merge commit, --ff-only refuses.
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::FfOnly, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("fast-forward"), "{err}");
+        assert_eq!(repo.head(), main);
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming, r.conflicts), (MergeOutcome::Merge, 2, 0));
+        assert_eq!(parent_count(&repo), 2);
+        assert_eq!(repo.git(&["rev-parse", "HEAD^1"]).trim(), main);
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "Merge branch 'feature'");
+        assert!(repo.dir.join("a.txt").exists());
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::UpToDate, 0));
+
+        // feature is behind main now: it fast-forwards, unless a merge commit is asked for.
+        repo.git(&["switch", "-q", "feature"]);
+        let r = merge(
+            &repo.dir,
+            &merge_opts("main", MergeMode::FfOnly, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::FastForward, 2));
+        assert_eq!(repo.head(), repo.git(&["rev-parse", "main"]).trim());
+
+        repo.git(&["switch", "-q", "-c", "behind", "main~1"]);
+        let r = merge(&repo.dir, &merge_opts("main", MergeMode::NoFf, false), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::Merge, 3));
+        assert_eq!(parent_count(&repo), 2);
+    }
+
+    #[test]
+    fn merges_remote_branches_and_ignores_the_users_merge_config() {
+        let repo = feature_branch("merge-config", false);
+        repo.git(&["config", "merge.ff", "only"]);
+        repo.git(&["update-ref", "refs/remotes/origin/feature", "feature"]);
+        repo.git(&["switch", "-q", "main"]);
+        let r = merge(
+            &repo.dir,
+            &merge_opts("origin/feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!(r.outcome, MergeOutcome::Merge);
+        assert_eq!(
+            repo.git(&["log", "-1", "--format=%s"]).trim(),
+            "Merge remote-tracking branch 'origin/feature'"
+        );
+    }
+
+    #[test]
+    fn squash_merges_stage_the_changes_for_one_commit() {
+        let repo = feature_branch("merge-squash", false);
+        repo.git(&["switch", "-q", "main"]);
+        let main = repo.head();
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, true),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming), (MergeOutcome::Squash, 2));
+        assert_eq!(repo.head(), main);
+        let st = status(&repo.dir).unwrap();
+        let staged: Vec<&str> = st.staged.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(staged, ["a.txt", "b.txt"]);
+        let op = st.operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Squash);
+        assert!(op.message.unwrap().starts_with("Squashed commit of the following:"));
+
+        // Nothing else starts until the squash is committed or aborted.
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("squash merge is in progress"), "{err}");
+        assert!(skip_operation(&repo.dir).unwrap_err().contains("can't be skipped"));
+
+        abort_operation(&repo.dir).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.operation.is_none() && st.staged.is_empty() && st.unstaged.is_empty());
+        assert!(!repo.dir.join("a.txt").exists());
+
+        // Committing with your own message ends it, like with the prepared one.
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        commit(&repo.dir, "Add a and b", false).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(parent_count(&repo), 1);
+        assert_eq!(repo.git(&["rev-parse", "HEAD~1"]).trim(), main);
+
+        repo.git(&["reset", "-q", "--hard", &main]);
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(
+            repo.git(&["log", "-1", "--format=%s"]).trim(),
+            "Squashed commit of the following:"
+        );
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("main~1", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!(r.outcome, MergeOutcome::UpToDate);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn stops_a_conflicting_merge_of_a_branch() {
+        let repo = feature_branch("merge-conflict", true);
+        repo.git(&["switch", "-q", "main"]);
+        let before = repo.head();
+
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.incoming, r.conflicts), (MergeOutcome::Conflicts, 2, 1));
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.kind, OperationKind::Merge);
+        assert!(op.message.unwrap().starts_with("Merge branch 'feature'"));
+
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.head(), before);
+        assert_eq!(repo.read("shared.txt"), "main\n");
+
+        // A conflicting squash merge waits the same way and is aborted with `reset --merge`.
+        let r = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Squash, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        assert_eq!((r.outcome, r.conflicts), (MergeOutcome::Conflicts, 1));
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Squash
+        );
+        assert!(
+            continue_operation(&repo.dir).is_err(),
+            "unresolved conflicts must block"
+        );
+        abort_operation(&repo.dir).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.operation.is_none() && st.conflicted.is_empty() && st.staged.is_empty());
+        assert_eq!(repo.read("shared.txt"), "main\n");
+
+        merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::NoFf, false),
+            &mut no_progress,
+        )
+        .unwrap();
+        repo.write("shared.txt", "both\n");
+        stage(&repo.dir, &["shared.txt".into()]).unwrap();
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(parent_count(&repo), 2);
+    }
+
+    #[test]
+    fn stashes_local_changes_around_a_merge_on_request() {
+        let repo = feature_branch("merge-stash", false);
+        repo.git(&["switch", "-q", "main"]);
+        // Touches a file the merge brings in, so git refuses without stashing.
+        repo.write("a.txt", "local\n");
+        repo.git(&["add", "a.txt"]);
+        let before = repo.head();
+        let err = merge(
+            &repo.dir,
+            &merge_opts("feature", MergeMode::Ff, false),
+            &mut no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("a.txt"), "{err}");
+        assert_eq!(repo.head(), before);
+
+        let r = merge(&repo.dir, &merge_opts("feature", MergeMode::Ff, true), &mut no_progress).unwrap();
+        assert_eq!((r.outcome, r.conflicts), (MergeOutcome::StashConflicts, 1));
+        assert_eq!(parent_count(&repo), 2);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(repo.git(&["stash", "list"]).lines().count(), 1);
+    }
+
+    #[test]
+    fn refuses_to_merge_without_a_branch_or_with_bad_arguments() {
+        let repo = feature_branch("merge-refuse", false);
+        for (source, expected) in [
+            ("--squash", "not a valid"),
+            ("", "not a valid"),
+            ("nope", "'nope' is not a branch"),
+        ] {
+            let err = merge(&repo.dir, &merge_opts(source, MergeMode::Ff, false), &mut no_progress).unwrap_err();
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+        repo.git(&["switch", "-q", "--detach", "HEAD"]);
+        let err = merge(&repo.dir, &merge_opts("main", MergeMode::Ff, false), &mut no_progress).unwrap_err();
+        assert!(err.contains("detached"), "{err}");
+    }
+
+    #[test]
+    fn remembers_the_previous_branch() {
+        let repo = feature_branch("previous-branch", false);
+        assert_eq!(branches(&repo.dir).unwrap().previous.as_deref(), Some("main"));
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous.as_deref(), Some("feature"));
+        repo.git(&["switch", "-q", "--detach", "HEAD"]);
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous, None);
+        repo.git(&["switch", "-q", "feature"]);
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["branch", "-q", "-D", "feature"]);
+        assert_eq!(branches(&repo.dir).unwrap().previous, None);
     }
 
     #[test]
