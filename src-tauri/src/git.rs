@@ -685,21 +685,109 @@ pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
 #[serde(rename_all = "kebab-case")]
 pub enum DeleteBranchOutcome {
     Deleted,
-    /// The branch was kept because it has commits that aren't merged into its upstream (or
-    /// into HEAD when it has none); deleting it needs `force`.
+    /// Nothing was deleted because the branch has commits that aren't merged; deleting it needs
+    /// `force`. Merged means into its upstream (or HEAD when it has none), as `git branch -d`
+    /// checks, and into HEAD when the remote branch is deleted too, since the upstream goes away.
     NotMerged,
 }
 
-/// Deletes a local branch. Without `force`, a branch with unmerged commits is kept and reported
-/// as `NotMerged`. git refuses to delete the branch that is checked out, here or in another worktree.
-pub fn delete_branch(repo: &Path, name: &str, force: bool) -> GitResult<DeleteBranchOutcome> {
-    let flag = if force { "-D" } else { "-d" };
-    // Untranslated messages, so the refusal can be recognized.
-    match exec_with_env(repo, &["branch", flag, branch_arg(name)?], &[("LC_ALL", "C")]) {
-        Ok(_) => Ok(DeleteBranchOutcome::Deleted),
-        Err(e) if !force && e.contains("not fully merged") => Ok(DeleteBranchOutcome::NotMerged),
-        Err(e) => Err(e),
+/// The remote branch a local branch tracks: the remote, the branch's ref there and the
+/// remote-tracking ref, e.g. ("origin", "refs/heads/feature", "refs/remotes/origin/feature").
+fn upstream_of(repo: &Path, local_ref: &str) -> Option<(String, String, String)> {
+    let out = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:remotename)%1f%(upstream:remoteref)%1f%(upstream)",
+            local_ref,
+        ],
+    )
+    .ok()?;
+    let mut f = out.trim_end().splitn(3, FIELD_SEP).map(str::to_string);
+    let (remote, remote_ref, tracking) = (f.next()?, f.next()?, f.next()?);
+    // "." is a local upstream, not a remote; a missing tracking ref means the branch is gone.
+    let valid = !remote.is_empty() && remote != "." && remote_ref.starts_with("refs/heads/");
+    (valid && rev(repo, &tracking).is_some()).then_some((remote, remote_ref, tracking))
+}
+
+/// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
+///
+/// Without `force`, a branch with unmerged commits is kept and reported as `NotMerged`. git
+/// refuses to delete the branch that is checked out, here or in another worktree. The remote
+/// branch is deleted first, so nothing changes when that fails. It is only deleted if it still
+/// points where it was last fetched (`--force-with-lease`), so commits pushed by others since are
+/// never lost, even with `force`.
+pub fn delete_branch(
+    repo: &Path,
+    name: &str,
+    force: bool,
+    delete_remote: bool,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<DeleteBranchOutcome> {
+    let name = branch_arg(name)?;
+    let local_ref = format!("refs/heads/{name}");
+    if rev(repo, &local_ref).is_none() {
+        return Err(format!("There is no local branch '{name}'"));
     }
+    if !delete_remote {
+        let flag = if force { "-D" } else { "-d" };
+        // Untranslated messages, so the refusal can be recognized.
+        return match exec_with_env(repo, &["branch", flag, name], &[("LC_ALL", "C")]) {
+            Ok(_) => Ok(DeleteBranchOutcome::Deleted),
+            Err(e) if !force && e.contains("not fully merged") => Ok(DeleteBranchOutcome::NotMerged),
+            Err(e) => Err(e),
+        };
+    }
+
+    let (remote, remote_ref, tracking) =
+        upstream_of(repo, &local_ref).ok_or_else(|| format!("'{name}' doesn't track a remote branch to delete"))?;
+    if status(repo)?.branch.as_deref() == Some(name) {
+        return Err(format!(
+            "Cannot delete '{name}' while it is checked out. Switch to another branch first."
+        ));
+    }
+    if !force && !(is_ancestor(repo, &local_ref, "HEAD") && is_ancestor(repo, &tracking, "HEAD")) {
+        return Ok(DeleteBranchOutcome::NotMerged);
+    }
+
+    let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
+    let lease = format!("--force-with-lease={remote_ref}");
+    let out = exec_streaming(
+        repo,
+        &[
+            "push",
+            "--progress",
+            "--porcelain",
+            &lease,
+            &remote,
+            "--delete",
+            &remote_ref,
+        ],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let refs = parse_push_porcelain(&out.stdout);
+    match refs.iter().find(|r| r.dst == remote_ref) {
+        Some(r) if r.flag == '-' => {}
+        // The lease also fails when the branch is gone from the remote already: then there is
+        // nothing left to delete but the stale remote-tracking ref.
+        Some(r) if r.summary.contains("stale info") => {
+            let listed = run(repo, &["ls-remote", "--heads", &remote, &remote_ref])?;
+            if !listed.trim().is_empty() {
+                return Err(format!(
+                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
+                     Fetch to see them."
+                ));
+            }
+            run(repo, &["update-ref", "-d", &tracking])?;
+        }
+        _ => return Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
+    }
+
+    // Unmerged commits were checked (or forced) above.
+    run(repo, &["branch", "-D", name])
+        .map_err(|e| format!("Deleted {remote_name}, but not the local branch '{name}': {e}"))?;
+    Ok(DeleteBranchOutcome::Deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -2080,35 +2168,77 @@ mod tests {
         repo.write("a.txt", "one\n");
         repo.commit_all("only on unmerged");
         repo.git(&["switch", "-q", "main"]);
+        let delete = |name: &str, force: bool| delete_branch(&repo.dir, name, force, false, &mut |_| {});
         let names = || -> Vec<String> { branches(&repo.dir).unwrap().local.into_iter().map(|b| b.name).collect() };
 
-        assert_eq!(
-            delete_branch(&repo.dir, "merged", false).unwrap(),
-            DeleteBranchOutcome::Deleted
-        );
+        assert_eq!(delete("merged", false).unwrap(), DeleteBranchOutcome::Deleted);
         assert_eq!(names(), ["main", "unmerged"]);
 
         // Unmerged commits are only dropped when forced.
-        assert_eq!(
-            delete_branch(&repo.dir, "unmerged", false).unwrap(),
-            DeleteBranchOutcome::NotMerged
-        );
+        assert_eq!(delete("unmerged", false).unwrap(), DeleteBranchOutcome::NotMerged);
         assert_eq!(names(), ["main", "unmerged"]);
-        assert_eq!(
-            delete_branch(&repo.dir, "unmerged", true).unwrap(),
-            DeleteBranchOutcome::Deleted
-        );
+        assert_eq!(delete("unmerged", true).unwrap(), DeleteBranchOutcome::Deleted);
         assert_eq!(names(), ["main"]);
 
         // The current branch, missing branches and option-like names are refused.
-        assert!(delete_branch(&repo.dir, "main", true).is_err());
-        assert!(delete_branch(&repo.dir, "does-not-exist", false).is_err());
-        assert!(
-            delete_branch(&repo.dir, "-D", false)
-                .unwrap_err()
-                .contains("not a valid branch name")
-        );
+        assert!(delete("main", true).is_err());
+        assert!(delete("does-not-exist", false).is_err());
+        assert!(delete("-D", false).unwrap_err().contains("not a valid branch name"));
         assert_eq!(names(), ["main"]);
+    }
+
+    #[test]
+    fn deletes_remote_branches_along() {
+        let origin = TestRepo::new("delete-remote-origin");
+        origin.commit_all_initial();
+        for name in ["merged", "unmerged", "moved", "gone", "local-only"] {
+            origin.git(&["branch", name]);
+        }
+        origin.git(&["switch", "-q", "unmerged"]);
+        origin.write("u.txt", "u\n");
+        origin.commit_all("only on unmerged");
+        origin.git(&["switch", "-q", "main"]);
+
+        let clone = TestRepo::clone_of(&origin, "delete-remote-clone");
+        for name in ["merged", "unmerged", "moved", "gone"] {
+            checkout_remote(&clone.dir, &format!("origin/{name}")).unwrap();
+        }
+        clone.git(&["branch", "--no-track", "local-only", "main"]);
+        checkout(&clone.dir, "main").unwrap();
+        let delete = |name: &str, force: bool| delete_branch(&clone.dir, name, force, true, &mut |_| {});
+        let local = |name: &str| rev(&clone.dir, &format!("refs/heads/{name}")).is_some();
+        let tracking = |name: &str| rev(&clone.dir, &format!("refs/remotes/origin/{name}")).is_some();
+        let on_origin = |name: &str| rev(&origin.dir, &format!("refs/heads/{name}")).is_some();
+
+        assert_eq!(delete("merged", false).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("merged") && !tracking("merged") && !on_origin("merged"));
+
+        // Merged into its upstream isn't enough when the upstream goes too: nothing is deleted.
+        assert_eq!(delete("unmerged", false).unwrap(), DeleteBranchOutcome::NotMerged);
+        assert!(local("unmerged") && tracking("unmerged") && on_origin("unmerged"));
+        assert_eq!(delete("unmerged", true).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("unmerged") && !tracking("unmerged") && !on_origin("unmerged"));
+
+        // Someone pushed to it since the last fetch: even forced, nothing is deleted.
+        origin.git(&["switch", "-q", "moved"]);
+        origin.write("m.txt", "m\n");
+        origin.commit_all("pushed by someone else");
+        origin.git(&["switch", "-q", "main"]);
+        let err = delete("moved", true).unwrap_err();
+        assert!(err.contains("Fetch"), "{err}");
+        assert!(local("moved") && on_origin("moved"));
+
+        // Already deleted on the remote: the stale remote-tracking branch goes with the local one.
+        origin.git(&["branch", "-D", "gone"]);
+        assert_eq!(delete("gone", false).unwrap(), DeleteBranchOutcome::Deleted);
+        assert!(!local("gone") && !tracking("gone"));
+
+        // Without an upstream there is no remote branch to delete.
+        assert!(delete("local-only", false).unwrap_err().contains("remote branch"));
+        assert!(local("local-only") && on_origin("local-only"));
+        // The current branch is refused before anything is deleted.
+        assert!(delete("main", true).is_err());
+        assert!(on_origin("main"));
     }
 
     #[test]

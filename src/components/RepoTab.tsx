@@ -90,7 +90,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [switching, setSwitching] = useState(false);
   const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "merge" | "rebase" | null>(null);
   // The local branch whose deletion is being confirmed.
-  const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean } | null>(null);
+  const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean; withRemote: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -416,16 +416,23 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
 
   const closeDelete = useCallback(() => setDeleting(null), []);
 
-  async function deleteBranch(branch: Branch, force: boolean) {
+  async function deleteBranch(branch: Branch, force: boolean, withRemote: boolean) {
     setDeleting(null);
     try {
-      const outcome = await api.deleteBranch(root, branch.name, force);
-      if (!mounted.current) return;
+      const run = () => api.deleteBranch(root, branch.name, force, withRemote);
+      // Deleting the remote branch talks to the remote, like a push: one at a time, with progress.
+      const outcome = withRemote
+        ? await runRemote({ label: `Deleting ${branch.name} and ${branch.upstream}…`, background: false }, run)
+        : await run();
+      if (!outcome || !mounted.current) return;
       onClearError();
-      // git kept it; ask again before dropping the unmerged commits.
-      if (outcome === "not-merged") setDeleting({ branch, unmerged: true });
-      // The commit it pointed at brings the branch back if it was deleted by mistake.
-      else setNotice({ kind: "info", text: `Deleted branch ${branch.name} (was ${branch.sha.slice(0, 7)}).` });
+      // Nothing was deleted; ask again before dropping the unmerged commits.
+      if (outcome === "not-merged") setDeleting({ branch, unmerged: true, withRemote });
+      else {
+        const what = withRemote ? `${branch.name} and ${branch.upstream}` : branch.name;
+        // The commit it pointed at brings the branch back if it was deleted by mistake.
+        setNotice({ kind: "info", text: `Deleted branch ${what} (was ${branch.sha.slice(0, 7)}).` });
+      }
     } catch (e) {
       if (mounted.current) onError(errorMessage(e));
     } finally {
@@ -588,6 +595,12 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       {deleting && (
         <DeleteBranchDialog
           branch={deleting.branch}
+          remoteBranch={
+            deleting.branch.upstream && branches?.remote.some((b) => b.name === deleting.branch.upstream)
+              ? deleting.branch.upstream
+              : null
+          }
+          withRemote={deleting.withRemote}
           unmerged={deleting.unmerged}
           onDelete={deleteBranch}
           onClose={closeDelete}
@@ -600,7 +613,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           changeCount={changeCount}
           branches={branches}
           onSwitch={switchBranch}
-          onDelete={(branch) => setDeleting({ branch, unmerged: false })}
+          onDelete={(branch) => setDeleting({ branch, unmerged: false, withRemote: false })}
         />
         <main className="main">
           {view === "changes" ? (

@@ -130,11 +130,6 @@ async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
 }
 
-#[tauri::command]
-async fn delete_branch(repo: String, name: String, force: bool) -> GitResult<DeleteBranchOutcome> {
-    blocking(move || git::delete_branch(&PathBuf::from(repo), &name, force)).await
-}
-
 /// A progress line of a running fetch, pull, push, rebase or merge, e.g. "Receiving objects:  45% (450/1000)".
 #[derive(Serialize, Clone)]
 struct GitProgress {
@@ -227,6 +222,22 @@ async fn push(
             force,
         };
         git::push(&PathBuf::from(&repo), &opts, &mut progress_emitter(app, repo.clone()))
+    })
+    .await
+}
+
+/// Progress of deleting the remote branch arrives as `git-progress` events.
+#[tauri::command]
+async fn delete_branch(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    force: bool,
+    delete_remote: bool,
+) -> GitResult<DeleteBranchOutcome> {
+    blocking(move || {
+        let path = PathBuf::from(&repo);
+        git::delete_branch(&path, &name, force, delete_remote, &mut progress_emitter(app, repo))
     })
     .await
 }

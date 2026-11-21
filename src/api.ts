@@ -96,7 +96,10 @@ export interface Branch {
   track: string | null;
 }
 
-/** "not-merged": the branch was kept because it has unmerged commits; deleting it needs `force`. */
+/**
+ * "not-merged": nothing was deleted because the branch has unmerged commits; deleting it needs `force`.
+ * With the remote branch, merged means into the current branch, as the upstream goes away too.
+ */
 export type DeleteBranchOutcome = "deleted" | "not-merged";
 
 export interface Remote {
@@ -287,9 +290,13 @@ export const api = {
   checkoutCommit: (repo: string, sha: string) => invoke<void>("checkout_commit", { repo, sha }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
-  /** Deletes a local branch. Without `force`, a branch with unmerged commits is kept ("not-merged"). */
-  deleteBranch: (repo: string, name: string, force: boolean) =>
-    invoke<DeleteBranchOutcome>("delete_branch", { repo, name, force }),
+  /**
+   * Deletes a local branch and, with `deleteRemote`, the remote branch it tracks (first; progress
+   * arrives as `git-progress` events). Without `force`, a branch with unmerged commits is kept
+   * ("not-merged"). The remote branch is never deleted when it has commits that weren't fetched.
+   */
+  deleteBranch: (repo: string, name: string, force: boolean, deleteRemote: boolean) =>
+    invoke<DeleteBranchOutcome>("delete_branch", { repo, name, force, deleteRemote }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */

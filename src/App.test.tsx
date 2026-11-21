@@ -371,7 +371,12 @@ describe("App", () => {
       await userEvent.click(screen.getByRole("menuitem", { name: "Delete Branch…" }));
 
       await userEvent.click(within(screen.getByRole("dialog", { name: "Delete Branch" })).getByRole("button", { name: "Delete" }));
-      expect(invokeMock).toHaveBeenCalledWith("delete_branch", { repo: "/work/demo", name: "develop", force: false });
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "develop",
+        force: false,
+        deleteRemote: false,
+      });
 
       // git kept the branch: deleting it anyway has to be confirmed.
       const again = await screen.findByRole("dialog", { name: "Delete Branch" });
@@ -379,10 +384,52 @@ describe("App", () => {
       expect(screen.getByText("develop", { selector: ".branch-group .branch-name" })).toBeInTheDocument();
       await userEvent.click(within(again).getByRole("button", { name: "Delete Anyway" }));
 
-      expect(invokeMock).toHaveBeenCalledWith("delete_branch", { repo: "/work/demo", name: "develop", force: true });
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "develop",
+        force: true,
+        deleteRemote: false,
+      });
       expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch develop (was a).");
       await waitFor(() => expect(screen.queryByText("develop")).not.toBeInTheDocument());
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("deletes the remote branch along when asked", async () => {
+      let deleted = false;
+      const feature = { name: "feature", sha: "b", current: false, upstream: "origin/feature", track: null };
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main" }),
+        get_log: () => [],
+        get_branches: () => ({
+          local: [
+            { name: "main", sha: "a", current: true, upstream: null, track: null },
+            ...(deleted ? [] : [feature]),
+          ],
+          remote: deleted ? [] : [{ name: "origin/feature", sha: "b", current: false, upstream: null, track: null }],
+          tags: [],
+          remotes: [{ name: "origin", url: "/srv/demo.git" }],
+        }),
+        delete_branch: () => {
+          deleted = true;
+          return "deleted";
+        },
+      });
+      render(<App />);
+      await userEvent.pointer({ keys: "[MouseRight]", target: await screen.findByText("feature") });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Delete Branch…" }));
+      const dialog = screen.getByRole("dialog", { name: "Delete Branch" });
+      await userEvent.click(within(dialog).getByRole("checkbox", { name: /origin\/feature/ }));
+      await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", {
+        repo: "/work/demo",
+        name: "feature",
+        force: false,
+        deleteRemote: true,
+      });
+      expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch feature and origin/feature (was b).");
     });
 
     it("shows why git refused to switch", async () => {
