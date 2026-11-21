@@ -35,20 +35,33 @@ export function toBranchName(text: string): string {
  * What to switch to for a remote branch: its local branch if one exists, otherwise a new
  * tracking branch.
  */
-export function targetForRemote(branches: Branches, remote: Branch): SwitchTarget {
+export function targetForRemote(branches: Branches, remote: Pick<Branch, "name">): SwitchTarget {
   const localName = localNameOf(remote.name);
   const local = branches.local.find((b) => b.upstream === remote.name) ?? branches.local.find((b) => b.name === localName);
   return local ? { kind: "local", name: local.name } : { kind: "remote", name: remote.name, localName };
 }
 
 /**
- * What double-clicking a commit in the history checks out: a local branch pointing at it (as
- * Fork does), otherwise the commit itself as a detached HEAD. Null when it is checked out already.
+ * What double-clicking a commit in the history checks out. A commit at the tip of a branch checks
+ * out the branch: a local branch pointing at it (as Fork does), otherwise the local branch of a
+ * remote branch pointing at it, created if needed (as double-clicking the remote branch does).
+ * Other commits are checked out as a detached HEAD. Null when there is nothing to do: the commit
+ * or its branch is checked out already.
  */
-export function targetForCommit(entry: LogEntry): SwitchTarget | null {
+export function targetForCommit(entry: LogEntry, branches: Branches | null): SwitchTarget | null {
   if (entry.refs.some((r) => r.current)) return null;
   const local = entry.refs.find((r) => r.kind === "local");
-  return local ? { kind: "local", name: local.name } : { kind: "commit", name: entry.sha };
+  if (local) return { kind: "local", name: local.name };
+
+  const isCurrent = (t: SwitchTarget) =>
+    t.kind === "local" && !!branches?.local.some((b) => b.name === t.name && b.current);
+  const viaRemote = branches
+    ? entry.refs.filter((r) => r.kind === "remote").map((r) => targetForRemote(branches, r))
+    : [];
+  // An existing local branch beats creating a new one.
+  const target = viaRemote.find((t) => t.kind === "local") ?? viaRemote[0];
+  if (target) return isCurrent(target) ? null : target;
+  return { kind: "commit", name: entry.sha };
 }
 
 /** The switcher's options for `filter`: local branches, untracked remote branches, then "create". */

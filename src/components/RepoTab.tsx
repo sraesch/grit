@@ -568,7 +568,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
               log={log}
               onError={onError}
               onCheckout={(entry) => {
-                const target = targetForCommit(entry);
+                const target = targetForCommit(entry, branches);
                 if (target) switchBranch(target);
               }}
             />
