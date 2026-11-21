@@ -8,6 +8,10 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.4.2 — 2026-11-21
+
+- Images stored in Git LFS now show up in the history's image preview instead of failing to load
+
 ## 0.4.1 — 2026-11-21
 
 - The macOS installers are now signed and notarized by Apple, so grit opens without security warnings

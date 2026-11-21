@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-21
+
 ### Fixed
 
 - The image preview in the history shows images stored in Git LFS instead of failing on their pointer file. Git LFS downloads them if needed, the size limit applies to the real image, and when Git LFS isn't installed the preview says so
@@ -83,7 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/sraesch/grit/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sraesch/grit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sraesch/grit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sraesch/grit/compare/v0.2.0...v0.3.0

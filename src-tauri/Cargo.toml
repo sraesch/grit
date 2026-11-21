@@ -1,6 +1,6 @@
 [package]
 name = "grit"
-version = "0.4.1"
+version = "0.4.2"
 description = "A cross-platform interactive Git client"
 authors = ["Sascha Raesch <sascha.raesch@gmail.com>"]
 license = "MIT"
