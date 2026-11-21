@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   api,
+  Branch,
   Branches,
   errorMessage,
   FetchOptions,
@@ -30,6 +31,7 @@ import {
 import { relativeTime } from "../util";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
+import { DeleteBranchDialog } from "./DeleteBranchDialog";
 import { HistoryView } from "./HistoryView";
 import { OperationBanner } from "./OperationBanner";
 import { RebaseDialog } from "./RebaseDialog";
@@ -84,6 +86,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [dialog, setDialog] = useState<"fetch" | "pull" | "push" | "rebase" | null>(null);
+  // The local branch whose deletion is being confirmed.
+  const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
@@ -340,6 +344,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     if (!active) {
       setSwitcherOpen(false);
       setDialog(null);
+      setDeleting(null);
     }
   }, [active]);
 
@@ -380,6 +385,25 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         setSwitching(false);
         refreshAll();
       }
+    }
+  }
+
+  const closeDelete = useCallback(() => setDeleting(null), []);
+
+  async function deleteBranch(branch: Branch, force: boolean) {
+    setDeleting(null);
+    try {
+      const outcome = await api.deleteBranch(root, branch.name, force);
+      if (!mounted.current) return;
+      onClearError();
+      // git kept it; ask again before dropping the unmerged commits.
+      if (outcome === "not-merged") setDeleting({ branch, unmerged: true });
+      // The commit it pointed at brings the branch back if it was deleted by mistake.
+      else setNotice({ kind: "info", text: `Deleted branch ${branch.name} (was ${branch.sha.slice(0, 7)}).` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshHistory();
     }
   }
 
@@ -518,8 +542,23 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeDialog}
         />
       )}
+      {deleting && (
+        <DeleteBranchDialog
+          branch={deleting.branch}
+          unmerged={deleting.unmerged}
+          onDelete={deleteBranch}
+          onClose={closeDelete}
+        />
+      )}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
-        <Sidebar view={view} onView={setView} changeCount={changeCount} branches={branches} onSwitch={switchBranch} />
+        <Sidebar
+          view={view}
+          onView={setView}
+          changeCount={changeCount}
+          branches={branches}
+          onSwitch={switchBranch}
+          onDelete={(branch) => setDeleting({ branch, unmerged: false })}
+        />
         <main className="main">
           {view === "changes" ? (
             <ChangesView repo={root} status={status} onChanged={refreshAll} onError={onError} />

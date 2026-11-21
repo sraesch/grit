@@ -668,6 +668,27 @@ pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
     run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
 }
 
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeleteBranchOutcome {
+    Deleted,
+    /// The branch was kept because it has commits that aren't merged into its upstream (or
+    /// into HEAD when it has none); deleting it needs `force`.
+    NotMerged,
+}
+
+/// Deletes a local branch. Without `force`, a branch with unmerged commits is kept and reported
+/// as `NotMerged`. git refuses to delete the branch that is checked out, here or in another worktree.
+pub fn delete_branch(repo: &Path, name: &str, force: bool) -> GitResult<DeleteBranchOutcome> {
+    let flag = if force { "-D" } else { "-d" };
+    // Untranslated messages, so the refusal can be recognized.
+    match exec_with_env(repo, &["branch", flag, branch_arg(name)?], &[("LC_ALL", "C")]) {
+        Ok(_) => Ok(DeleteBranchOutcome::Deleted),
+        Err(e) if !force && e.contains("not fully merged") => Ok(DeleteBranchOutcome::NotMerged),
+        Err(e) => Err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fetch and pull
 // ---------------------------------------------------------------------------
@@ -1862,6 +1883,46 @@ mod tests {
             assert!(create_branch(&clone.dir, name).is_err());
             assert!(checkout_remote(&clone.dir, name).is_err());
         }
+    }
+
+    #[test]
+    fn deletes_local_branches() {
+        let repo = TestRepo::new("delete-branch");
+        repo.commit_all_initial();
+        repo.git(&["branch", "merged"]);
+        repo.git(&["switch", "-q", "-c", "unmerged"]);
+        repo.write("a.txt", "one\n");
+        repo.commit_all("only on unmerged");
+        repo.git(&["switch", "-q", "main"]);
+        let names = || -> Vec<String> { branches(&repo.dir).unwrap().local.into_iter().map(|b| b.name).collect() };
+
+        assert_eq!(
+            delete_branch(&repo.dir, "merged", false).unwrap(),
+            DeleteBranchOutcome::Deleted
+        );
+        assert_eq!(names(), ["main", "unmerged"]);
+
+        // Unmerged commits are only dropped when forced.
+        assert_eq!(
+            delete_branch(&repo.dir, "unmerged", false).unwrap(),
+            DeleteBranchOutcome::NotMerged
+        );
+        assert_eq!(names(), ["main", "unmerged"]);
+        assert_eq!(
+            delete_branch(&repo.dir, "unmerged", true).unwrap(),
+            DeleteBranchOutcome::Deleted
+        );
+        assert_eq!(names(), ["main"]);
+
+        // The current branch, missing branches and option-like names are refused.
+        assert!(delete_branch(&repo.dir, "main", true).is_err());
+        assert!(delete_branch(&repo.dir, "does-not-exist", false).is_err());
+        assert!(
+            delete_branch(&repo.dir, "-D", false)
+                .unwrap_err()
+                .contains("not a valid branch name")
+        );
+        assert_eq!(names(), ["main"]);
     }
 
     #[test]

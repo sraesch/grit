@@ -92,6 +92,9 @@ export interface Branch {
   track: string | null;
 }
 
+/** "not-merged": the branch was kept because it has unmerged commits; deleting it needs `force`. */
+export type DeleteBranchOutcome = "deleted" | "not-merged";
+
 export interface Remote {
   name: string;
   /** The fetch URL. */
@@ -252,6 +255,9 @@ export const api = {
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
   /** Creates a branch at HEAD and switches to it. */
   createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
+  /** Deletes a local branch. Without `force`, a branch with unmerged commits is kept ("not-merged"). */
+  deleteBranch: (repo: string, name: string, force: boolean) =>
+    invoke<DeleteBranchOutcome>("delete_branch", { repo, name, force }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */

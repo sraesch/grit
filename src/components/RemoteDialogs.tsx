@@ -28,9 +28,10 @@ interface DialogProps {
 export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
   const formRef = useRef<HTMLFormElement>(null);
 
-  // Start on the first field, so the keyboard works right away.
+  // Start on the first field (or the submit button of a plain confirmation), so the keyboard works right away.
   useLayoutEffect(() => {
-    formRef.current?.querySelector<HTMLElement>("select, input")?.focus();
+    const form = formRef.current;
+    (form?.querySelector<HTMLElement>("select, input") ?? form?.querySelector<HTMLElement>("button[type=submit]"))?.focus();
   }, []);
 
   // Escape closes; focus returns to whatever opened the dialog.

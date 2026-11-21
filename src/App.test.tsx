@@ -353,6 +353,38 @@ describe("App", () => {
       expect(await screen.findByRole("button", { name: /^hotfix/ })).toBeInTheDocument();
     });
 
+    it("deletes a branch from the sidebar, asking again when it has unmerged commits", async () => {
+      let branchNames = ["main", "develop"];
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => makeStatus({ branch: "main" }),
+        get_log: () => [],
+        get_branches: () => ({ ...branchList(), local: branchList().local.filter((b) => branchNames.includes(b.name)) }),
+        delete_branch: ({ force }) => {
+          if (!force) return "not-merged";
+          branchNames = ["main"];
+          return "deleted";
+        },
+      });
+      render(<App />);
+      await userEvent.pointer({ keys: "[MouseRight]", target: await screen.findByText("develop") });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Delete Branch…" }));
+
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Delete Branch" })).getByRole("button", { name: "Delete" }));
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", { repo: "/work/demo", name: "develop", force: false });
+
+      // git kept the branch: deleting it anyway has to be confirmed.
+      const again = await screen.findByRole("dialog", { name: "Delete Branch" });
+      expect(within(again).getByRole("note")).toHaveTextContent("aren't merged");
+      expect(screen.getByText("develop", { selector: ".branch-group .branch-name" })).toBeInTheDocument();
+      await userEvent.click(within(again).getByRole("button", { name: "Delete Anyway" }));
+
+      expect(invokeMock).toHaveBeenCalledWith("delete_branch", { repo: "/work/demo", name: "develop", force: true });
+      expect(await screen.findByRole("status")).toHaveTextContent("Deleted branch develop (was a).");
+      await waitFor(() => expect(screen.queryByText("develop")).not.toBeInTheDocument());
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
     it("shows why git refused to switch", async () => {
       mockBackend(invokeMock, {
         open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),

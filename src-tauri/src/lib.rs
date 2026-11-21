@@ -11,8 +11,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, Divergence, FetchOptions, FetchResult, GitResult, LogEntry, PullOptions, PullResult,
-    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
+    Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
+    PullOptions, PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -122,6 +122,11 @@ async fn checkout_remote_branch(repo: String, branch: String) -> GitResult<()> {
 #[tauri::command]
 async fn create_branch(repo: String, name: String) -> GitResult<()> {
     blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
+}
+
+#[tauri::command]
+async fn delete_branch(repo: String, name: String, force: bool) -> GitResult<DeleteBranchOutcome> {
+    blocking(move || git::delete_branch(&PathBuf::from(repo), &name, force)).await
 }
 
 /// A progress line of a running fetch, pull, push or rebase, e.g. "Receiving objects:  45% (450/1000)".
@@ -292,6 +297,7 @@ pub fn run() {
             checkout_branch,
             checkout_remote_branch,
             create_branch,
+            delete_branch,
             fetch,
             pull,
             push,
