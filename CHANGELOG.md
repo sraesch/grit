@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
 - Right-clicking a local branch in the sidebar opens a menu to check it out or delete it
@@ -71,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sraesch/grit/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sraesch/grit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sraesch/grit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sraesch/grit/releases/tag/v0.1.0

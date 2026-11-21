@@ -8,6 +8,14 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.4.0 — 2026-11-21
+
+- Merge a branch or tag into your current branch with Ctrl/Cmd+Shift+M: fast-forward, always create a merge commit, or squash, with a preview of what comes in
+- Stash your local changes with Ctrl/Cmd+Shift+S, then browse your stashes in the sidebar and apply, pop or delete them
+- Right-click a branch in the sidebar to check it out or delete it, optionally together with its remote branch
+- Double-click a commit in the history to check it out, or the branch that points at it
+- Merges and squash merges that wait for you show a banner to commit or abort them in one click
+
 ## 0.3.0 — 2026-11-17
 
 - Fetch, pull and push right from the toolbar, which shows how many commits are waiting to be pulled or pushed
