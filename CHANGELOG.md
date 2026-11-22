@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clone a repository: "Clone repository…" on the welcome screen, in the "+" menu of the tab bar or in the macOS File menu asks for its URL, the folder to clone into (by default a folder named after the repository inside the repositories folder from Settings) and optionally a branch. git's progress is shown while it runs, and the clone then opens in a tab. Credential helpers and SSH agents can ask for credentials while cloning
 - The "+" in the tab bar opens a menu to open, clone or create a repository; the macOS File menu has "New Repository…", "Open…" and "Clone…" too
 - Manage remotes without the command line: the Remotes group in the sidebar lists each remote (hover for its URL) with its remote branches beneath it, and a remote without fetched branches shows up too. Its "+" button (or right-click on the group) adds a remote by name and URL and optionally fetches it right away. Right-clicking a remote fetches it, edits its URL, renames it (its remote branches and the local branches tracking them follow) or removes it after a confirmation that names the local branches that lose their upstream
+- Right-clicking a remote branch in the sidebar opens a menu to check it out (through a local branch tracking it), merge it into the current branch, copy its name, or delete it on the remote after a confirmation. Local branches tracking it are kept, and nothing is deleted when someone pushed to the branch since the last fetch
 
 ## [0.4.2] - 2026-11-21
 

@@ -319,6 +319,16 @@ async fn drop_stash(repo: String, sha: String) -> GitResult<()> {
 }
 
 /// Progress of deleting the remote branch arrives as `git-progress` events.
+/// Deletes a branch on its remote; progress arrives as `git-progress` events.
+#[tauri::command]
+async fn delete_remote_branch(app: AppHandle, repo: String, remote: String, branch: String) -> GitResult<()> {
+    blocking(move || {
+        let mut progress = progress_emitter(app, repo.clone());
+        git::delete_remote_branch(&PathBuf::from(&repo), &remote, &branch, &mut progress)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn delete_branch(
     app: AppHandle,
@@ -434,6 +444,7 @@ pub fn run() {
             checkout_commit,
             create_branch,
             delete_branch,
+            delete_remote_branch,
             get_stashes,
             stash,
             apply_stash,

@@ -39,6 +39,9 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     onFetchRemote: vi.fn(),
     onEditRemote: vi.fn(),
     onRemoveRemote: vi.fn(),
+    onMerge: vi.fn(),
+    onCopyName: vi.fn(),
+    onDeleteRemoteBranch: vi.fn(),
   };
   render(
     <Sidebar
@@ -48,6 +51,7 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
       stashes={stashes}
       selectedStash={null}
       applyBlocked={null}
+      mergeBlocked={null}
       {...handlers}
       {...props}
     />,
@@ -122,11 +126,40 @@ describe("Sidebar", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
-  it("has no context menu for remote branches and tags", async () => {
+  it("has no context menu for tags", async () => {
     setup();
-    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
-    await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/new-work") });
+    await userEvent.click(screen.getByRole("button", { name: /Tags/ }));
+    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("v1.0") });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("checks out, merges, copies and deletes a remote branch from its context menu", async () => {
+    const { onSwitch, onMerge, onCopyName, onDeleteRemoteBranch } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    const choose = async (item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/new-work") });
+      const menu = screen.getByRole("menu", { name: "Remote branch origin/new-work" });
+      await userEvent.click(within(menu).getByRole("menuitem", { name: item }));
+    };
+    await choose("Checkout");
+    expect(onSwitch).toHaveBeenCalledWith({ kind: "remote", name: "origin/new-work", localName: "new-work" });
+    await choose("Merge into main…");
+    expect(onMerge).toHaveBeenCalledWith("origin/new-work");
+    await choose("Copy Name");
+    expect(onCopyName).toHaveBeenCalledWith("origin/new-work");
+    await choose("Delete Remote Branch…");
+    expect(onDeleteRemoteBranch).toHaveBeenCalledWith(branches.remote[2]);
+  });
+
+  it("doesn't check out the remote branch the current branch tracks, or merge when that's blocked", async () => {
+    setup({ mergeBlocked: "Finish or abort the current operation first" });
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/main") });
+    expect(screen.getByRole("menuitem", { name: "Checkout" })).toBeDisabled();
+    const merge = screen.getByRole("menuitem", { name: "Merge into main…" });
+    expect(merge).toBeDisabled();
+    expect(merge).toHaveAttribute("title", "Finish or abort the current operation first");
+    expect(screen.getByRole("menuitem", { name: "Delete Remote Branch…" })).toBeEnabled();
   });
 
   it("lists remote branches under their remote, by their short name", async () => {

@@ -39,7 +39,7 @@ import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
-import { DeleteBranchDialog } from "./DeleteBranchDialog";
+import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
 import { HistoryView } from "./HistoryView";
 import { MergeDialog } from "./MergeDialog";
@@ -115,6 +115,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   // The local branch whose deletion is being confirmed.
   const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean; withRemote: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
+  // The branch the merge dialog starts on, when chosen in the sidebar.
+  const [mergeSource, setMergeSource] = useState<string | null>(null);
+  // The remote branch whose deletion on its remote is being confirmed.
+  const [deletingRemote, setDeletingRemote] = useState<{ name: string; remote: string; branch: string } | null>(null);
   // Adding a remote, or editing or removing one.
   const [remoteEdit, setRemoteEdit] = useState<
     { kind: "add" } | { kind: "url" | "name" | "remove"; remote: Remote } | null
@@ -321,6 +325,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const mergeNow = useCallback(
     async (options: MergeOptions) => {
       setDialog(null);
+      setMergeSource(null);
       const branch = latest.current.status?.branch ?? "HEAD";
       const label = `${options.mode === "squash" ? "Squash merging" : "Merging"} ${options.source} into ${branch}…`;
       try {
@@ -405,6 +410,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setDeleting(null);
       setDropping(null);
       setRemoteEdit(null);
+      setDeletingRemote(null);
     }
   }, [active]);
 
@@ -424,7 +430,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     }
   }
 
-  const closeDialog = useCallback(() => setDialog(null), []);
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    setMergeSource(null);
+  }, []);
 
   const closeSwitcher = useCallback((refocus: boolean) => {
     setSwitcherOpen(false);
@@ -533,6 +542,38 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
 
   const closeDrop = useCallback(() => setDropping(null), []);
   const closeRemoteEdit = useCallback(() => setRemoteEdit(null), []);
+  const closeDeleteRemote = useCallback(() => setDeletingRemote(null), []);
+
+  function askDeleteRemoteBranch(b: Branch) {
+    const split = splitRemoteBranch(b.name, latest.current.branches?.remotes ?? []);
+    if (split) setDeletingRemote({ name: b.name, ...split });
+    else onError(`${b.name} doesn't belong to a remote anymore.`);
+  }
+
+  async function deleteRemoteBranch() {
+    if (!deletingRemote) return;
+    const { name, remote, branch } = deletingRemote;
+    setDeletingRemote(null);
+    try {
+      // Talks to the remote, like a push: one at a time, with progress.
+      const done = await runRemote({ label: `Deleting ${name}…`, background: false }, async () => {
+        await api.deleteRemoteBranch(root, remote, branch);
+        return true;
+      });
+      if (!done || !mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `Deleted ${branch} on ${remote}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    }
+  }
+
+  function copyName(name: string) {
+    navigator.clipboard.writeText(name).then(
+      () => mounted.current && setNotice({ kind: "info", text: `Copied ${name}.` }),
+      (e) => mounted.current && onError(`Could not copy ${name}: ${errorMessage(e)}`),
+    );
+  }
 
   const fetchRemote = useCallback(
     (remote: string) => fetchNow({ ...prefs.fetch(), remote, background: false }),
@@ -710,7 +751,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           repo={root}
           branch={status.branch}
           status={status}
-          targets={merge}
+          targets={mergeSource ? { ...merge, preferred: mergeSource } : merge}
           onMerge={mergeNow}
           onClose={closeDialog}
         />
@@ -760,6 +801,14 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeRemoteEdit}
         />
       )}
+      {deletingRemote && (
+        <DeleteRemoteBranchDialog
+          {...deletingRemote}
+          trackedBy={(branches?.local ?? []).filter((b) => b.upstream === deletingRemote.name).map((b) => b.name)}
+          onDelete={deleteRemoteBranch}
+          onClose={closeDeleteRemote}
+        />
+      )}
       {dropping && <DropStashDialog stash={dropping} onDrop={dropStash} onClose={closeDrop} />}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar
@@ -782,6 +831,23 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onFetchRemote={(remote) => fetchRemote(remote.name)}
           onEditRemote={(remote, field) => setRemoteEdit({ kind: field, remote })}
           onRemoveRemote={(remote) => setRemoteEdit({ kind: "remove", remote })}
+          onMerge={(name) => {
+            setMergeSource(name);
+            setDialog("merge");
+          }}
+          mergeBlocked={
+            canMerge
+              ? null
+              : !status?.branch
+                ? "Check out a branch to merge into"
+                : status.operation
+                  ? "Finish or abort the current operation first"
+                  : remoteOp
+                    ? "Wait until the running operation is done"
+                    : "Nothing can be merged right now"
+          }
+          onCopyName={copyName}
+          onDeleteRemoteBranch={askDeleteRemoteBranch}
         />
         <main className="main">
           {view === "changes" ? (

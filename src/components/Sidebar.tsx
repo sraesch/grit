@@ -31,19 +31,27 @@ interface SidebarProps {
   onEditRemote: (remote: Remote, field: "url" | "name") => void;
   /** Asks to remove a remote; the owner confirms. */
   onRemoveRemote: (remote: Remote) => void;
+  /** Asks to merge a branch, e.g. "origin/feature", into the current branch. */
+  onMerge: (name: string) => void;
+  /** Why nothing can be merged into the current branch right now; null when it can. */
+  mergeBlocked: string | null;
+  onCopyName: (name: string) => void;
+  /** Asks to delete a remote branch on its remote; the owner confirms. */
+  onDeleteRemoteBranch: (branch: Branch) => void;
 }
 
 interface RemotesGroupProps {
   branches: Branches;
   onActivate: (b: Branch) => void;
   onAdd: () => void;
+  onBranchMenu: (b: Branch, e: MouseEvent) => void;
   /** Right-click on the group's title. */
   onGroupMenu: (e: MouseEvent) => void;
   onRemoteMenu: (remote: Remote, e: MouseEvent) => void;
 }
 
 /** The remotes, each with its remote branches; right-click a remote to fetch, edit or remove it. */
-function RemotesGroup({ branches, onActivate, onAdd, onGroupMenu, onRemoteMenu }: RemotesGroupProps) {
+function RemotesGroup({ branches, onActivate, onAdd, onBranchMenu, onGroupMenu, onRemoteMenu }: RemotesGroupProps) {
   const [open, setOpen] = useState(false);
   // Remotes are expanded unless collapsed.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -64,7 +72,7 @@ function RemotesGroup({ branches, onActivate, onAdd, onGroupMenu, onRemoteMenu }
           onGroupMenu(e);
         }}
       >
-        <button className="group-title" onClick={() => setOpen(!open)}>
+        <button className="group-title" aria-expanded={open} onClick={() => setOpen(!open)}>
           <span className={`chevron${open ? " open" : ""}`}>▸</span>
           Remotes
           <span className="count">{groups.length}</span>
@@ -102,6 +110,10 @@ function RemotesGroup({ branches, onActivate, onAdd, onGroupMenu, onRemoteMenu }
                       <li
                         key={b.name}
                         onDoubleClick={() => onActivate(b)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          onBranchMenu(b, e);
+                        }}
                         title={`${b.name}\nDouble-click to switch to a local branch tracking this one`}
                       >
                         <span className="branch-name">{shortName}</span>
@@ -221,7 +233,13 @@ export function Sidebar({
   onFetchRemote,
   onEditRemote,
   onRemoveRemote,
+  onMerge,
+  mergeBlocked,
+  onCopyName,
+  onDeleteRemoteBranch,
 }: SidebarProps) {
+  const [remoteBranchMenu, setRemoteBranchMenu] = useState<{ branch: Branch; x: number; y: number } | null>(null);
+  const closeRemoteBranchMenu = useCallback(() => setRemoteBranchMenu(null), []);
   const [menu, setMenu] = useState<{ branch: Branch; x: number; y: number } | null>(null);
   // A remote's menu, or with no remote the Remotes group's.
   const [remoteMenu, setRemoteMenu] = useState<{ remote: Remote | null; x: number; y: number } | null>(null);
@@ -229,6 +247,34 @@ export function Sidebar({
   const [stashMenu, setStashMenu] = useState<{ stash: Stash; x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
   const closeStashMenu = useCallback(() => setStashMenu(null), []);
+
+  /** Whether the current branch is the local branch a remote branch would switch to. */
+  function checkedOut(b: Branch): boolean {
+    if (!branches) return false;
+    const target = targetForRemote(branches, b);
+    return target.kind === "local" && branches.local.some((l) => l.name === target.name && l.current);
+  }
+
+  function remoteBranchMenuItems(b: Branch): MenuItem[] {
+    const current = branches?.local.find((l) => l.current)?.name;
+    const isCurrent = checkedOut(b);
+    return [
+      {
+        label: "Checkout",
+        disabled: isCurrent,
+        title: isCurrent ? "The current branch tracks this one" : "Switch to a local branch tracking this one",
+        onSelect: () => branches && onSwitch(targetForRemote(branches, b)),
+      },
+      {
+        label: current ? `Merge into ${current}…` : "Merge into Current Branch…",
+        disabled: !!mergeBlocked,
+        title: mergeBlocked ?? undefined,
+        onSelect: () => onMerge(b.name),
+      },
+      { label: "Copy Name", onSelect: () => onCopyName(b.name) },
+      { label: "Delete Remote Branch…", danger: true, onSelect: () => onDeleteRemoteBranch(b) },
+    ];
+  }
 
   function remoteMenuItems(remote: Remote | null): MenuItem[] {
     if (!remote) return [{ label: "Add Remote…", onSelect: onAddRemote }];
@@ -267,10 +313,9 @@ export function Sidebar({
           <RemotesGroup
             branches={branches}
             onActivate={(b) => {
-              const target = targetForRemote(branches, b);
-              const current = target.kind === "local" && branches.local.some((l) => l.name === target.name && l.current);
-              if (!current) onSwitch(target);
+              if (!checkedOut(b)) onSwitch(targetForRemote(branches, b));
             }}
+            onBranchMenu={(branch, e) => setRemoteBranchMenu({ branch, x: e.clientX, y: e.clientY })}
             onAdd={onAddRemote}
             onGroupMenu={(e) => setRemoteMenu({ remote: null, x: e.clientX, y: e.clientY })}
             onRemoteMenu={(remote, e) => setRemoteMenu({ remote, x: e.clientX, y: e.clientY })}
@@ -310,6 +355,15 @@ export function Sidebar({
             { label: "Delete Stash…", danger: true, onSelect: () => onDropStash(stashMenu.stash) },
           ]}
           onClose={closeStashMenu}
+        />
+      )}
+      {remoteBranchMenu && (
+        <ContextMenu
+          x={remoteBranchMenu.x}
+          y={remoteBranchMenu.y}
+          label={`Remote branch ${remoteBranchMenu.branch.name}`}
+          items={remoteBranchMenuItems(remoteBranchMenu.branch)}
+          onClose={closeRemoteBranchMenu}
         />
       )}
       {remoteMenu && (

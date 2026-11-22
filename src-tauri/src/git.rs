@@ -1004,6 +1004,72 @@ fn upstream_of(repo: &Path, local_ref: &str) -> Option<(String, String, String)>
     (valid && rev(repo, &tracking).is_some()).then_some((remote, remote_ref, tracking))
 }
 
+/// Deletes `remote_ref` (e.g. "refs/heads/x") on `remote`, but only if it still points where the
+/// remote-tracking ref `tracking` says it was last fetched (`--force-with-lease`), so commits
+/// pushed by others since are never lost. A branch that is gone from the remote already only
+/// loses its stale remote-tracking ref.
+fn delete_remote_ref(
+    repo: &Path,
+    remote: &str,
+    remote_ref: &str,
+    tracking: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(tracking);
+    let lease = format!("--force-with-lease={remote_ref}");
+    let out = exec_streaming(
+        repo,
+        &[
+            "push",
+            "--progress",
+            "--porcelain",
+            &lease,
+            remote,
+            "--delete",
+            remote_ref,
+        ],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let refs = parse_push_porcelain(&out.stdout);
+    match refs.iter().find(|r| r.dst == remote_ref) {
+        Some(r) if r.flag == '-' => Ok(()),
+        // The lease also fails when the branch is gone from the remote already: then there is
+        // nothing left to delete but the stale remote-tracking ref.
+        Some(r) if r.summary.contains("stale info") => {
+            let listed = run(repo, &["ls-remote", "--heads", remote, remote_ref])?;
+            if !listed.trim().is_empty() {
+                return Err(format!(
+                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
+                     Fetch to see them."
+                ));
+            }
+            run(repo, &["update-ref", "-d", tracking]).map(drop)
+        }
+        _ => Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
+    }
+}
+
+/// Deletes `branch` on `remote` (e.g. "feature" on "origin" for origin/feature), keeping any
+/// local branch that tracks it. Refused when someone pushed to it since the last fetch.
+pub fn delete_remote_branch(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let branch = branch_arg(branch)?;
+    if !remotes(repo)?.iter().any(|r| r.name == remote) {
+        return Err(format!("There is no remote '{remote}'"));
+    }
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    if rev(repo, &tracking).is_none() {
+        return Err(format!("There is no remote branch '{remote}/{branch}'"));
+    }
+    delete_remote_ref(repo, remote, &format!("refs/heads/{branch}"), &tracking, on_progress)
+}
+
 /// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
 ///
 /// Without `force`, a branch with unmerged commits is kept and reported as `NotMerged`. git
@@ -1045,38 +1111,7 @@ pub fn delete_branch(
     }
 
     let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
-    let lease = format!("--force-with-lease={remote_ref}");
-    let out = exec_streaming(
-        repo,
-        &[
-            "push",
-            "--progress",
-            "--porcelain",
-            &lease,
-            &remote,
-            "--delete",
-            &remote_ref,
-        ],
-        &[("LC_ALL", "C")],
-        on_progress,
-    )?;
-    let refs = parse_push_porcelain(&out.stdout);
-    match refs.iter().find(|r| r.dst == remote_ref) {
-        Some(r) if r.flag == '-' => {}
-        // The lease also fails when the branch is gone from the remote already: then there is
-        // nothing left to delete but the stale remote-tracking ref.
-        Some(r) if r.summary.contains("stale info") => {
-            let listed = run(repo, &["ls-remote", "--heads", &remote, &remote_ref])?;
-            if !listed.trim().is_empty() {
-                return Err(format!(
-                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
-                     Fetch to see them."
-                ));
-            }
-            run(repo, &["update-ref", "-d", &tracking])?;
-        }
-        _ => return Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
-    }
+    delete_remote_ref(repo, &remote, &remote_ref, &tracking, on_progress)?;
 
     // Unmerged commits were checked (or forced) above.
     run(repo, &["branch", "-D", name])
@@ -3171,6 +3206,44 @@ mod tests {
         // The current branch is refused before anything is deleted.
         assert!(delete("main", true).is_err());
         assert!(on_origin("main"));
+    }
+
+    #[test]
+    fn deletes_remote_branches_only() {
+        let origin = TestRepo::new("delete-remote-only-origin");
+        origin.commit_all_initial();
+        for name in ["tracked", "moved", "gone"] {
+            origin.git(&["branch", name]);
+        }
+        let clone = TestRepo::clone_of(&origin, "delete-remote-only-clone");
+        checkout_remote(&clone.dir, "origin/tracked").unwrap();
+        checkout(&clone.dir, "main").unwrap();
+        let delete = |name: &str| delete_remote_branch(&clone.dir, "origin", name, &mut |_| {});
+        let tracking = |name: &str| rev(&clone.dir, &format!("refs/remotes/origin/{name}")).is_some();
+        let on_origin = |name: &str| rev(&origin.dir, &format!("refs/heads/{name}")).is_some();
+
+        // The local branch tracking it stays.
+        delete("tracked").unwrap();
+        assert!(!tracking("tracked") && !on_origin("tracked"));
+        assert!(rev(&clone.dir, "refs/heads/tracked").is_some());
+
+        // Someone pushed to it since the last fetch: nothing is deleted.
+        origin.git(&["switch", "-q", "moved"]);
+        origin.write("m.txt", "m\n");
+        origin.commit_all("pushed by someone else");
+        origin.git(&["switch", "-q", "main"]);
+        let err = delete("moved").unwrap_err();
+        assert!(err.contains("pushed since it was last fetched"), "{err}");
+        assert!(tracking("moved") && on_origin("moved"));
+
+        // Already deleted on the remote: only the stale remote-tracking branch goes.
+        origin.git(&["branch", "-D", "gone"]);
+        delete("gone").unwrap();
+        assert!(!tracking("gone"));
+
+        assert!(delete("nope").unwrap_err().contains("no remote branch"));
+        assert!(delete_remote_branch(&clone.dir, "nowhere", "main", &mut |_| {}).is_err());
+        assert!(delete("--all").is_err());
     }
 
     #[test]
