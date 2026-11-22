@@ -30,6 +30,7 @@ describe("ChangesView", () => {
       unstage_all: () => undefined,
       commit: () => undefined,
       discard: () => undefined,
+      add_to_gitignore: () => undefined,
     });
   });
 
@@ -328,5 +329,46 @@ describe("ChangesView", () => {
     expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual(["Unstage"]);
     await userEvent.click(screen.getByRole("menuitem", { name: "Unstage" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("unstage", { repo: "/repo", paths: ["ready.rs"] }));
+  });
+  it("ignores an untracked file by its extension", async () => {
+    const { onChanged } = setup({ status: makeStatus({ unstaged: [file("logs/debug.log", "?"), file("a.ts")] }) });
+    fireEvent.contextMenu(screen.getByText("debug.log"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Ignore…" }));
+    const dialog = screen.getByRole("dialog", { name: "Ignore File" });
+    const pattern = within(dialog).getByRole("textbox", { name: "Pattern" });
+    expect(pattern).toHaveValue("/logs/debug.log");
+    expect(within(dialog).getByRole("radio", { name: /Only this file/ })).toBeChecked();
+
+    await userEvent.click(within(dialog).getByRole("radio", { name: /All files with extension \.log/ }));
+    expect(pattern).toHaveValue("*.log");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Ignore" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(invokeMock).toHaveBeenCalledWith("add_to_gitignore", { repo: "/repo", pattern: "*.log" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("ignores a folder of untracked files with an edited pattern", async () => {
+    setup({ status: makeStatus({ unstaged: [file("gen/a.js", "?"), file("gen/b.js", "?")] }) });
+    fireEvent.contextMenu(screen.getByText("gen"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Ignore Folder…" }));
+    const dialog = screen.getByRole("dialog", { name: "Ignore Folder" });
+    await userEvent.click(within(dialog).getByRole("radio", { name: /All folders named gen/ }));
+    const pattern = within(dialog).getByRole("textbox", { name: "Pattern" });
+    expect(pattern).toHaveValue("gen/");
+    await userEvent.clear(pattern);
+    expect(within(dialog).getByRole("button", { name: "Ignore" })).toBeDisabled();
+    await userEvent.type(pattern, "gen/*.js{Enter}");
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("add_to_gitignore", { repo: "/repo", pattern: "gen/*.js" }),
+    );
+  });
+
+  it("offers ignoring only for untracked files and folders", () => {
+    setup({ status: makeStatus({ unstaged: [file("src/a.ts"), file("src/new.ts", "?")] }) });
+    fireEvent.contextMenu(screen.getByText("a.ts"));
+    expect(screen.queryByRole("menuitem", { name: "Ignore…" })).toBeNull();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.contextMenu(screen.getByText("src"));
+    expect(screen.queryByRole("menuitem", { name: "Ignore Folder…" })).toBeNull();
   });
 });

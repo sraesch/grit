@@ -1,9 +1,11 @@
 import { KeyboardEvent, useEffect, useRef, useState } from "react";
 import { api, errorMessage, FileChange, Status } from "../api";
+import { IgnoreTarget } from "../gitignore";
 import { ContextMenu, MenuItem } from "./ContextMenu";
 import { DiffView } from "./DiffView";
 import { DiscardDialog } from "./DiscardDialog";
 import { FileList, RowAction, RowTarget } from "./FileList";
+import { IgnoreDialog } from "./IgnoreDialog";
 import { CommitMessage } from "./Markdown";
 import { Split } from "./Split";
 
@@ -30,6 +32,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const [preview, setPreview] = useState(false);
   /** Files waiting for the discard confirmation. */
   const [discarding, setDiscarding] = useState<FileChange[] | null>(null);
+  const [ignoring, setIgnoring] = useState<IgnoreTarget | null>(null);
   const [menu, setMenu] = useState<{ target: RowTarget; staged: boolean; x: number; y: number } | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const focusEditor = useRef(false);
@@ -116,6 +119,11 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     return run(() => api.discard(repo, tracked, untracked));
   };
 
+  const ignore = (pattern: string) => {
+    setIgnoring(null);
+    return run(() => api.addToGitignore(repo, pattern));
+  };
+
   const isUntracked = (f: FileChange) => f.status === "?";
   const stageAction: RowAction = { label: "Stage", onFile: stageFile, onFolder: stageFiles };
   const discardAction: RowAction = {
@@ -133,14 +141,19 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
       const n = target.files.length;
       const count = `${n} file${n === 1 ? "" : "s"}`;
       if (isStaged) return [{ label: "Unstage Folder", title: count, onSelect: () => unstageFiles(target.files) }];
-      return [
+      const items: MenuItem[] = [
         { label: "Stage Folder", title: count, onSelect: () => stageFiles(target.files) },
         { label: "Discard Folder…", danger: true, title: count, onSelect: () => setDiscarding(target.files) },
       ];
+      // Only a folder of untracked files: ignoring tracked files has no effect.
+      if (target.files.every(isUntracked)) {
+        items.push({ label: "Ignore Folder…", onSelect: () => setIgnoring({ kind: "folder", path: target.path }) });
+      }
+      return items;
     }
     const f = target.file;
     if (isStaged) return [{ label: "Unstage", onSelect: () => unstageFile(f) }];
-    return [
+    const items: MenuItem[] = [
       { label: "Stage", onSelect: () => stageFile(f) },
       {
         label: isUntracked(f) ? "Delete File…" : "Discard Changes…",
@@ -148,6 +161,8 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
         onSelect: () => setDiscarding([f]),
       },
     ];
+    if (isUntracked(f)) items.push({ label: "Ignore…", onSelect: () => setIgnoring({ kind: "file", path: f.path }) });
+    return items;
   }
 
   const openMenu = (isStaged: boolean) => (target: RowTarget, x: number, y: number) =>
@@ -336,6 +351,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
           onClose={() => setMenu(null)}
         />
       )}
+      {ignoring && <IgnoreDialog target={ignoring} onIgnore={ignore} onClose={() => setIgnoring(null)} />}
       {discarding && <DiscardDialog files={discarding} onDiscard={discardFiles} onClose={() => setDiscarding(null)} />}
     </>
   );
