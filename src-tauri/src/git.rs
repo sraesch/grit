@@ -2388,7 +2388,12 @@ mod tests {
         assert!(is_repository(&origin.dir));
         assert!(is_repository(&objects));
         assert!(open_repo(&origin.dir).err().unwrap().contains("bare repository"));
-        assert!(init_repo(&origin.dir, "main").err().unwrap().contains("bare repository"));
+        assert!(
+            init_repo(&origin.dir, "main")
+                .err()
+                .unwrap()
+                .contains("bare repository")
+        );
         assert!(init_repo(&objects, "main").err().unwrap().contains("bare repository"));
         assert!(!origin.dir.join(".git").exists() && !objects.join(".git").exists());
     }
