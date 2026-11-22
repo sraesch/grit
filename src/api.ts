@@ -310,6 +310,12 @@ export const api = {
   defaultBranchName: () => invoke<string>("default_branch_name"),
   /** Creates a repository in `path` (created if missing) starting on `branch`. Open it with `openRepo`. */
   initRepo: (path: string, branch: string) => invoke<RepoInfo>("init_repo", { path, branch }),
+  /**
+   * Clones `url` into `dest` (which must not exist or be empty), optionally on `branch`. Progress
+   * arrives as `git-progress` events whose `root` is `dest`. Open the clone with `openRepo`.
+   */
+  cloneRepo: (url: string, dest: string, branch: string | null) =>
+    invoke<RepoInfo>("clone_repo", { url, dest, branch }),
   /** Stops watching a repository whose tab was closed. */
   closeRepo: (root: string) => invoke<void>("close_repo", { root }),
   status: (repo: string) => invoke<Status>("get_status", { repo }),

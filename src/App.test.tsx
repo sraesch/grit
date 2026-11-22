@@ -210,7 +210,7 @@ describe("App", () => {
 
     async function openViaDialog(path: string) {
       openMock.mockResolvedValueOnce(path);
-      await userEvent.click(screen.getByRole("button", { name: "Open or create a repository" }));
+      await userEvent.click(screen.getByRole("button", { name: "Open, clone or create a repository" }));
       await userEvent.click(screen.getByRole("menuitem", { name: "Open Repository…" }));
     }
 
