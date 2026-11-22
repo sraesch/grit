@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LINES, parseDiff } from "./diff";
+import { changesBetween, MAX_LINES, parseDiff, selectionByHunk } from "./diff";
 
 const SAMPLE = `diff --git a/a.txt b/a.txt
 index 1111111..2222222 100644
@@ -88,5 +88,23 @@ describe("parseDiff", () => {
     const { lines, truncated } = parseDiff(`@@ -0,0 +1,${MAX_LINES + 50} @@\n${body}\n`);
     expect(truncated).toBe(true);
     expect(lines).toHaveLength(MAX_LINES);
+  });
+});
+
+describe("line selection", () => {
+  const parsed = parseDiff(SAMPLE);
+
+  it("picks the changed lines of a range in either direction", () => {
+    expect(changesBetween(parsed.lines, 1, 7)).toEqual([2, 3, 7]);
+    expect(changesBetween(parsed.lines, 7, 1)).toEqual([2, 3, 7]);
+    expect(changesBetween(parsed.lines, 4, 6)).toEqual([]);
+  });
+
+  it("groups selected lines by hunk as body offsets", () => {
+    expect(selectionByHunk(parsed, new Set([7, 3, 2, 1, 0]))).toEqual([
+      { index: 0, header: "@@ -1,3 +1,3 @@ header", lines: [1, 2] },
+      { index: 1, header: "@@ -10,2 +10,3 @@", lines: [1] },
+    ]);
+    expect(selectionByHunk(parsed, [])).toEqual([]);
   });
 });
