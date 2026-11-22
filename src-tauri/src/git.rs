@@ -98,8 +98,16 @@ pub struct RepoInfo {
 }
 
 pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
-    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"])
-        .map_err(|_| format!("{} is not inside a git repository", path.display()))?;
+    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"]).map_err(|_| {
+        if is_bare(path) {
+            format!(
+                "{} is a bare repository, which has no working tree to show. Clone it to work with it.",
+                path.display()
+            )
+        } else {
+            format!("{} is not inside a git repository", path.display())
+        }
+    })?;
     let mut lines = out.lines();
     let root = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
     let git_dir = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
@@ -110,9 +118,15 @@ pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
     Ok(RepoInfo { root, git_dir, name })
 }
 
-/// Whether `path` is an existing folder inside a repository, i.e. whether `open_repo` would open it.
+/// Whether `path` is an existing folder inside a repository, bare ones included. Such a folder must
+/// never be offered for `init_repo`, even when `open_repo` can't open it (a bare repository).
 pub fn is_repository(path: &Path) -> bool {
-    path.is_dir() && run(path, &["rev-parse", "--show-toplevel"]).is_ok()
+    path.is_dir() && run(path, &["rev-parse", "--git-dir"]).is_ok()
+}
+
+/// Whether `path` is inside a bare repository, which has no working tree.
+fn is_bare(path: &Path) -> bool {
+    path.is_dir() && run(path, &["rev-parse", "--is-bare-repository"]).is_ok_and(|out| out.trim() == "true")
 }
 
 /// The branch name `git init` starts with: `init.defaultBranch` from the user's config, else "main".
@@ -138,6 +152,10 @@ pub fn init_repo(path: &Path, branch: &str) -> GitResult<RepoInfo> {
     valid_branch_name(branch)?;
     if path.join(".git").exists() {
         return Err(format!("{} is already a git repository", path.display()));
+    }
+    // `git init` in a bare repository would hide it behind a new, empty repository.
+    if is_bare(path) {
+        return Err(format!("{} is inside a bare repository", path.display()));
     }
     if path.exists() && !path.is_dir() {
         return Err(format!("{} is not a folder", path.display()));
@@ -2260,6 +2278,18 @@ mod tests {
         let err = open_repo(&dir).err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.unwrap().contains("not inside a git repository"));
+    }
+
+    #[test]
+    fn bare_repositories_are_repositories_but_not_opened_or_initialized() {
+        let origin = bare("bare-detect");
+        let objects = origin.dir.join("objects");
+        assert!(is_repository(&origin.dir));
+        assert!(is_repository(&objects));
+        assert!(open_repo(&origin.dir).err().unwrap().contains("bare repository"));
+        assert!(init_repo(&origin.dir, "main").err().unwrap().contains("bare repository"));
+        assert!(init_repo(&objects, "main").err().unwrap().contains("bare repository"));
+        assert!(!origin.dir.join(".git").exists() && !objects.join(".git").exists());
     }
 
     #[test]
