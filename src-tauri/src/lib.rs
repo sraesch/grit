@@ -163,6 +163,26 @@ async fn commit(repo: String, message: String, amend: bool) -> GitResult<()> {
 }
 
 #[tauri::command]
+async fn add_remote(repo: String, name: String, url: String) -> GitResult<()> {
+    blocking(move || git::add_remote(&PathBuf::from(repo), &name, &url)).await
+}
+
+#[tauri::command]
+async fn rename_remote(repo: String, name: String, new_name: String) -> GitResult<()> {
+    blocking(move || git::rename_remote(&PathBuf::from(repo), &name, &new_name)).await
+}
+
+#[tauri::command]
+async fn set_remote_url(repo: String, name: String, url: String) -> GitResult<()> {
+    blocking(move || git::set_remote_url(&PathBuf::from(repo), &name, &url)).await
+}
+
+#[tauri::command]
+async fn remove_remote(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::remove_remote(&PathBuf::from(repo), &name)).await
+}
+
+#[tauri::command]
 async fn checkout_branch(repo: String, branch: String) -> GitResult<()> {
     blocking(move || git::checkout(&PathBuf::from(repo), &branch)).await
 }
@@ -418,6 +438,10 @@ pub fn run() {
             stash,
             apply_stash,
             drop_stash,
+            add_remote,
+            rename_remote,
+            set_remote_url,
+            remove_remote,
             fetch,
             pull,
             push,

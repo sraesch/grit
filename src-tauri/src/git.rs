@@ -711,6 +711,33 @@ pub fn remotes(repo: &Path) -> GitResult<Vec<Remote>> {
     Ok(parse_remotes(&run(repo, &["remote", "-v"])?))
 }
 
+/// Adds a remote. git rejects invalid names and names that are taken.
+pub fn add_remote(repo: &Path, name: &str, url: &str) -> GitResult<()> {
+    let name = plain_arg(name.trim(), "remote name")?;
+    let url = plain_arg(url.trim(), "remote URL")?;
+    run(repo, &["remote", "add", "--", name, url]).map(drop)
+}
+
+/// Renames a remote, along with its remote-tracking branches and the upstreams that point at them.
+pub fn rename_remote(repo: &Path, old: &str, new: &str) -> GitResult<()> {
+    let old = plain_arg(old, "remote name")?;
+    let new = plain_arg(new.trim(), "remote name")?;
+    run(repo, &["remote", "rename", "--", old, new]).map(drop)
+}
+
+/// Changes the URL a remote fetches from (and pushes to, unless it has a separate push URL).
+pub fn set_remote_url(repo: &Path, name: &str, url: &str) -> GitResult<()> {
+    let name = plain_arg(name, "remote name")?;
+    let url = plain_arg(url.trim(), "remote URL")?;
+    run(repo, &["remote", "set-url", "--", name, url]).map(drop)
+}
+
+/// Removes a remote with its remote-tracking branches; local branches that tracked it lose their upstream.
+pub fn remove_remote(repo: &Path, name: &str) -> GitResult<()> {
+    let name = plain_arg(name, "remote name")?;
+    run(repo, &["remote", "remove", "--", name]).map(drop)
+}
+
 /// Parses `git remote -v`: `origin\thttps://host/repo.git (fetch)`, one fetch and one push line per remote.
 fn parse_remotes(out: &str) -> Vec<Remote> {
     out.lines()
@@ -3797,6 +3824,45 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         assert_eq!(branch_head.unwrap().trim(), "feature");
         assert!(!missing.unwrap().is_empty());
         assert!(!dest_left, "a failed clone leaves no folder behind");
+    }
+
+    #[test]
+    fn adds_renames_edits_and_removes_remotes() {
+        let (origin, ours, _theirs) = shared("remotes");
+        let url = origin.dir.to_str().unwrap();
+        ours.git(&["branch", "-q", "-u", "origin/main", "main"]);
+
+        add_remote(&ours.dir, "backup", url).unwrap();
+        assert!(
+            add_remote(&ours.dir, "backup", url)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(add_remote(&ours.dir, "--evil", url).is_err());
+        assert!(add_remote(&ours.dir, "bad name", url).is_err());
+        let names = |r: &TestRepo| remotes(&r.dir).unwrap().into_iter().map(|r| r.name).collect::<Vec<_>>();
+        assert_eq!(names(&ours), ["backup", "origin"]);
+
+        rename_remote(&ours.dir, "origin", "upstream").unwrap();
+        assert_eq!(names(&ours), ["backup", "upstream"]);
+        // The upstream of main and the remote-tracking branches move along.
+        assert_eq!(
+            ours.git(&["rev-parse", "--abbrev-ref", "main@{u}"]).trim(),
+            "upstream/main"
+        );
+
+        set_remote_url(&ours.dir, "backup", "https://example.com/x.git").unwrap();
+        let backup = remotes(&ours.dir)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "backup")
+            .unwrap();
+        assert_eq!(backup.url, "https://example.com/x.git");
+
+        remove_remote(&ours.dir, "upstream").unwrap();
+        assert_eq!(names(&ours), ["backup"]);
+        assert!(ours.git(&["for-each-ref", "refs/remotes/upstream"]).trim().is_empty());
+        assert!(remove_remote(&ours.dir, "nope").is_err());
     }
 
     fn push_opts(branch: &str, target: &str) -> PushOptions {

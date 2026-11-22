@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Branch, Branches, Operation, PullResult, PushResult } from "./api";
 import {
+  groupRemoteBranches,
   autoFetchDue,
   defaultFetchRemote,
   defaultPushTarget,
@@ -30,6 +31,30 @@ describe("splitRemoteBranch", () => {
     expect(splitRemoteBranch("upstream/main", [remote("origin")])).toBeNull();
     expect(splitRemoteBranch("origin/", [remote("origin")])).toBeNull();
     expect(splitRemoteBranch("origin", [remote("origin")])).toBeNull();
+  });
+});
+
+describe("groupRemoteBranches", () => {
+  it("groups by remote, keeps remotes without branches and handles stray branches", () => {
+    const remotes = [
+      { name: "origin", url: "u1" },
+      { name: "team/fork", url: "u2" },
+      { name: "empty", url: "u3" },
+    ];
+    const names = ["origin/main", "team/fork/feature/x", "origin/feature/y", "gone/old"].map((name) => ({ name }));
+    expect(groupRemoteBranches(names, remotes)).toEqual([
+      {
+        remote: "origin",
+        url: "u1",
+        branches: [
+          { branch: { name: "origin/main" }, shortName: "main" },
+          { branch: { name: "origin/feature/y" }, shortName: "feature/y" },
+        ],
+      },
+      { remote: "team/fork", url: "u2", branches: [{ branch: { name: "team/fork/feature/x" }, shortName: "feature/x" }] },
+      { remote: "empty", url: "u3", branches: [] },
+      { remote: "gone", url: null, branches: [{ branch: { name: "gone/old" }, shortName: "old" }] },
+    ]);
   });
 });
 

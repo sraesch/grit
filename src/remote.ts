@@ -204,6 +204,32 @@ export interface StashPrefs {
   keepIndex: boolean;
 }
 
+export interface AddRemotePrefs {
+  /** Fetch a remote right after adding it. */
+  fetch: boolean;
+}
+
+/**
+ * Remote branches grouped by remote, in the order of `remotes`; every remote appears, even
+ * without fetched branches. Branches of a remote that no longer exists are grouped by their
+ * first path segment.
+ */
+export function groupRemoteBranches<B extends { name: string }>(
+  remoteBranches: B[],
+  remotes: Remote[],
+): { remote: string; url: string | null; branches: { branch: B; shortName: string }[] }[] {
+  const groups = new Map(remotes.map((r) => [r.name, { remote: r.name, url: r.url as string | null, branches: [] as { branch: B; shortName: string }[] }]));
+  for (const branch of remoteBranches) {
+    const split = splitRemoteBranch(branch.name, remotes);
+    const slash = branch.name.indexOf("/");
+    const remote = split?.remote ?? (slash > 0 ? branch.name.slice(0, slash) : branch.name);
+    const shortName = split?.branch ?? branch.name.slice(slash + 1);
+    if (!groups.has(remote)) groups.set(remote, { remote, url: null, branches: [] });
+    groups.get(remote)!.branches.push({ branch, shortName });
+  }
+  return [...groups.values()];
+}
+
 export interface MergePrefs {
   mode: MergeMode;
   autostash: boolean;
@@ -245,4 +271,6 @@ export const prefs = {
   saveMerge: (p: MergePrefs) => savePrefs("mergeOptions", p),
   stash: () => readPrefs<StashPrefs>("stashOptions", { includeUntracked: true, keepIndex: false }),
   saveStash: (p: StashPrefs) => savePrefs("stashOptions", p),
+  addRemote: () => readPrefs<AddRemotePrefs>("addRemoteOptions", { fetch: true }),
+  saveAddRemote: (p: AddRemotePrefs) => savePrefs("addRemoteOptions", p),
 };

@@ -16,8 +16,14 @@ const branches: Branches = {
     { name: "origin/new-work", sha: "c", current: false, upstream: null, track: null },
   ],
   tags: [{ name: "v1.0", sha: "a", current: false, upstream: null, track: null }],
-  remotes: [{ name: "origin", url: "git@example.com:demo.git" }],
+  remotes: [
+    { name: "origin", url: "git@example.com:demo.git" },
+    { name: "backup", url: "/srv/backup.git" },
+  ],
 };
+
+/** A remote branch row, found by its full name in the tooltip. */
+const remoteBranch = (name: string) => screen.getByTitle(new RegExp(`^${name}\\s`));
 
 const stashes = [makeStash("s1", "half-done login"), makeStash("s2", "experiment", { index: 1 })];
 
@@ -29,6 +35,10 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     onSelectStash: vi.fn(),
     onApplyStash: vi.fn(),
     onDropStash: vi.fn(),
+    onAddRemote: vi.fn(),
+    onFetchRemote: vi.fn(),
+    onEditRemote: vi.fn(),
+    onRemoveRemote: vi.fn(),
   };
   render(
     <Sidebar
@@ -73,12 +83,12 @@ describe("Sidebar", () => {
     await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
 
     // origin/main is tracked by the current branch: nothing to do.
-    await userEvent.dblClick(screen.getByText("origin/main"));
+    await userEvent.dblClick(remoteBranch("origin/main"));
     expect(onSwitch).not.toHaveBeenCalled();
     // A local branch with the same name exists: switch to it instead of creating another.
-    await userEvent.dblClick(screen.getByText("origin/feature"));
+    await userEvent.dblClick(remoteBranch("origin/feature"));
     expect(onSwitch).toHaveBeenLastCalledWith({ kind: "local", name: "feature" });
-    await userEvent.dblClick(screen.getByText("origin/new-work"));
+    await userEvent.dblClick(remoteBranch("origin/new-work"));
     expect(onSwitch).toHaveBeenLastCalledWith({ kind: "remote", name: "origin/new-work", localName: "new-work" });
   });
 
@@ -115,8 +125,54 @@ describe("Sidebar", () => {
   it("has no context menu for remote branches and tags", async () => {
     setup();
     await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
-    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("origin/new-work") });
+    await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/new-work") });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("lists remote branches under their remote, by their short name", async () => {
+    setup();
+    const group = screen.getByRole("button", { name: /Remotes/ });
+    expect(group).toHaveTextContent("2");
+    await userEvent.click(group);
+
+    const origin = screen.getByRole("list", { name: "Branches on origin" });
+    expect(within(origin).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["main", "feature", "new-work"]);
+    expect(screen.getByRole("list", { name: "Branches on backup" })).toHaveTextContent("No branches fetched");
+    const originRow = screen.getByRole("button", { name: "origin" });
+    expect(originRow).toHaveAttribute("title", "git@example.com:demo.git");
+
+    await userEvent.click(originRow);
+    expect(originRow).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "Branches on origin" })).not.toBeInTheDocument();
+  });
+
+  it("fetches, edits, renames and removes a remote from its context menu", async () => {
+    const { onFetchRemote, onEditRemote, onRemoveRemote, onAddRemote } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    const origin = branches.remotes[0];
+    const choose = async (item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByRole("button", { name: "origin" }) });
+      await userEvent.click(within(screen.getByRole("menu", { name: "Remote origin" })).getByRole("menuitem", { name: item }));
+    };
+    await choose("Fetch");
+    expect(onFetchRemote).toHaveBeenCalledWith(origin);
+    await choose("Edit URL…");
+    expect(onEditRemote).toHaveBeenLastCalledWith(origin, "url");
+    await choose("Rename…");
+    expect(onEditRemote).toHaveBeenLastCalledWith(origin, "name");
+    await choose("Remove…");
+    expect(onRemoveRemote).toHaveBeenCalledWith(origin);
+    await choose("Add Remote…");
+    expect(onAddRemote).toHaveBeenCalledTimes(1);
+  });
+
+  it("adds a remote from the group's + button and its context menu", async () => {
+    const { onAddRemote } = setup();
+    await userEvent.click(screen.getByRole("button", { name: "Add Remote…" }));
+    expect(onAddRemote).toHaveBeenCalledTimes(1);
+    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByRole("button", { name: /Remotes/ }) });
+    await userEvent.click(within(screen.getByRole("menu", { name: "Remotes" })).getByRole("menuitem", { name: "Add Remote…" }));
+    expect(onAddRemote).toHaveBeenCalledTimes(2);
   });
 
   it("lists stashes, shows one on click and applies, pops or deletes it from its context menu", async () => {
