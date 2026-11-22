@@ -1168,6 +1168,23 @@ button.primary.danger:hover:not(:disabled) {
   padding-left: 112px;
   margin-top: 4px;
 }
+/* Kept at the right edge of the visible pane, however far the diff scrolls sideways. */
+.hunk-actions {
+  position: sticky;
+  right: 0;
+  margin-left: auto;
+  padding: 0 8px 0 12px;
+  background: var(--hunk-bg);
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+}
+.hunk-actions button {
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 16px;
+}
 .diff-meta {
   color: var(--text-muted);
   padding-left: 112px;

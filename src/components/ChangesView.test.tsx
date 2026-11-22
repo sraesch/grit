@@ -31,6 +31,7 @@ describe("ChangesView", () => {
       commit: () => undefined,
       discard: () => undefined,
       add_to_gitignore: () => undefined,
+      apply_selection: () => undefined,
     });
   });
 
@@ -370,5 +371,73 @@ describe("ChangesView", () => {
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     fireEvent.contextMenu(screen.getByText("src"));
     expect(screen.queryByRole("menuitem", { name: "Ignore Folder…" })).toBeNull();
+  });
+  it("stages and discards hunks of an unstaged file", async () => {
+    const { onChanged } = setup();
+    await userEvent.click(screen.getByText("edit.ts"));
+    await userEvent.click(await screen.findByRole("button", { name: "Stage hunk" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(invokeMock).toHaveBeenCalledWith("apply_selection", {
+      repo: "/repo",
+      path: "src/edit.ts",
+      staged: false,
+      untracked: false,
+      action: "stage",
+      selection: [{ index: 0, header: "@@ -1 +1 @@", lines: null }],
+    });
+
+    // Discarding a hunk needs no confirmation.
+    await userEvent.click(screen.getByRole("button", { name: "Discard hunk" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+    expect(invokeMock).toHaveBeenLastCalledWith("apply_selection", expect.objectContaining({ action: "discard" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("unstages hunks of a staged file", async () => {
+    setup();
+    await userEvent.click(screen.getByText("ready.rs"));
+    expect(await screen.findByRole("button", { name: "Unstage hunk" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage hunk" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Unstage hunk" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "apply_selection",
+        expect.objectContaining({ path: "ready.rs", staged: true, action: "unstage" }),
+      ),
+    );
+  });
+
+  it("stages but doesn't discard hunks of an untracked file", async () => {
+    setup();
+    await userEvent.click(screen.getByText("fresh.txt"));
+    await userEvent.click(await screen.findByRole("button", { name: "Stage hunk" }));
+    expect(screen.queryByRole("button", { name: "Discard hunk" })).toBeNull();
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "apply_selection",
+        expect.objectContaining({ path: "fresh.txt", untracked: true, action: "stage" }),
+      ),
+    );
+  });
+
+  it("offers no hunk actions on conflicts", async () => {
+    setup({ status: makeStatus({ conflicted: [file("c.txt", "U")] }) });
+    await userEvent.click(screen.getByText("c.txt"));
+    expect(await screen.findByText("new c.txt")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /hunk/ })).toBeNull();
+  });
+
+  it("reports a failed hunk action and refreshes", async () => {
+    mockBackend(invokeMock, {
+      get_working_diff: () => "@@ -1 +1 @@\n-a\n+b\n",
+      apply_selection: () => {
+        throw "The file changed since its diff was shown.";
+      },
+    });
+    const { onChanged, onError } = setup();
+    await userEvent.click(screen.getByText("edit.ts"));
+    await userEvent.click(await screen.findByRole("button", { name: "Stage hunk" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("The file changed since its diff was shown."));
+    expect(onChanged).toHaveBeenCalled();
   });
 });

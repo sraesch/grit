@@ -277,6 +277,17 @@ export interface GitProgress {
   text: string;
 }
 
+/** What to do with selected parts of a diff: staging and discarding take unstaged changes, unstaging staged ones. */
+export type PatchAction = "stage" | "unstage" | "discard";
+
+/** Selected changes in one hunk of a diff (see `DiffHunk` in diff.ts). */
+export interface HunkSelection {
+  index: number;
+  header: string;
+  /** Offsets of the selected body lines in the hunk; null selects the whole hunk. */
+  lines: number[] | null;
+}
+
 export interface Settings {
   /** Folder that holds cloned repositories; the Open dialog starts here. Null means the home folder. */
   reposDir: string | null;
@@ -313,6 +324,18 @@ export const api = {
   /** Reverts the unstaged changes of `tracked` files (staged changes stay) and deletes `untracked` files. */
   discard: (repo: string, tracked: string[], untracked: string[]) =>
     invoke<void>("discard", { repo, tracked, untracked }),
+  /**
+   * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
+   * longer matches the selection.
+   */
+  applySelection: (
+    repo: string,
+    path: string,
+    staged: boolean,
+    untracked: boolean,
+    action: PatchAction,
+    selection: HunkSelection[],
+  ) => invoke<void>("apply_selection", { repo, path, staged, untracked, action, selection }),
   /** Appends `pattern` to the .gitignore in the repository root, creating it if needed. */
   addToGitignore: (repo: string, pattern: string) => invoke<void>("add_to_gitignore", { repo, pattern }),
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),

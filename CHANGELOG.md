@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discard local changes without leaving grit: the Discard button on a file in Unstaged changes (or "Discard Changes…" in its context menu) throws away its unstaged changes and keeps the staged ones; on an untracked file it deletes the file. The Discard button on a folder does this for every file in it, and "Discard all…" in the section header for all unstaged changes and untracked files. A confirmation names the files first, since discarded changes can't be recovered. Conflicted files are never discarded
 - Right-clicking a file or folder in Local changes opens a menu to stage, unstage or discard it
+- Stage, unstage and discard single hunks: each hunk of a diff in Local changes has buttons to stage or discard it (unstaged changes) or to unstage it (staged changes). This works for untracked files too. Discarding a hunk takes effect right away. A file that changed since its diff was shown is never patched; the diff is refreshed instead. Truncated diffs (more than 5000 lines) and renamed files can only be staged as a whole
 - Ignore untracked files without editing `.gitignore` by hand: right-click an untracked file and choose "Ignore…" to ignore only this file, all files with its name, or all files with its extension; on a folder of untracked files, "Ignore Folder…" ignores only this folder or all folders with its name. The pattern can be adjusted before it is added to the `.gitignore` in the repository root, which is created if needed
 
 ## [0.4.2] - 2026-11-21

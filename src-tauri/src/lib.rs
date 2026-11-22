@@ -2,6 +2,7 @@ mod git;
 mod graph;
 #[cfg(target_os = "macos")]
 mod menu;
+mod patch;
 mod settings;
 mod watcher;
 
@@ -12,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    MergeMode, MergeOptions, MergeResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
+    MergeMode, MergeOptions, MergeResult, PatchAction, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
     RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
@@ -108,6 +109,18 @@ async fn unstage_all(repo: String) -> GitResult<()> {
 #[tauri::command]
 async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> GitResult<()> {
     blocking(move || git::discard(&PathBuf::from(repo), &tracked, &untracked)).await
+}
+
+#[tauri::command]
+async fn apply_selection(
+    repo: String,
+    path: String,
+    staged: bool,
+    untracked: bool,
+    action: PatchAction,
+    selection: Vec<patch::HunkSelection>,
+) -> GitResult<()> {
+    blocking(move || git::apply_selection(&PathBuf::from(repo), &path, staged, untracked, action, &selection)).await
 }
 
 #[tauri::command]
@@ -361,6 +374,7 @@ pub fn run() {
             unstage_all,
             discard,
             add_to_gitignore,
+            apply_selection,
             commit,
             checkout_branch,
             checkout_remote_branch,
