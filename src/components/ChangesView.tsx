@@ -46,14 +46,20 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const mergeMessage = merging || squashing ? status?.operation?.message : null;
 
   // Offer the prepared message of a merge or squash merge in progress (e.g. after a pull with conflicts), unless
-  // something is typed already. Each message is offered once, so clearing it sticks.
+  // something is typed already. Each message is offered once, so clearing it sticks. When the operation ends
+  // without a commit (aborted, or finished outside grit), the offered message is taken back unless it was edited.
   const offeredMessage = useRef<string | null>(null);
+  const hasStatus = status != null;
   useEffect(() => {
     if (mergeMessage && mergeMessage !== offeredMessage.current) {
       offeredMessage.current = mergeMessage;
       setMessage((current) => (current.trim() ? current : mergeMessage));
+    } else if (!mergeMessage && hasStatus && offeredMessage.current !== null) {
+      const offered = offeredMessage.current;
+      offeredMessage.current = null;
+      setMessage((current) => (current === offered ? "" : current));
     }
-  }, [mergeMessage]);
+  }, [mergeMessage, hasStatus]);
 
   // Drop the selection once the file no longer appears in the list it was selected from.
   useEffect(() => {
