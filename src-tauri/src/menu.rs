@@ -1,18 +1,19 @@
 //! The macOS app menu: Tauri's default menu plus "Settings…" and the File menu's entries for
-//! opening and creating repositories, which the frontend carries out.
+//! opening, cloning and creating repositories, which the frontend carries out.
 
 use tauri::menu::{Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// Menu item ids and the event each one emits to the frontend.
-const EVENTS: [(&str, &str); 3] = [
+const EVENTS: [(&str, &str); 4] = [
     ("settings", "open-settings"),
     ("open-repository", "open-repository"),
+    ("clone-repository", "clone-repository"),
     ("new-repository", "new-repository"),
 ];
 
 /// The default menu with "Settings…" (⌘,) after "About grit", where macOS apps keep it, and
-/// "New Repository…" and "Open…" at the top of the File menu.
+/// "New Repository…", "Open…" and "Clone…" at the top of the File menu.
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
     let items = menu.items()?;
@@ -28,7 +29,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     if let Some(file) = file {
         let new = MenuItem::with_id(app, "new-repository", "New Repository…", true, None::<&str>)?;
         let open = MenuItem::with_id(app, "open-repository", "Open…", true, Some("CmdOrCtrl+O"))?;
-        file.insert_items(&[&new, &open, &PredefinedMenuItem::separator(app)?], 0)?;
+        let clone = MenuItem::with_id(app, "clone-repository", "Clone…", true, None::<&str>)?;
+        file.insert_items(&[&new, &open, &clone, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     Ok(menu)
 }

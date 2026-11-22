@@ -57,6 +57,17 @@ async fn init_repo(path: String, branch: String) -> GitResult<RepoInfo> {
     blocking(move || git::init_repo(&PathBuf::from(path), &branch)).await
 }
 
+/// Clones a repository; progress arrives as `git-progress` events whose `root` is `dest`.
+/// The frontend then opens it with `open_repo`.
+#[tauri::command]
+async fn clone_repo(app: AppHandle, url: String, dest: String, branch: Option<String>) -> GitResult<RepoInfo> {
+    blocking(move || {
+        let mut progress = progress_emitter(app, dest.clone());
+        git::clone_repo(&url, &PathBuf::from(&dest), branch.as_deref(), &mut progress)
+    })
+    .await
+}
+
 /// Stops watching a repository whose tab was closed.
 #[tauri::command]
 fn close_repo(watch: State<'_, WatchState>, root: String) -> GitResult<()> {
@@ -382,6 +393,7 @@ pub fn run() {
             is_repository,
             default_branch_name,
             init_repo,
+            clone_repo,
             get_status,
             get_log,
             get_branches,

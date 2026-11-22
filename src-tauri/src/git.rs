@@ -1312,6 +1312,45 @@ fn is_progress(line: &str) -> bool {
     PHASES.iter().any(|p| l.starts_with(p)) || (l.contains("% (") && l.contains(')'))
 }
 
+/// Clones `url` into `dest`, which must not exist yet or be an empty folder, optionally checking
+/// out `branch` instead of the remote's default branch. Unlike background fetches, cloning may
+/// ask for credentials through credential helpers and askpass programs.
+pub fn clone_repo(
+    url: &str,
+    dest: &Path,
+    branch: Option<&str>,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<RepoInfo> {
+    let url = plain_arg(url.trim(), "repository URL")?;
+    if !dest.is_absolute() {
+        return Err(format!("{} is not an absolute path", dest.display()));
+    }
+    if dest.exists() {
+        let empty = std::fs::read_dir(dest)
+            .map_err(|_| format!("{} is not a folder", dest.display()))?
+            .next()
+            .is_none();
+        if !empty {
+            return Err(format!("{} already exists and isn't empty", dest.display()));
+        }
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| format!("The folder {} doesn't exist", dest.parent().unwrap_or(dest).display()))?;
+    let dest_arg = dest.to_string_lossy();
+    let mut args = vec!["clone", "--progress"];
+    if let Some(branch) = branch.map(str::trim).filter(|b| !b.is_empty()) {
+        args.extend(["--branch", branch_arg(branch)?]);
+    }
+    args.extend(["--", url, &dest_arg]);
+    let out = exec_streaming(parent, &args, &[("LC_ALL", "C")], on_progress)?;
+    if out.code != 0 {
+        return Err(error_text(&out.stderr, "Cloning failed"));
+    }
+    open_repo(dest)
+}
+
 /// Environment for network commands. Background fetches must never pop up a prompt: ssh runs
 /// in batch mode (unless the user configured their own ssh command) and Git Credential Manager
 /// stays non-interactive. Credential helpers and ssh agents still work.
@@ -3724,6 +3763,40 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         let ours = TestRepo::clone_of(&origin, &format!("{name}-ours"));
         let theirs = TestRepo::clone_of(&origin, &format!("{name}-theirs"));
         (origin, ours, theirs)
+    }
+
+    #[test]
+    fn clones_a_repository_with_progress_and_an_optional_branch() {
+        let (origin, ours, _theirs) = shared("clone");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        ours.write("feature.txt", "feature\n");
+        ours.commit_all("feature work");
+        ours.git(&["push", "-q", "origin", "feature"]);
+        let url = origin.dir.to_str().unwrap();
+
+        let dest = std::env::temp_dir().join(format!("grit-test-{}-clone-dest", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        let mut lines = Vec::new();
+        let info = clone_repo(url, &dest, None, &mut |l| lines.push(l.to_string()));
+        let head = run(&dest, &["symbolic-ref", "--short", "HEAD"]);
+        let not_empty = clone_repo(url, &dest, None, &mut |_| {}).err();
+        let _ = std::fs::remove_dir_all(&dest);
+
+        std::fs::create_dir_all(&dest).unwrap();
+        let on_branch = clone_repo(url, &dest, Some("feature"), &mut |_| {});
+        let branch_head = run(&dest, &["symbolic-ref", "--short", "HEAD"]);
+        let _ = std::fs::remove_dir_all(&dest);
+        let missing = clone_repo(&format!("{url}-missing"), &dest, None, &mut |_| {}).err();
+        let dest_left = dest.exists();
+
+        assert_eq!(info.unwrap().name, dest.file_name().unwrap().to_string_lossy());
+        assert_eq!(head.unwrap().trim(), "main");
+        assert!(lines.iter().any(|l| l.starts_with("Cloning into")), "{lines:?}");
+        assert!(not_empty.unwrap().contains("isn't empty"));
+        assert!(on_branch.is_ok());
+        assert_eq!(branch_head.unwrap().trim(), "feature");
+        assert!(!missing.unwrap().is_empty());
+        assert!(!dest_left, "a failed clone leaves no folder behind");
     }
 
     fn push_opts(branch: &str, target: &str) -> PushOptions {
