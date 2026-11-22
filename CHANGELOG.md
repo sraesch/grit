@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-22
+
 ### Added
 
-- Branches with path-like names such as `ftr/gitignore` are nested in collapsible folders in the sidebar, for local branches, the branches of each remote and tags alike. Each folder has a folder icon and shows how many branches it holds
 - Discard local changes without leaving grit: the Discard button on a file in Unstaged changes (or "Discard Changes…" in its context menu) throws away its unstaged changes and keeps the staged ones; on an untracked file it deletes the file. The Discard button on a folder does this for every file in it, and "Discard all…" in the section header for all unstaged changes and untracked files. A confirmation names the files first, since discarded changes can't be recovered. Conflicted files are never discarded
 - Right-clicking a file or folder in Local changes opens a menu to stage, unstage or discard it
 - Stage, unstage and discard single hunks: each hunk of a diff in Local changes has buttons to stage or discard it (unstaged changes) or to unstage it (staged changes). This works for untracked files too. Discarding a hunk takes effect right away. A file that changed since its diff was shown is never patched; the diff is refreshed instead. Truncated diffs (more than 5000 lines) and renamed files can only be staged as a whole
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The "+" in the tab bar opens a menu to open, clone or create a repository; the macOS File menu has "New Repository…", "Open…" and "Clone…" too
 - Manage remotes without the command line: the Remotes group in the sidebar lists each remote (hover for its URL) with its remote branches beneath it, and a remote without fetched branches shows up too. Its "+" button (or right-click on the group) adds a remote by name and URL and optionally fetches it right away. Right-clicking a remote fetches it, edits its URL, renames it (its remote branches and the local branches tracking them follow) or removes it after a confirmation that names the local branches that lose their upstream
 - Right-clicking a remote branch in the sidebar opens a menu to check it out (through a local branch tracking it), merge it into the current branch, copy its name, or delete it on the remote after a confirmation. Local branches tracking it are kept, and nothing is deleted when someone pushed to the branch since the last fetch
+- Branches with path-like names such as `ftr/gitignore` are nested in collapsible folders in the sidebar, for local branches, the branches of each remote and tags alike. Each folder has a folder icon and shows how many branches it holds
 
 ### Fixed
 
@@ -103,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sraesch/grit/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/sraesch/grit/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sraesch/grit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/sraesch/grit/compare/v0.3.0...v0.4.0
