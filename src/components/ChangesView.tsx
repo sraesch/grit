@@ -1,8 +1,9 @@
 import { KeyboardEvent, useEffect, useRef, useState } from "react";
-import { api, errorMessage, FileChange, Status } from "../api";
+import { api, errorMessage, FileChange, HunkSelection, PatchAction, Status } from "../api";
+import { DiffHunk } from "../diff";
 import { IgnoreTarget } from "../gitignore";
 import { ContextMenu, MenuItem } from "./ContextMenu";
-import { DiffView } from "./DiffView";
+import { DiffView, HunkAction } from "./DiffView";
 import { DiscardDialog } from "./DiscardDialog";
 import { FileList, RowAction, RowTarget } from "./FileList";
 import { IgnoreDialog } from "./IgnoreDialog";
@@ -12,7 +13,6 @@ import { Split } from "./Split";
 interface Selection {
   path: string;
   staged: boolean;
-  untracked: boolean;
 }
 
 interface ChangesViewProps {
@@ -70,6 +70,11 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     }
   }, [preview]);
 
+  // Whether the selected file is untracked, from the current status: staging part of it makes it tracked.
+  const selectedUntracked =
+    !!selection && !selection.staged && unstaged.some((f) => f.path === selection.path && f.status === "?");
+  const selectedConflict = !!selection && !selection.staged && conflicted.some((f) => f.path === selection.path);
+
   // Reload the diff whenever the selection or the repository status changes.
   useEffect(() => {
     if (!selection) {
@@ -78,8 +83,10 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
       return;
     }
     let cancelled = false;
+    const untracked =
+      !selection.staged && !!status?.unstaged.some((f) => f.path === selection.path && f.status === "?");
     api
-      .workingDiff(repo, selection.path, selection.staged, selection.untracked)
+      .workingDiff(repo, selection.path, selection.staged, untracked)
       .then((d) => {
         if (!cancelled) {
           setDiff(d);
@@ -104,8 +111,40 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     }
   }
 
-  const select = (f: FileChange, isStaged: boolean) =>
-    setSelection({ path: f.path, staged: isStaged, untracked: f.status === "?" });
+  const select = (f: FileChange, isStaged: boolean) => setSelection({ path: f.path, staged: isStaged });
+
+  /** Applies hunks or lines of the shown diff. Refreshes even on failure, e.g. when the diff was stale. */
+  async function applySelection(action: PatchAction, parts: HunkSelection[]) {
+    if (!selection || parts.length === 0) return;
+    setBusy(true);
+    try {
+      await api.applySelection(repo, selection.path, selection.staged, selectedUntracked, action, parts);
+    } catch (e) {
+      onError(errorMessage(e));
+    } finally {
+      setBusy(false);
+      onChanged();
+    }
+  }
+
+  const applyHunk = (action: PatchAction) => (hunk: DiffHunk) =>
+    applySelection(action, [{ index: hunk.index, header: hunk.header, lines: null }]);
+
+  let hunkActions: HunkAction[] | undefined;
+  if (selection?.staged) {
+    hunkActions = [{ label: "Unstage hunk", onClick: applyHunk("unstage") }];
+  } else if (selection && !selectedConflict) {
+    hunkActions = [{ label: "Stage hunk", onClick: applyHunk("stage") }];
+    // An untracked file's diff is one hunk, the whole file: it is deleted from its row, with a confirmation.
+    if (!selectedUntracked) {
+      hunkActions.push({
+        label: "Discard hunk",
+        danger: true,
+        title: "Throw away the changes in this hunk",
+        onClick: applyHunk("discard"),
+      });
+    }
+  }
 
   const stageFiles = (files: FileChange[]) => run(() => api.stage(repo, files.map((f) => f.path)));
   const unstageFiles = (files: FileChange[]) =>
@@ -340,6 +379,8 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
           diff={selection ? diff : null}
           error={diffError}
           title={selection ? `${selection.path}${selection.staged ? "  (staged)" : ""}` : undefined}
+          hunkActions={hunkActions}
+          hunkActionsDisabled={busy}
         />
       </Split>
       {menu && (

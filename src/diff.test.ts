@@ -36,6 +36,33 @@ describe("parseDiff", () => {
     expect(lines[8]).toMatchObject({ text: "eleven", oldNo: 11, newNo: 12 });
   });
 
+  it("indexes hunks and the body lines within them", () => {
+    const { lines, hunks, renamed } = parseDiff(SAMPLE);
+    expect(renamed).toBe(false);
+    expect(hunks).toEqual([
+      { index: 0, header: "@@ -1,3 +1,3 @@ header" },
+      { index: 1, header: "@@ -10,2 +10,3 @@" },
+    ]);
+    expect(lines.map((l) => [l.hunk, l.offset])).toEqual([
+      [0, undefined],
+      [0, 0],
+      [0, 1],
+      [0, 2],
+      [0, 3],
+      [1, undefined],
+      [1, 0],
+      [1, 1],
+      [1, 2],
+      [1, 3],
+    ]);
+  });
+
+  it("detects renames and copies", () => {
+    const diff = "diff --git a/a b/b\nsimilarity index 90%\nrename from a\nrename to b\n@@ -1 +1 @@\n-x\n+y\n";
+    expect(parseDiff(diff).renamed).toBe(true);
+    expect(parseDiff(diff.replace("rename from", "copy from")).renamed).toBe(true);
+  });
+
   it("detects binary files", () => {
     const diff = "diff --git a/img.png b/img.png\nindex 1..2 100644\nBinary files a/img.png and b/img.png differ\n";
     const { lines, binary } = parseDiff(diff);

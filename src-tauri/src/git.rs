@@ -13,6 +13,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{self, GraphRow};
+use crate::patch::{self, HunkSelection};
 
 pub type GitResult<T> = Result<T, String>;
 
@@ -41,7 +42,7 @@ fn run(repo: &Path, args: &[&str]) -> GitResult<String> {
 }
 
 fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<String> {
-    exec(repo, args, stdin, ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
+    exec(repo, args, stdin.map(str::as_bytes), ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Runs git and returns its stdout unmodified, for binary content such as images.
@@ -49,7 +50,7 @@ fn run_bytes(repo: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
     exec(repo, args, None, &[0])
 }
 
-fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
+fn exec(repo: &Path, args: &[&str], stdin: Option<&[u8]>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
     let mut cmd = git_command(repo);
     cmd.args(args)
         .stdout(Stdio::piped())
@@ -63,7 +64,7 @@ fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> Gi
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(input.as_bytes())
+            .write_all(input)
             .map_err(|e| e.to_string())?;
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
@@ -715,6 +716,89 @@ pub fn discard(repo: &Path, tracked: &[String], untracked: &[String]) -> GitResu
         remove_empty_parents(repo, untracked);
     }
     Ok(())
+}
+
+/// What to do with the selected parts of a diff.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum PatchAction {
+    /// Unstaged changes into the index.
+    Stage,
+    /// Staged changes out of the index.
+    Unstage,
+    /// Unstaged changes out of the working tree.
+    Discard,
+}
+
+/// Diffs with more lines than this aren't shown in full, so parts of them can't be selected.
+const MAX_PATCH_LINES: usize = 5000;
+
+/// Stages, unstages or discards the selected hunks or lines of one file's diff.
+///
+/// The diff is generated again, exactly as `working_diff` shows it, and the selection is checked
+/// against it, so a file that changed since it was shown is refused instead of patched wrongly.
+/// An untracked file is first added with intent to add (`git add -N`), so it has a diff to take
+/// parts of; after a discard, or if anything fails, it is untracked again.
+pub fn apply_selection(
+    repo: &Path,
+    path: &str,
+    staged: bool,
+    untracked: bool,
+    action: PatchAction,
+    selection: &[HunkSelection],
+) -> GitResult<()> {
+    if staged != (action == PatchAction::Unstage) {
+        return Err("Only staged changes can be unstaged, and only unstaged ones staged or discarded".into());
+    }
+    let intent_to_add = untracked && !staged;
+    if intent_to_add {
+        run(repo, &["--literal-pathspecs", "add", "-N", "--", path])?;
+    }
+    let result = apply_selection_to_diff(repo, path, staged, action, selection);
+    if intent_to_add && (result.is_err() || action == PatchAction::Discard) {
+        // Takes back the intent to add; what is left of the file is untracked again.
+        let _ = run(repo, &["--literal-pathspecs", "rm", "--cached", "-q", "--", path]);
+    }
+    result
+}
+
+fn apply_selection_to_diff(
+    repo: &Path,
+    path: &str,
+    staged: bool,
+    action: PatchAction,
+    selection: &[HunkSelection],
+) -> GitResult<()> {
+    let mut args = vec!["--literal-pathspecs", "diff", "-M"];
+    if staged {
+        args.push("--cached");
+    }
+    args.extend(["--", path]);
+    let diff = exec(repo, &args, None, &[0])?;
+    let parsed = patch::parse(&diff)?;
+    if parsed.hunks.is_empty() {
+        return Err(patch::STALE.into());
+    }
+    if patch::shown_lines(&parsed) > MAX_PATCH_LINES {
+        return Err("The diff is too large to stage parts of it".into());
+    }
+    let reverse = action != PatchAction::Stage;
+    let Some(built) = patch::build(&parsed, selection, reverse)? else {
+        return Ok(());
+    };
+    let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
+    if action != PatchAction::Discard {
+        args.push("--cached");
+    }
+    if reverse {
+        args.push("-R");
+    }
+    // Only a diff without context (diff.context=0) produces hunks git would otherwise refuse.
+    if !built.split(|&b| b == b'\n').any(|l| l.first() == Some(&b' ')) {
+        args.push("--unidiff-zero");
+    }
+    args.push("-");
+    exec(repo, &args, Some(&built), &[0]).map(drop)
 }
 
 /// Appends `pattern` as a line to the `.gitignore` in the repository root, creating the file
@@ -2266,6 +2350,319 @@ mod tests {
         assert!(add_to_gitignore(&repo.dir, "  ").is_err());
         assert!(add_to_gitignore(&repo.dir, "a\nb").is_err());
         assert!(!repo.dir.join(".gitignore").exists());
+    }
+
+    /// The hunk headers of a file's diff, as the frontend sees them.
+    fn hunk_headers(repo: &TestRepo, path: &str, staged: bool, untracked: bool) -> Vec<String> {
+        let diff = working_diff(&repo.dir, path, staged, untracked).unwrap();
+        patch::parse(diff.as_bytes())
+            .unwrap()
+            .hunks
+            .into_iter()
+            .map(|h| h.header)
+            .collect()
+    }
+
+    fn hunk(index: usize, header: &str, lines: Option<Vec<usize>>) -> HunkSelection {
+        HunkSelection {
+            index,
+            header: header.to_string(),
+            lines,
+        }
+    }
+
+    /// Twenty numbered lines; far enough apart, two edits make two hunks.
+    fn numbered(edit: impl Fn(usize) -> Option<String>) -> String {
+        (1..=20)
+            .map(|i| edit(i).unwrap_or_else(|| format!("line {i}")) + "\n")
+            .collect()
+    }
+
+    fn two_hunk_repo(name: &str) -> TestRepo {
+        let repo = TestRepo::new(name);
+        repo.write("f.txt", &numbered(|_| None));
+        repo.commit_all("initial");
+        repo.write(
+            "f.txt",
+            &numbered(|i| match i {
+                2 => Some("TWO".into()),
+                18 => Some("EIGHTEEN".into()),
+                _ => None,
+            }),
+        );
+        repo
+    }
+
+    #[test]
+    fn stages_unstages_and_discards_single_hunks() {
+        let repo = two_hunk_repo("hunks");
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        assert_eq!(headers.len(), 2);
+
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(1, &headers[1], None)],
+        )
+        .unwrap();
+        let cached = repo.git(&["diff", "--cached"]);
+        assert!(cached.contains("+EIGHTEEN") && !cached.contains("+TWO"), "{cached}");
+        let unstaged = repo.git(&["diff"]);
+        assert!(
+            unstaged.contains("+TWO") && !unstaged.contains("+EIGHTEEN"),
+            "{unstaged}"
+        );
+
+        let staged_headers = hunk_headers(&repo, "f.txt", true, false);
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            true,
+            false,
+            PatchAction::Unstage,
+            &[hunk(0, &staged_headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["diff", "--cached"]), "");
+
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        let content = repo.read("f.txt");
+        assert!(
+            content.contains("line 2\n") && content.contains("EIGHTEEN"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_hunk_that_changed_since_it_was_shown() {
+        let repo = two_hunk_repo("hunk-stale");
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        repo.write("f.txt", &numbered(|i| (i == 1).then(|| "ONE".into())));
+        let err = apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap_err();
+        assert_eq!(err, patch::STALE);
+        assert_eq!(repo.git(&["diff", "--cached"]), "");
+        let err = apply_selection(
+            &repo.dir,
+            "f.txt",
+            true,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn stages_and_discards_selected_lines_across_hunks() {
+        let repo = TestRepo::new("lines");
+        repo.write("f.txt", &numbered(|_| None));
+        repo.commit_all("initial");
+        repo.write(
+            "f.txt",
+            &numbered(|i| match i {
+                2 => Some("TWO\nextra a".into()),
+                18 => Some("EIGHTEEN\nextra b".into()),
+                _ => None,
+            }),
+        );
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        // Hunk bodies: context " line 1", "-line 2", "+TWO", "+extra a", context... (the first hunk
+        // starts at line 1, so it has one line of context before).
+        let diff = working_diff(&repo.dir, "f.txt", false, false).unwrap();
+        let parsed = patch::parse(diff.as_bytes()).unwrap();
+        let index_of = |h: usize, text: &str| parsed.hunks[h].lines.iter().position(|l| l == text.as_bytes()).unwrap();
+        let selection = [
+            hunk(0, &headers[0], Some(vec![index_of(0, "-line 2"), index_of(0, "+TWO")])),
+            hunk(1, &headers[1], Some(vec![index_of(1, "+extra b")])),
+        ];
+        apply_selection(&repo.dir, "f.txt", false, false, PatchAction::Stage, &selection).unwrap();
+        let index = repo.git(&["show", ":f.txt"]);
+        assert!(index.starts_with("line 1\nTWO\nline 3\n"), "{index}");
+        assert!(index.contains("line 18\nextra b\nline 19\n"), "{index}");
+        assert!(!index.contains("extra a") && !index.contains("EIGHTEEN"));
+
+        // Discard "extra a" from the working tree; the rest stays.
+        let diff = working_diff(&repo.dir, "f.txt", false, false).unwrap();
+        let parsed = patch::parse(diff.as_bytes()).unwrap();
+        let (h, i) = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .find_map(|(h, hk)| hk.lines.iter().position(|l| l == b"+extra a").map(|i| (h, i)))
+            .unwrap();
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(h, &parsed.hunks[h].header, Some(vec![i]))],
+        )
+        .unwrap();
+        let content = repo.read("f.txt");
+        assert!(!content.contains("extra a") && content.contains("TWO") && content.contains("EIGHTEEN"));
+    }
+
+    #[test]
+    fn stages_parts_of_untracked_files() {
+        let repo = TestRepo::new("untracked-parts");
+        repo.commit_all_initial();
+        repo.write("dir with space/n.txt", "x\ny\nz\n");
+        let path = "dir with space/n.txt";
+        let headers = hunk_headers(&repo, path, false, true);
+        assert_eq!(headers, ["@@ -0,0 +1,3 @@"]);
+
+        apply_selection(
+            &repo.dir,
+            path,
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], Some(vec![0, 2]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", &format!(":{path}")]), "x\nz\n");
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged[0].status, "A");
+        assert_eq!(st.unstaged[0].status, "M");
+
+        repo.write("w.txt", "a\nb\n");
+        let headers = hunk_headers(&repo, "w.txt", false, true);
+        apply_selection(
+            &repo.dir,
+            "w.txt",
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":w.txt"]), "a\nb\n");
+    }
+
+    #[test]
+    fn discarding_lines_of_an_untracked_file_keeps_it_untracked() {
+        let repo = TestRepo::new("untracked-discard");
+        repo.commit_all_initial();
+        repo.write("n.txt", "x\ny\nz\n");
+        let headers = hunk_headers(&repo, "n.txt", false, true);
+        apply_selection(
+            &repo.dir,
+            "n.txt",
+            false,
+            true,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], Some(vec![1]))],
+        )
+        .unwrap();
+        assert_eq!(repo.read("n.txt"), "x\nz\n");
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].status, "?");
+        assert!(st.staged.is_empty());
+
+        // A failed attempt leaves it untracked too.
+        let err = apply_selection(
+            &repo.dir,
+            "n.txt",
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, "@@ -0,0 +1,9 @@", None)],
+        );
+        assert!(err.is_err());
+        assert_eq!(status(&repo.dir).unwrap().unstaged[0].status, "?");
+    }
+
+    #[test]
+    fn unstages_lines_of_a_new_file() {
+        let repo = TestRepo::new("unstage-new-lines");
+        repo.commit_all_initial();
+        repo.write("s.txt", "p\nq\nr\n");
+        stage(&repo.dir, &["s.txt".into()]).unwrap();
+        let headers = hunk_headers(&repo, "s.txt", true, false);
+        apply_selection(
+            &repo.dir,
+            "s.txt",
+            true,
+            false,
+            PatchAction::Unstage,
+            &[hunk(0, &headers[0], Some(vec![1]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":s.txt"]), "p\nr\n");
+        assert_eq!(repo.read("s.txt"), "p\nq\nr\n");
+    }
+
+    #[test]
+    fn stages_parts_of_a_deleted_file() {
+        let repo = TestRepo::new("deleted-lines");
+        repo.write("d.txt", "x\ny\n");
+        repo.commit_all("initial");
+        std::fs::remove_file(repo.dir.join("d.txt")).unwrap();
+        let headers = hunk_headers(&repo, "d.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "d.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], Some(vec![0]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":d.txt"]), "y\n");
+        // Discarding the rest of the deletion brings the line back into the working tree.
+        let headers = hunk_headers(&repo, "d.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "d.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.read("d.txt"), "y\n");
+    }
+
+    #[test]
+    fn stages_hunks_with_crlf_and_without_a_final_newline() {
+        let repo = TestRepo::new("hunk-crlf");
+        repo.write_bytes("w.txt", b"a\r\nb\r\nc");
+        repo.commit_all("initial");
+        repo.write_bytes("w.txt", b"a\r\nB\r\nc\r\nd");
+        let headers = hunk_headers(&repo, "w.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "w.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(run_bytes(&repo.dir, &["show", ":w.txt"]).unwrap(), b"a\r\nB\r\nc\r\nd");
+        assert_eq!(repo.git(&["diff"]), "");
     }
 
     #[test]
