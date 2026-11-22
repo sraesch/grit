@@ -1,8 +1,9 @@
 import { MouseEvent, useCallback, useState } from "react";
-import { Branch, Branches, Stash } from "../api";
+import { Branch, Branches, Remote, Stash } from "../api";
 import { SwitchTarget, targetForRemote } from "../branches";
+import { groupRemoteBranches } from "../remote";
 import { formatTrack, fullDate, relativeTime } from "../util";
-import { ContextMenu } from "./ContextMenu";
+import { ContextMenu, MenuItem } from "./ContextMenu";
 
 export type View = "changes" | "history" | "stash";
 
@@ -23,6 +24,98 @@ interface SidebarProps {
   onApplyStash: (stash: Stash, pop: boolean) => void;
   /** Asks to delete a stash; the owner confirms. */
   onDropStash: (stash: Stash) => void;
+  /** Asks for a new remote. */
+  onAddRemote: () => void;
+  onFetchRemote: (remote: Remote) => void;
+  /** Asks for a remote's new URL, or its new name. */
+  onEditRemote: (remote: Remote, field: "url" | "name") => void;
+  /** Asks to remove a remote; the owner confirms. */
+  onRemoveRemote: (remote: Remote) => void;
+}
+
+interface RemotesGroupProps {
+  branches: Branches;
+  onActivate: (b: Branch) => void;
+  onAdd: () => void;
+  /** Right-click on the group's title. */
+  onGroupMenu: (e: MouseEvent) => void;
+  onRemoteMenu: (remote: Remote, e: MouseEvent) => void;
+}
+
+/** The remotes, each with its remote branches; right-click a remote to fetch, edit or remove it. */
+function RemotesGroup({ branches, onActivate, onAdd, onGroupMenu, onRemoteMenu }: RemotesGroupProps) {
+  const [open, setOpen] = useState(false);
+  // Remotes are expanded unless collapsed.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const groups = groupRemoteBranches(branches.remote, branches.remotes);
+  const toggle = (remote: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(remote)) next.add(remote);
+      return next;
+    });
+
+  return (
+    <div className="branch-group">
+      <div
+        className="group-header"
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onGroupMenu(e);
+        }}
+      >
+        <button className="group-title" onClick={() => setOpen(!open)}>
+          <span className={`chevron${open ? " open" : ""}`}>▸</span>
+          Remotes
+          <span className="count">{groups.length}</span>
+        </button>
+        <button className="group-add" aria-label="Add Remote…" title="Add Remote…" onClick={onAdd}>
+          +
+        </button>
+      </div>
+      {open && (
+        <ul>
+          {groups.map(({ remote, url, branches: items }) => {
+            const expanded = !collapsed.has(remote);
+            const known = url !== null ? { name: remote, url } : null;
+            return (
+              <li key={remote} className="remote-group">
+                <button
+                  className="remote-row"
+                  aria-expanded={expanded}
+                  title={url ?? "This remote no longer exists"}
+                  onClick={() => toggle(remote)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (known) onRemoteMenu(known, e);
+                  }}
+                >
+                  <span className={`chevron${expanded ? " open" : ""}`} aria-hidden="true">
+                    ▸
+                  </span>
+                  <span className="branch-name">{remote}</span>
+                </button>
+                {expanded && (
+                  <ul aria-label={`Branches on ${remote}`}>
+                    {items.length === 0 && <li className="empty-remote">No branches fetched</li>}
+                    {items.map(({ branch: b, shortName }) => (
+                      <li
+                        key={b.name}
+                        onDoubleClick={() => onActivate(b)}
+                        title={`${b.name}\nDouble-click to switch to a local branch tracking this one`}
+                      >
+                        <span className="branch-name">{shortName}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 interface StashGroupProps {
@@ -124,11 +217,29 @@ export function Sidebar({
   applyBlocked,
   onApplyStash,
   onDropStash,
+  onAddRemote,
+  onFetchRemote,
+  onEditRemote,
+  onRemoveRemote,
 }: SidebarProps) {
   const [menu, setMenu] = useState<{ branch: Branch; x: number; y: number } | null>(null);
+  // A remote's menu, or with no remote the Remotes group's.
+  const [remoteMenu, setRemoteMenu] = useState<{ remote: Remote | null; x: number; y: number } | null>(null);
+  const closeRemoteMenu = useCallback(() => setRemoteMenu(null), []);
   const [stashMenu, setStashMenu] = useState<{ stash: Stash; x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
   const closeStashMenu = useCallback(() => setStashMenu(null), []);
+
+  function remoteMenuItems(remote: Remote | null): MenuItem[] {
+    if (!remote) return [{ label: "Add Remote…", onSelect: onAddRemote }];
+    return [
+      { label: "Fetch", onSelect: () => onFetchRemote(remote) },
+      { label: "Edit URL…", onSelect: () => onEditRemote(remote, "url") },
+      { label: "Rename…", onSelect: () => onEditRemote(remote, "name") },
+      { label: "Remove…", danger: true, onSelect: () => onRemoveRemote(remote) },
+      { label: "Add Remote…", onSelect: onAddRemote },
+    ];
+  }
 
   return (
     <nav className="sidebar">
@@ -153,16 +264,16 @@ export function Sidebar({
               setMenu({ branch, x: e.clientX, y: e.clientY });
             }}
           />
-          <BranchGroup
-            title="Remotes"
-            items={branches.remote}
+          <RemotesGroup
+            branches={branches}
             onActivate={(b) => {
               const target = targetForRemote(branches, b);
               const current = target.kind === "local" && branches.local.some((l) => l.name === target.name && l.current);
               if (!current) onSwitch(target);
             }}
-            activateHint="Double-click to switch to a local branch tracking this one"
-            defaultOpen={false}
+            onAdd={onAddRemote}
+            onGroupMenu={(e) => setRemoteMenu({ remote: null, x: e.clientX, y: e.clientY })}
+            onRemoteMenu={(remote, e) => setRemoteMenu({ remote, x: e.clientX, y: e.clientY })}
           />
           <BranchGroup title="Tags" items={branches.tags} defaultOpen={false} />
           {stashes && stashes.length > 0 && (
@@ -199,6 +310,15 @@ export function Sidebar({
             { label: "Delete Stash…", danger: true, onSelect: () => onDropStash(stashMenu.stash) },
           ]}
           onClose={closeStashMenu}
+        />
+      )}
+      {remoteMenu && (
+        <ContextMenu
+          x={remoteMenu.x}
+          y={remoteMenu.y}
+          label={remoteMenu.remote ? `Remote ${remoteMenu.remote.name}` : "Remotes"}
+          items={remoteMenuItems(remoteMenu.remote)}
+          onClose={closeRemoteMenu}
         />
       )}
       {menu && (

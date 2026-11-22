@@ -784,6 +784,70 @@ button.primary.danger:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.group-header {
+  display: flex;
+  align-items: center;
+}
+.group-header .group-title {
+  flex: 1;
+  min-width: 0;
+}
+.group-add {
+  flex: none;
+  padding: 0 8px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 22px;
+  border-radius: 5px;
+}
+.group-add:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.branch-group li.remote-group {
+  display: block;
+  padding: 0;
+}
+.branch-group li.remote-group:hover {
+  background: none;
+}
+.remote-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 8px 3px 20px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+.remote-row:hover {
+  background: var(--bg-hover);
+}
+.remote-row .chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.branch-group li.remote-group ul {
+  margin: 0;
+}
+.branch-group li.remote-group li {
+  padding-left: 40px;
+}
+.branch-group li.empty-remote {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.branch-group li.empty-remote:hover {
+  background: none;
+}
 .branch-group li.selected {
   background: var(--bg-selected);
 }

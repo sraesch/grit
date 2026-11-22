@@ -611,6 +611,44 @@ describe("App", () => {
       await waitFor(() => expect(screen.getByRole("button", { name: "Fetch" })).toBeEnabled());
     }
 
+    it("adds a remote from the sidebar and fetches it right away", async () => {
+      const addRemote = vi.fn();
+      const fetch = vi.fn(() => ({ newBranches: ["upstream/main"], updatedBranches: [], deletedBranches: [], newTags: [] }));
+      mockBackend(invokeMock, { ...handlers, add_remote: addRemote, fetch });
+      await ready();
+
+      await userEvent.click(screen.getByRole("button", { name: "Add Remote…" }));
+      const dialog = screen.getByRole("dialog", { name: "Add Remote" });
+      await userEvent.type(within(dialog).getByLabelText("Name"), "upstream");
+      await userEvent.type(within(dialog).getByLabelText("URL"), "https://example.com/team/demo.git");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+      expect(addRemote).toHaveBeenCalledWith({
+        repo: "/work/demo",
+        name: "upstream",
+        url: "https://example.com/team/demo.git",
+      });
+      expect(await screen.findByText("Fetched upstream: 1 new branch")).toBeInTheDocument();
+      expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ remote: "upstream", background: false }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("renames a remote from its context menu", async () => {
+      const renameRemote = vi.fn();
+      mockBackend(invokeMock, { ...handlers, rename_remote: renameRemote });
+      await ready();
+
+      await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByRole("button", { name: "origin" }) });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+      const input = within(screen.getByRole("dialog", { name: "Rename origin" })).getByLabelText("Name");
+      await userEvent.clear(input);
+      await userEvent.type(input, "github{Enter}");
+
+      expect(renameRemote).toHaveBeenCalledWith({ repo: "/work/demo", name: "origin", newName: "github" });
+      expect(await screen.findByText("Renamed remote origin to github.")).toBeInTheDocument();
+    });
+
     it("fetches the chosen remote, showing progress and then what changed", async () => {
       const result = deferred<FetchResult>();
       mockBackend(invokeMock, { ...handlers, fetch: () => result.promise });

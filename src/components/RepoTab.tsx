@@ -13,6 +13,7 @@ import {
   PullOptions,
   PushOptions,
   RebaseOptions,
+  Remote,
   RepoChanged,
   RepoInfo,
   Stash,
@@ -30,13 +31,16 @@ import {
   pullSources,
   pullSummary,
   pushSummary,
+  prefs,
   PushTarget,
+  splitRemoteBranch,
 } from "../remote";
 import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { DeleteBranchDialog } from "./DeleteBranchDialog";
+import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
 import { HistoryView } from "./HistoryView";
 import { MergeDialog } from "./MergeDialog";
 import { OperationBanner } from "./OperationBanner";
@@ -111,6 +115,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   // The local branch whose deletion is being confirmed.
   const [deleting, setDeleting] = useState<{ branch: Branch; unmerged: boolean; withRemote: boolean } | null>(null);
   const [pushPreset, setPushPreset] = useState<PushPreset | null>(null);
+  // Adding a remote, or editing or removing one.
+  const [remoteEdit, setRemoteEdit] = useState<
+    { kind: "add" } | { kind: "url" | "name" | "remove"; remote: Remote } | null
+  >(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -396,6 +404,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setDialog(null);
       setDeleting(null);
       setDropping(null);
+      setRemoteEdit(null);
     }
   }, [active]);
 
@@ -523,6 +532,40 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   );
 
   const closeDrop = useCallback(() => setDropping(null), []);
+  const closeRemoteEdit = useCallback(() => setRemoteEdit(null), []);
+
+  const fetchRemote = useCallback(
+    (remote: string) => fetchNow({ ...prefs.fetch(), remote, background: false }),
+    [fetchNow],
+  );
+
+  // The remote dialogs show errors themselves, so these reject instead of reporting them.
+  async function addRemote(name: string, url: string, fetch: boolean) {
+    await api.addRemote(root, name, url);
+    setRemoteEdit(null);
+    refreshAll();
+    if (fetch) fetchRemote(name);
+    else setNotice({ kind: "info", text: `Added remote ${name}.` });
+  }
+
+  async function editRemote(remote: Remote, value: string) {
+    if (remoteEdit?.kind === "name") {
+      await api.renameRemote(root, remote.name, value);
+      setNotice({ kind: "info", text: `Renamed remote ${remote.name} to ${value}.` });
+    } else {
+      await api.setRemoteUrl(root, remote.name, value);
+      setNotice({ kind: "info", text: `${remote.name} now points to ${value}.` });
+    }
+    setRemoteEdit(null);
+    refreshAll();
+  }
+
+  async function removeRemote(remote: Remote) {
+    await api.removeRemote(root, remote.name);
+    setRemoteEdit(null);
+    setNotice({ kind: "info", text: `Removed remote ${remote.name}.` });
+    refreshAll();
+  }
 
   return (
     <div className="repo-tab" id={tabPanelId(root)} role="tabpanel" aria-label={repo.name} hidden={!active}>
@@ -697,6 +740,26 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         />
       )}
       {dialog === "stash" && status && <StashDialog status={status} onStash={stashNow} onClose={closeDialog} />}
+      {remoteEdit?.kind === "add" && <AddRemoteDialog onAdd={addRemote} onClose={closeRemoteEdit} />}
+      {(remoteEdit?.kind === "url" || remoteEdit?.kind === "name") && (
+        <EditRemoteDialog
+          key={`${remoteEdit.kind}:${remoteEdit.remote.name}`}
+          remote={remoteEdit.remote}
+          field={remoteEdit.kind}
+          onSave={editRemote}
+          onClose={closeRemoteEdit}
+        />
+      )}
+      {remoteEdit?.kind === "remove" && (
+        <RemoveRemoteDialog
+          remote={remoteEdit.remote}
+          trackingBranches={(branches?.local ?? [])
+            .filter((b) => b.upstream && splitRemoteBranch(b.upstream, branches?.remotes ?? [])?.remote === remoteEdit.remote.name)
+            .map((b) => b.name)}
+          onRemove={removeRemote}
+          onClose={closeRemoteEdit}
+        />
+      )}
       {dropping && <DropStashDialog stash={dropping} onDrop={dropStash} onClose={closeDrop} />}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar
@@ -715,6 +778,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           applyBlocked={applyBlocked}
           onApplyStash={applyStash}
           onDropStash={setDropping}
+          onAddRemote={() => setRemoteEdit({ kind: "add" })}
+          onFetchRemote={(remote) => fetchRemote(remote.name)}
+          onEditRemote={(remote, field) => setRemoteEdit({ kind: field, remote })}
+          onRemoveRemote={(remote) => setRemoteEdit({ kind: "remove", remote })}
         />
         <main className="main">
           {view === "changes" ? (

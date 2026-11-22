@@ -376,6 +376,14 @@ export const api = {
   applyStash: (repo: string, sha: string, pop: boolean) => invoke<StashApplyResult>("apply_stash", { repo, sha, pop }),
   dropStash: (repo: string, sha: string) => invoke<void>("drop_stash", { repo, sha }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
+  /** Adds a remote; rejects with git's message for invalid or taken names. */
+  addRemote: (repo: string, name: string, url: string) => invoke<void>("add_remote", { repo, name, url }),
+  /** Renames a remote along with its remote branches and the upstreams pointing at them. */
+  renameRemote: (repo: string, name: string, newName: string) =>
+    invoke<void>("rename_remote", { repo, name, newName }),
+  setRemoteUrl: (repo: string, name: string, url: string) => invoke<void>("set_remote_url", { repo, name, url }),
+  /** Removes a remote with its remote branches; local branches tracking them lose their upstream. */
+  removeRemote: (repo: string, name: string) => invoke<void>("remove_remote", { repo, name }),
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */
   pull: (repo: string, options: PullOptions) => invoke<PullResult>("pull", { repo, ...options }),
