@@ -10,7 +10,7 @@ describe("FileList", () => {
   it("shows files under their folders with a status badge", () => {
     render(<FileList files={files} selectedPath={null} onSelect={() => {}} />);
     const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
-    expect(rows).toEqual(["▸src", "Mapp.ts", "Rb.rs", "+new.txt"]);
+    expect(rows).toEqual(["src", "Mapp.ts", "Rb.rs", "+new.txt"]);
     const row = screen.getByText("app.ts").closest("li")!;
     expect(row).toHaveAttribute("title", "src/app.ts");
     expect(row.querySelector(".status-badge")).toHaveTextContent("M");

@@ -749,6 +749,7 @@ button.primary.danger:hover:not(:disabled) {
 }
 .chevron {
   display: inline-block;
+  flex-shrink: 0;
   transition: transform 0.1s;
 }
 .chevron.open {
@@ -832,14 +833,53 @@ button.primary.danger:hover:not(:disabled) {
   background: var(--bg-hover);
 }
 .remote-row .chevron {
-  font-size: 10px;
   color: var(--text-muted);
 }
 .branch-group li.remote-group ul {
   margin: 0;
 }
-.branch-group li.remote-group li {
+.branch-group li.remote-group li.empty-remote {
   padding-left: 40px;
+}
+.branch-group li.branch-folder {
+  display: block;
+  padding: 0;
+}
+.branch-group li.branch-folder:hover {
+  background: none;
+}
+.branch-group li.branch-folder ul {
+  margin: 0;
+}
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+.folder-row:hover {
+  background: var(--bg-hover);
+}
+.folder-row .chevron {
+  color: var(--text-muted);
+}
+.folder-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.folder-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 .branch-group li.empty-remote {
   color: var(--text-muted);
@@ -969,8 +1009,6 @@ button.primary.danger:hover:not(:disabled) {
 }
 .file-list .chevron {
   width: 12px;
-  text-align: center;
-  font-size: 10px;
   flex-shrink: 0;
 }
 .chevron-spacer {

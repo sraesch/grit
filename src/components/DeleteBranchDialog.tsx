@@ -57,3 +57,43 @@ export function DeleteBranchDialog({
     </Dialog>
   );
 }
+
+interface DeleteRemoteBranchDialogProps {
+  /** The remote branch, e.g. "origin/feature". */
+  name: string;
+  remote: string;
+  /** Its name on the remote, e.g. "feature". */
+  branch: string;
+  /** Local branches tracking it, which are kept. */
+  trackedBy: string[];
+  onDelete: () => void;
+  onClose: () => void;
+}
+
+/** Confirms deleting a branch on its remote. */
+export function DeleteRemoteBranchDialog({ name, remote, branch, trackedBy, onDelete, onClose }: DeleteRemoteBranchDialogProps) {
+  return (
+    <Dialog
+      id="delete-remote-branch"
+      title="Delete Remote Branch"
+      submitLabel="Delete"
+      danger
+      canSubmit
+      onSubmit={onDelete}
+      onClose={onClose}
+    >
+      <p className="settings-hint">
+        Delete the branch <strong className="mono">{branch}</strong> on <span className="mono">{remote}</span>? This
+        changes the remote for everyone who uses it, and grit can't undo it. Nothing is deleted when someone pushed to{" "}
+        <span className="mono">{name}</span> since it was last fetched.
+      </p>
+      {trackedBy.length > 0 && (
+        <p className="settings-hint" role="note">
+          {trackedBy.length === 1 ? "The local branch " : "The local branches "}
+          <span className="mono">{trackedBy.join(", ")}</span>
+          {trackedBy.length === 1 ? " tracks it and is kept." : " track it and are kept."}
+        </p>
+      )}
+    </Dialog>
+  );
+}

@@ -633,6 +633,59 @@ describe("App", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
 
+    async function remoteBranchMenu(name: string, item: string) {
+      const group = screen.getByRole("button", { name: /Remotes/ });
+      if (group.getAttribute("aria-expanded") === "false") await userEvent.click(group);
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByTitle(new RegExp(`^${name}\\s`)) });
+      await userEvent.click(screen.getByRole("menuitem", { name: item }));
+    }
+
+    it("deletes a remote branch on its remote after confirming", async () => {
+      const deleteRemoteBranch = vi.fn();
+      mockBackend(invokeMock, { ...handlers, delete_remote_branch: deleteRemoteBranch });
+      await ready();
+
+      await remoteBranchMenu("origin/main", "Delete Remote Branch…");
+      const dialog = screen.getByRole("dialog", { name: "Delete Remote Branch" });
+      expect(within(dialog).getByRole("note")).toHaveTextContent("The local branch main tracks it and is kept.");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+      expect(deleteRemoteBranch).toHaveBeenCalledWith({ repo: "/work/demo", remote: "origin", branch: "main" });
+      expect(await screen.findByText("Deleted main on origin.")).toBeInTheDocument();
+    });
+
+    it("reports when a remote branch moved since the last fetch", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        delete_remote_branch: () => {
+          throw "origin/dev has commits that were pushed since it was last fetched, so nothing was deleted. Fetch to see them.";
+        },
+      });
+      await ready();
+      await remoteBranchMenu("origin/dev", "Delete Remote Branch…");
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("pushed since it was last fetched");
+    });
+
+    it("opens the merge dialog on a remote branch and copies its name", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 0, behind: 1, mergeBase: "a" }),
+      });
+      await ready();
+
+      await remoteBranchMenu("origin/dev", "Merge into main…");
+      const dialog = screen.getByRole("dialog", { name: /Merge/ });
+      expect(dialog.querySelector("#merge-source")).toHaveDisplayValue("origin/dev");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+      await remoteBranchMenu("origin/dev", "Copy Name");
+      expect(writeText).toHaveBeenCalledWith("origin/dev");
+      expect(await screen.findByText("Copied origin/dev.")).toBeInTheDocument();
+    });
+
     it("renames a remote from its context menu", async () => {
       const renameRemote = vi.fn();
       mockBackend(invokeMock, { ...handlers, rename_remote: renameRemote });

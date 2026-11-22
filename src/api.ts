@@ -376,6 +376,12 @@ export const api = {
   applyStash: (repo: string, sha: string, pop: boolean) => invoke<StashApplyResult>("apply_stash", { repo, sha, pop }),
   dropStash: (repo: string, sha: string) => invoke<void>("drop_stash", { repo, sha }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
+  /**
+   * Deletes `branch` on `remote`, keeping local branches that track it. Rejects without deleting
+   * anything when someone pushed to it since the last fetch. Progress arrives as `git-progress`.
+   */
+  deleteRemoteBranch: (repo: string, remote: string, branch: string) =>
+    invoke<void>("delete_remote_branch", { repo, remote, branch }),
   /** Adds a remote; rejects with git's message for invalid or taken names. */
   addRemote: (repo: string, name: string, url: string) => invoke<void>("add_remote", { repo, name, url }),
   /** Renames a remote along with its remote branches and the upstreams pointing at them. */
