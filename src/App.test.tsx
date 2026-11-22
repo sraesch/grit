@@ -19,6 +19,7 @@ const openMock = vi.mocked(open);
 let emitRepoChanged: (payload: RepoChanged) => void = () => {};
 let emitProgress: (payload: GitProgress) => void = () => {};
 let emitOpenSettings: () => void = () => {};
+let emitMenu: (event: string) => void = () => {};
 
 function backend(statusFn = () => makeStatus({ unstaged: [file("a.txt")] })) {
   mockBackend(invokeMock, {
@@ -37,6 +38,7 @@ describe("App", () => {
     emitRepoChanged = (payload) => emit("repo-changed", payload);
     emitProgress = (payload) => emit("git-progress", payload);
     emitOpenSettings = () => emit("open-settings", null);
+    emitMenu = (event) => emit(event, null);
     listenMock.mockImplementation(async (event, handler) => {
       const h = handler as (e: { payload: unknown }) => void;
       if (!handlers.has(event)) handlers.set(event, new Set());
@@ -74,6 +76,65 @@ describe("App", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Open repository…" }));
     expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/home/ada/code" }));
+  });
+
+  it("offers to initialize a folder that isn't a repository", async () => {
+    const initRepo = vi.fn(({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "fresh" }));
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: null }),
+      is_repository: () => false,
+      default_branch_name: () => "trunk",
+      init_repo: initRepo,
+      open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "fresh" }),
+      get_status: () => makeStatus(),
+      get_log: () => [],
+      get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+    });
+    openMock.mockResolvedValue("/work/fresh");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Open repository…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Initialize Repository" });
+    expect(within(dialog).getByText(/isn't a git repository yet/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Folder")).toHaveValue("/work/fresh");
+    await waitFor(() => expect(within(dialog).getByLabelText("Initial branch")).toHaveValue("trunk"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Initialize" }));
+
+    expect(initRepo).toHaveBeenCalledWith({ path: "/work/fresh", branch: "trunk" });
+    expect(await screen.findByRole("tab", { name: "fresh" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("creates a new repository in the repositories folder", async () => {
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: "/home/ada/code" }),
+      default_branch_name: () => "main",
+      init_repo: () => {
+        throw "/home/ada/code/ is already a git repository";
+      },
+    });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "New repository…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New Repository" });
+    const folder = within(dialog).getByLabelText("Folder");
+    await waitFor(() => expect(folder).toHaveValue("/home/ada/code/"));
+    await waitFor(() => expect(within(dialog).getByLabelText("Initial branch")).toHaveValue("main"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    // Errors stay in the dialog, so the folder can be corrected.
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("already a git repository");
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("opens the New Repository dialog from the menu", async () => {
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: "/home/ada/code" }),
+      default_branch_name: () => "main",
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "grit" });
+    await act(async () => emitMenu("new-repository"));
+    expect(await screen.findByRole("dialog", { name: "New Repository" })).toBeInTheDocument();
   });
 
   it("opens the settings from the toolbar and with Ctrl+,", async () => {
@@ -149,7 +210,8 @@ describe("App", () => {
 
     async function openViaDialog(path: string) {
       openMock.mockResolvedValueOnce(path);
-      await userEvent.click(screen.getByRole("button", { name: "Open repository" }));
+      await userEvent.click(screen.getByRole("button", { name: "Open, clone or create a repository" }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Open Repository…" }));
     }
 
     it("opens repositories side by side and switches between them", async () => {
@@ -548,6 +610,97 @@ describe("App", () => {
       render(<App />);
       await waitFor(() => expect(screen.getByRole("button", { name: "Fetch" })).toBeEnabled());
     }
+
+    it("adds a remote from the sidebar and fetches it right away", async () => {
+      const addRemote = vi.fn();
+      const fetch = vi.fn(() => ({ newBranches: ["upstream/main"], updatedBranches: [], deletedBranches: [], newTags: [] }));
+      mockBackend(invokeMock, { ...handlers, add_remote: addRemote, fetch });
+      await ready();
+
+      await userEvent.click(screen.getByRole("button", { name: "Add Remote…" }));
+      const dialog = screen.getByRole("dialog", { name: "Add Remote" });
+      await userEvent.type(within(dialog).getByLabelText("Name"), "upstream");
+      await userEvent.type(within(dialog).getByLabelText("URL"), "https://example.com/team/demo.git");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Add" }));
+
+      expect(addRemote).toHaveBeenCalledWith({
+        repo: "/work/demo",
+        name: "upstream",
+        url: "https://example.com/team/demo.git",
+      });
+      expect(await screen.findByText("Fetched upstream: 1 new branch")).toBeInTheDocument();
+      expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ remote: "upstream", background: false }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    async function remoteBranchMenu(name: string, item: string) {
+      const group = screen.getByRole("button", { name: /Remotes/ });
+      if (group.getAttribute("aria-expanded") === "false") await userEvent.click(group);
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByTitle(new RegExp(`^${name}\\s`)) });
+      await userEvent.click(screen.getByRole("menuitem", { name: item }));
+    }
+
+    it("deletes a remote branch on its remote after confirming", async () => {
+      const deleteRemoteBranch = vi.fn();
+      mockBackend(invokeMock, { ...handlers, delete_remote_branch: deleteRemoteBranch });
+      await ready();
+
+      await remoteBranchMenu("origin/main", "Delete Remote Branch…");
+      const dialog = screen.getByRole("dialog", { name: "Delete Remote Branch" });
+      expect(within(dialog).getByRole("note")).toHaveTextContent("The local branch main tracks it and is kept.");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+      expect(deleteRemoteBranch).toHaveBeenCalledWith({ repo: "/work/demo", remote: "origin", branch: "main" });
+      expect(await screen.findByText("Deleted main on origin.")).toBeInTheDocument();
+    });
+
+    it("reports when a remote branch moved since the last fetch", async () => {
+      mockBackend(invokeMock, {
+        ...handlers,
+        delete_remote_branch: () => {
+          throw "origin/dev has commits that were pushed since it was last fetched, so nothing was deleted. Fetch to see them.";
+        },
+      });
+      await ready();
+      await remoteBranchMenu("origin/dev", "Delete Remote Branch…");
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("pushed since it was last fetched");
+    });
+
+    it("opens the merge dialog on a remote branch and copies its name", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      mockBackend(invokeMock, {
+        ...handlers,
+        get_divergence: () => ({ ahead: 0, behind: 1, mergeBase: "a" }),
+      });
+      await ready();
+
+      await remoteBranchMenu("origin/dev", "Merge into main…");
+      const dialog = screen.getByRole("dialog", { name: /Merge/ });
+      expect(dialog.querySelector("#merge-source")).toHaveDisplayValue("origin/dev");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+      await remoteBranchMenu("origin/dev", "Copy Name");
+      expect(writeText).toHaveBeenCalledWith("origin/dev");
+      expect(await screen.findByText("Copied origin/dev.")).toBeInTheDocument();
+    });
+
+    it("renames a remote from its context menu", async () => {
+      const renameRemote = vi.fn();
+      mockBackend(invokeMock, { ...handlers, rename_remote: renameRemote });
+      await ready();
+
+      await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByRole("button", { name: "origin" }) });
+      await userEvent.click(screen.getByRole("menuitem", { name: "Rename…" }));
+      const input = within(screen.getByRole("dialog", { name: "Rename origin" })).getByLabelText("Name");
+      await userEvent.clear(input);
+      await userEvent.type(input, "github{Enter}");
+
+      expect(renameRemote).toHaveBeenCalledWith({ repo: "/work/demo", name: "origin", newName: "github" });
+      expect(await screen.findByText("Renamed remote origin to github.")).toBeInTheDocument();
+    });
 
     it("fetches the chosen remote, showing progress and then what changed", async () => {
       const result = deferred<FetchResult>();

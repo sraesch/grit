@@ -13,6 +13,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{self, GraphRow};
+use crate::patch::{self, HunkSelection};
 
 pub type GitResult<T> = Result<T, String>;
 
@@ -41,7 +42,7 @@ fn run(repo: &Path, args: &[&str]) -> GitResult<String> {
 }
 
 fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<String> {
-    exec(repo, args, stdin, ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
+    exec(repo, args, stdin.map(str::as_bytes), ok_codes).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Runs git and returns its stdout unmodified, for binary content such as images.
@@ -49,7 +50,7 @@ fn run_bytes(repo: &Path, args: &[&str]) -> GitResult<Vec<u8>> {
     exec(repo, args, None, &[0])
 }
 
-fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
+fn exec(repo: &Path, args: &[&str], stdin: Option<&[u8]>, ok_codes: &[i32]) -> GitResult<Vec<u8>> {
     let mut cmd = git_command(repo);
     cmd.args(args)
         .stdout(Stdio::piped())
@@ -63,7 +64,7 @@ fn exec(repo: &Path, args: &[&str], stdin: Option<&str>, ok_codes: &[i32]) -> Gi
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(input.as_bytes())
+            .write_all(input)
             .map_err(|e| e.to_string())?;
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
@@ -97,8 +98,16 @@ pub struct RepoInfo {
 }
 
 pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
-    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"])
-        .map_err(|_| format!("{} is not inside a git repository", path.display()))?;
+    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"]).map_err(|_| {
+        if is_bare(path) {
+            format!(
+                "{} is a bare repository, which has no working tree to show. Clone it to work with it.",
+                path.display()
+            )
+        } else {
+            format!("{} is not inside a git repository", path.display())
+        }
+    })?;
     let mut lines = out.lines();
     let root = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
     let git_dir = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
@@ -107,6 +116,55 @@ pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.clone());
     Ok(RepoInfo { root, git_dir, name })
+}
+
+/// Whether `path` is an existing folder inside a repository, bare ones included. Such a folder must
+/// never be offered for `init_repo`, even when `open_repo` can't open it (a bare repository).
+pub fn is_repository(path: &Path) -> bool {
+    path.is_dir() && run(path, &["rev-parse", "--git-dir"]).is_ok()
+}
+
+/// Whether `path` is inside a bare repository, which has no working tree.
+fn is_bare(path: &Path) -> bool {
+    path.is_dir() && run(path, &["rev-parse", "--is-bare-repository"]).is_ok_and(|out| out.trim() == "true")
+}
+
+/// The branch name `git init` starts with: `init.defaultBranch` from the user's config, else "main".
+pub fn default_branch_name() -> String {
+    let home = std::env::temp_dir();
+    run(&home, &["config", "--global", "--get", "init.defaultBranch"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Checks that `name` can be a branch name, with git's own rules.
+fn valid_branch_name(name: &str) -> GitResult<()> {
+    branch_arg(name)?;
+    run(&std::env::temp_dir(), &["check-ref-format", "--branch", name])
+        .map(drop)
+        .map_err(|_| format!("'{name}' is not a valid branch name"))
+}
+
+/// Creates a repository in `path` (created if missing) whose first branch is `branch`.
+pub fn init_repo(path: &Path, branch: &str) -> GitResult<RepoInfo> {
+    valid_branch_name(branch)?;
+    if path.join(".git").exists() {
+        return Err(format!("{} is already a git repository", path.display()));
+    }
+    // `git init` in a bare repository would hide it behind a new, empty repository.
+    if is_bare(path) {
+        return Err(format!("{} is inside a bare repository", path.display()));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(format!("{} is not a folder", path.display()));
+    }
+    std::fs::create_dir_all(path).map_err(|e| format!("Could not create {}: {e}", path.display()))?;
+    run(path, &["init", "-q"])?;
+    // Instead of `git init -b`, which needs git 2.28.
+    run(path, &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])?;
+    open_repo(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +711,33 @@ pub fn remotes(repo: &Path) -> GitResult<Vec<Remote>> {
     Ok(parse_remotes(&run(repo, &["remote", "-v"])?))
 }
 
+/// Adds a remote. git rejects invalid names and names that are taken.
+pub fn add_remote(repo: &Path, name: &str, url: &str) -> GitResult<()> {
+    let name = plain_arg(name.trim(), "remote name")?;
+    let url = plain_arg(url.trim(), "remote URL")?;
+    run(repo, &["remote", "add", "--", name, url]).map(drop)
+}
+
+/// Renames a remote, along with its remote-tracking branches and the upstreams that point at them.
+pub fn rename_remote(repo: &Path, old: &str, new: &str) -> GitResult<()> {
+    let old = plain_arg(old, "remote name")?;
+    let new = plain_arg(new.trim(), "remote name")?;
+    run(repo, &["remote", "rename", "--", old, new]).map(drop)
+}
+
+/// Changes the URL a remote fetches from (and pushes to, unless it has a separate push URL).
+pub fn set_remote_url(repo: &Path, name: &str, url: &str) -> GitResult<()> {
+    let name = plain_arg(name, "remote name")?;
+    let url = plain_arg(url.trim(), "remote URL")?;
+    run(repo, &["remote", "set-url", "--", name, url]).map(drop)
+}
+
+/// Removes a remote with its remote-tracking branches; local branches that tracked it lose their upstream.
+pub fn remove_remote(repo: &Path, name: &str) -> GitResult<()> {
+    let name = plain_arg(name, "remote name")?;
+    run(repo, &["remote", "remove", "--", name]).map(drop)
+}
+
 /// Parses `git remote -v`: `origin\thttps://host/repo.git (fetch)`, one fetch and one push line per remote.
 fn parse_remotes(out: &str) -> Vec<Remote> {
     out.lines()
@@ -696,6 +781,156 @@ pub fn unstage_all(repo: &Path) -> GitResult<()> {
         run(repo, &["reset", "-q"]).map(drop)
     } else {
         run(repo, &["rm", "--cached", "-q", "-r", "."]).map(drop)
+    }
+}
+
+/// Throws away local changes: `tracked` files get their unstaged changes reverted to the
+/// staged (or committed) version, staged changes stay; `untracked` files are deleted, along
+/// with folders they leave empty. Paths are taken literally, never as glob patterns.
+pub fn discard(repo: &Path, tracked: &[String], untracked: &[String]) -> GitResult<()> {
+    if !tracked.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "restore", "--worktree", "--"];
+        args.extend(tracked.iter().map(String::as_str));
+        run(repo, &args)?;
+    }
+    if !untracked.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "clean", "-f", "-q", "--"];
+        args.extend(untracked.iter().map(String::as_str));
+        run(repo, &args)?;
+        remove_empty_parents(repo, untracked);
+    }
+    Ok(())
+}
+
+/// What to do with the selected parts of a diff.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum PatchAction {
+    /// Unstaged changes into the index.
+    Stage,
+    /// Staged changes out of the index.
+    Unstage,
+    /// Unstaged changes out of the working tree.
+    Discard,
+}
+
+/// Diffs with more lines than this aren't shown in full, so parts of them can't be selected.
+const MAX_PATCH_LINES: usize = 5000;
+
+/// Stages, unstages or discards the selected hunks or lines of one file's diff.
+///
+/// The diff is generated again, exactly as `working_diff` shows it, and the selection is checked
+/// against it, so a file that changed since it was shown is refused instead of patched wrongly.
+/// An untracked file is first added with intent to add (`git add -N`), so it has a diff to take
+/// parts of; after a discard, or if anything fails, it is untracked again.
+pub fn apply_selection(
+    repo: &Path,
+    path: &str,
+    staged: bool,
+    untracked: bool,
+    action: PatchAction,
+    selection: &[HunkSelection],
+) -> GitResult<()> {
+    if staged != (action == PatchAction::Unstage) {
+        return Err("Only staged changes can be unstaged, and only unstaged ones staged or discarded".into());
+    }
+    let intent_to_add = untracked && !staged;
+    if intent_to_add {
+        run(repo, &["--literal-pathspecs", "add", "-N", "--", path])?;
+    }
+    let result = apply_selection_to_diff(repo, path, staged, action, selection);
+    if intent_to_add && (result.is_err() || action == PatchAction::Discard) {
+        // Takes back the intent to add; what is left of the file is untracked again.
+        let _ = run(repo, &["--literal-pathspecs", "rm", "--cached", "-q", "--", path]);
+    }
+    result
+}
+
+fn apply_selection_to_diff(
+    repo: &Path,
+    path: &str,
+    staged: bool,
+    action: PatchAction,
+    selection: &[HunkSelection],
+) -> GitResult<()> {
+    let mut args = vec!["--literal-pathspecs", "diff", "-M"];
+    if staged {
+        args.push("--cached");
+    }
+    args.extend(["--", path]);
+    let diff = exec(repo, &args, None, &[0])?;
+    let parsed = patch::parse(&diff)?;
+    if parsed.hunks.is_empty() {
+        return Err(patch::STALE.into());
+    }
+    if patch::shown_lines(&parsed) > MAX_PATCH_LINES {
+        return Err("The diff is too large to stage parts of it".into());
+    }
+    let reverse = action != PatchAction::Stage;
+    let Some(built) = patch::build(&parsed, selection, reverse)? else {
+        return Ok(());
+    };
+    let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
+    if action != PatchAction::Discard {
+        args.push("--cached");
+    }
+    if reverse {
+        args.push("-R");
+    }
+    // Only a diff without context (diff.context=0) produces hunks git would otherwise refuse.
+    if !built.split(|&b| b == b'\n').any(|l| l.first() == Some(&b' ')) {
+        args.push("--unidiff-zero");
+    }
+    args.push("-");
+    exec(repo, &args, Some(&built), &[0]).map(drop)
+}
+
+/// Appends `pattern` as a line to the `.gitignore` in the repository root, creating the file
+/// if needed. A pattern that is already listed is not added again. Keeps the file's line
+/// endings (LF or CRLF).
+pub fn add_to_gitignore(repo: &Path, pattern: &str) -> GitResult<()> {
+    if pattern.trim().is_empty() {
+        return Err("The pattern is empty".into());
+    }
+    if pattern.contains(['\n', '\r']) {
+        return Err("The pattern must be a single line".into());
+    }
+    let path = repo.join(".gitignore");
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("Could not read .gitignore: {e}")),
+    };
+    if existing.lines().any(|line| line.trim_end_matches('\r') == pattern) {
+        return Ok(());
+    }
+    let newline = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut addition = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        addition.push_str(newline);
+    }
+    addition.push_str(pattern);
+    addition.push_str(newline);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Could not write .gitignore: {e}"))?;
+    file.write_all(addition.as_bytes())
+        .map_err(|e| format!("Could not write .gitignore: {e}"))
+}
+
+/// Removes the folders that deleting `paths` left empty, up to (not including) the repository root.
+fn remove_empty_parents(repo: &Path, paths: &[String]) {
+    for path in paths {
+        let mut dir = Path::new(path).parent();
+        while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            // Fails, and stops the walk, as soon as a folder still has something in it.
+            if std::fs::remove_dir(repo.join(d)).is_err() {
+                break;
+            }
+            dir = d.parent();
+        }
     }
 }
 
@@ -769,6 +1004,72 @@ fn upstream_of(repo: &Path, local_ref: &str) -> Option<(String, String, String)>
     (valid && rev(repo, &tracking).is_some()).then_some((remote, remote_ref, tracking))
 }
 
+/// Deletes `remote_ref` (e.g. "refs/heads/x") on `remote`, but only if it still points where the
+/// remote-tracking ref `tracking` says it was last fetched (`--force-with-lease`), so commits
+/// pushed by others since are never lost. A branch that is gone from the remote already only
+/// loses its stale remote-tracking ref.
+fn delete_remote_ref(
+    repo: &Path,
+    remote: &str,
+    remote_ref: &str,
+    tracking: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(tracking);
+    let lease = format!("--force-with-lease={remote_ref}");
+    let out = exec_streaming(
+        repo,
+        &[
+            "push",
+            "--progress",
+            "--porcelain",
+            &lease,
+            remote,
+            "--delete",
+            remote_ref,
+        ],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let refs = parse_push_porcelain(&out.stdout);
+    match refs.iter().find(|r| r.dst == remote_ref) {
+        Some(r) if r.flag == '-' => Ok(()),
+        // The lease also fails when the branch is gone from the remote already: then there is
+        // nothing left to delete but the stale remote-tracking ref.
+        Some(r) if r.summary.contains("stale info") => {
+            let listed = run(repo, &["ls-remote", "--heads", remote, remote_ref])?;
+            if !listed.trim().is_empty() {
+                return Err(format!(
+                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
+                     Fetch to see them."
+                ));
+            }
+            run(repo, &["update-ref", "-d", tracking]).map(drop)
+        }
+        _ => Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
+    }
+}
+
+/// Deletes `branch` on `remote` (e.g. "feature" on "origin" for origin/feature), keeping any
+/// local branch that tracks it. Refused when someone pushed to it since the last fetch.
+pub fn delete_remote_branch(
+    repo: &Path,
+    remote: &str,
+    branch: &str,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let branch = branch_arg(branch)?;
+    if !remotes(repo)?.iter().any(|r| r.name == remote) {
+        return Err(format!("There is no remote '{remote}'"));
+    }
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    if rev(repo, &tracking).is_none() {
+        return Err(format!("There is no remote branch '{remote}/{branch}'"));
+    }
+    delete_remote_ref(repo, remote, &format!("refs/heads/{branch}"), &tracking, on_progress)
+}
+
 /// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
 ///
 /// Without `force`, a branch with unmerged commits is kept and reported as `NotMerged`. git
@@ -810,38 +1111,7 @@ pub fn delete_branch(
     }
 
     let remote_name = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
-    let lease = format!("--force-with-lease={remote_ref}");
-    let out = exec_streaming(
-        repo,
-        &[
-            "push",
-            "--progress",
-            "--porcelain",
-            &lease,
-            &remote,
-            "--delete",
-            &remote_ref,
-        ],
-        &[("LC_ALL", "C")],
-        on_progress,
-    )?;
-    let refs = parse_push_porcelain(&out.stdout);
-    match refs.iter().find(|r| r.dst == remote_ref) {
-        Some(r) if r.flag == '-' => {}
-        // The lease also fails when the branch is gone from the remote already: then there is
-        // nothing left to delete but the stale remote-tracking ref.
-        Some(r) if r.summary.contains("stale info") => {
-            let listed = run(repo, &["ls-remote", "--heads", &remote, &remote_ref])?;
-            if !listed.trim().is_empty() {
-                return Err(format!(
-                    "{remote_name} has commits that were pushed since it was last fetched, so nothing was deleted. \
-                     Fetch to see them."
-                ));
-            }
-            run(repo, &["update-ref", "-d", &tracking])?;
-        }
-        _ => return Err(error_text(&out.stderr, &format!("Deleting {remote_name} failed"))),
-    }
+    delete_remote_ref(repo, &remote, &remote_ref, &tracking, on_progress)?;
 
     // Unmerged commits were checked (or forced) above.
     run(repo, &["branch", "-D", name])
@@ -1102,6 +1372,45 @@ fn is_progress(line: &str) -> bool {
         "Rebasing (",
     ];
     PHASES.iter().any(|p| l.starts_with(p)) || (l.contains("% (") && l.contains(')'))
+}
+
+/// Clones `url` into `dest`, which must not exist yet or be an empty folder, optionally checking
+/// out `branch` instead of the remote's default branch. Unlike background fetches, cloning may
+/// ask for credentials through credential helpers and askpass programs.
+pub fn clone_repo(
+    url: &str,
+    dest: &Path,
+    branch: Option<&str>,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<RepoInfo> {
+    let url = plain_arg(url.trim(), "repository URL")?;
+    if !dest.is_absolute() {
+        return Err(format!("{} is not an absolute path", dest.display()));
+    }
+    if dest.exists() {
+        let empty = std::fs::read_dir(dest)
+            .map_err(|_| format!("{} is not a folder", dest.display()))?
+            .next()
+            .is_none();
+        if !empty {
+            return Err(format!("{} already exists and isn't empty", dest.display()));
+        }
+    }
+    let parent = dest
+        .parent()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| format!("The folder {} doesn't exist", dest.parent().unwrap_or(dest).display()))?;
+    let dest_arg = dest.to_string_lossy();
+    let mut args = vec!["clone", "--progress"];
+    if let Some(branch) = branch.map(str::trim).filter(|b| !b.is_empty()) {
+        args.extend(["--branch", branch_arg(branch)?]);
+    }
+    args.extend(["--", url, &dest_arg]);
+    let out = exec_streaming(parent, &args, &[("LC_ALL", "C")], on_progress)?;
+    if out.code != 0 {
+        return Err(error_text(&out.stderr, "Cloning failed"));
+    }
+    open_repo(dest)
 }
 
 /// Environment for network commands. Background fetches must never pop up a prompt: ssh runs
@@ -2073,6 +2382,42 @@ mod tests {
     }
 
     #[test]
+    fn bare_repositories_are_repositories_but_not_opened_or_initialized() {
+        let origin = bare("bare-detect");
+        let objects = origin.dir.join("objects");
+        assert!(is_repository(&origin.dir));
+        assert!(is_repository(&objects));
+        assert!(open_repo(&origin.dir).err().unwrap().contains("bare repository"));
+        assert!(
+            init_repo(&origin.dir, "main")
+                .err()
+                .unwrap()
+                .contains("bare repository")
+        );
+        assert!(init_repo(&objects, "main").err().unwrap().contains("bare repository"));
+        assert!(!origin.dir.join(".git").exists() && !objects.join(".git").exists());
+    }
+
+    #[test]
+    fn init_repo_creates_the_folder_and_the_first_branch() {
+        let dir = std::env::temp_dir().join(format!("grit-test-{}-init/new/repo", std::process::id()));
+        let base = dir.parent().unwrap().parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!is_repository(&dir));
+        let info = init_repo(&dir, "trunk").unwrap();
+        let head = run(&dir, &["symbolic-ref", "HEAD"]).unwrap();
+        let again = init_repo(&dir, "trunk").err();
+        let bad = init_repo(&base.join("other"), "no..dots").err();
+        let is_repo = is_repository(&dir);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(info.name, "repo");
+        assert_eq!(head.trim(), "refs/heads/trunk");
+        assert!(again.unwrap().contains("already a git repository"));
+        assert!(bad.unwrap().contains("not a valid branch name"));
+        assert!(is_repo);
+    }
+
+    #[test]
     fn unstage_all_works_before_the_first_commit() {
         let repo = TestRepo::new("unborn");
         repo.write("a.txt", "a\n");
@@ -2101,6 +2446,429 @@ mod tests {
         assert_eq!(st.staged[0].status, "A");
         let sha = repo.commit_all("unicode");
         assert_eq!(commit_details(&repo.dir, &sha).unwrap().files[0].path, name);
+    }
+
+    #[test]
+    fn discard_reverts_unstaged_changes_and_keeps_staged_ones() {
+        let repo = TestRepo::new("discard-tracked");
+        repo.write("a.txt", "one\n");
+        repo.write("gone.txt", "keep me\n");
+        repo.commit_all("initial");
+        repo.write("a.txt", "two\n");
+        stage(&repo.dir, &["a.txt".into()]).unwrap();
+        repo.write("a.txt", "three\n");
+        std::fs::remove_file(repo.dir.join("gone.txt")).unwrap();
+
+        discard(&repo.dir, &["a.txt".into(), "gone.txt".into()], &[]).unwrap();
+        assert_eq!(repo.read("a.txt"), "two\n");
+        assert_eq!(repo.read("gone.txt"), "keep me\n");
+        let st = status(&repo.dir).unwrap();
+        assert!(st.unstaged.is_empty());
+        assert_eq!(st.staged.len(), 1);
+    }
+
+    #[test]
+    fn discard_deletes_untracked_files_and_the_folders_they_leave_empty() {
+        let repo = TestRepo::new("discard-untracked");
+        repo.commit_all_initial();
+        repo.write("dir/sub/new.txt", "x\n");
+        repo.write("dir/other.txt", "y\n");
+        repo.write("dir with space/ü [x].txt", "z\n");
+        repo.write("ignored.log", "log\n");
+        repo.write(".gitignore", "*.log\n");
+        repo.git(&["add", ".gitignore"]);
+
+        discard(
+            &repo.dir,
+            &[],
+            &["dir/sub/new.txt".into(), "dir with space/ü [x].txt".into()],
+        )
+        .unwrap();
+        assert!(!repo.dir.join("dir/sub").exists());
+        assert!(!repo.dir.join("dir with space").exists());
+        assert_eq!(repo.read("dir/other.txt"), "y\n");
+        assert!(repo.dir.join("ignored.log").exists());
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].path, "dir/other.txt");
+    }
+
+    #[test]
+    fn discard_takes_paths_literally() {
+        let repo = TestRepo::new("discard-literal");
+        repo.write("[ab].txt", "star\n");
+        repo.write("a.txt", "a\n");
+        repo.commit_all("initial");
+        repo.write("[ab].txt", "changed\n");
+        repo.write("a.txt", "changed\n");
+        discard(&repo.dir, &["[ab].txt".into()], &[]).unwrap();
+        assert_eq!(repo.read("[ab].txt"), "star\n");
+        assert_eq!(repo.read("a.txt"), "changed\n");
+    }
+
+    #[test]
+    fn add_to_gitignore_creates_the_file_and_hides_the_file() {
+        let repo = TestRepo::new("ignore-create");
+        repo.commit_all_initial();
+        repo.write("build/out.bin", "x");
+        repo.write("debug.log", "x");
+        add_to_gitignore(&repo.dir, "/build/").unwrap();
+        assert_eq!(repo.read(".gitignore"), "/build/\n");
+        let paths: Vec<String> = status(&repo.dir)
+            .unwrap()
+            .unstaged
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(paths, [".gitignore", "debug.log"]);
+    }
+
+    #[test]
+    fn add_to_gitignore_appends_once_and_keeps_line_endings() {
+        let repo = TestRepo::new("ignore-append");
+        repo.write(".gitignore", "node_modules");
+        add_to_gitignore(&repo.dir, "*.log").unwrap();
+        add_to_gitignore(&repo.dir, "*.log").unwrap();
+        add_to_gitignore(&repo.dir, "node_modules").unwrap();
+        assert_eq!(repo.read(".gitignore"), "node_modules\n*.log\n");
+
+        repo.write(".gitignore", "a\r\nb\r\n");
+        add_to_gitignore(&repo.dir, "c").unwrap();
+        add_to_gitignore(&repo.dir, "b").unwrap();
+        assert_eq!(repo.read(".gitignore"), "a\r\nb\r\nc\r\n");
+    }
+
+    #[test]
+    fn add_to_gitignore_rejects_empty_and_multiline_patterns() {
+        let repo = TestRepo::new("ignore-invalid");
+        assert!(add_to_gitignore(&repo.dir, "  ").is_err());
+        assert!(add_to_gitignore(&repo.dir, "a\nb").is_err());
+        assert!(!repo.dir.join(".gitignore").exists());
+    }
+
+    /// The hunk headers of a file's diff, as the frontend sees them.
+    fn hunk_headers(repo: &TestRepo, path: &str, staged: bool, untracked: bool) -> Vec<String> {
+        let diff = working_diff(&repo.dir, path, staged, untracked).unwrap();
+        patch::parse(diff.as_bytes())
+            .unwrap()
+            .hunks
+            .into_iter()
+            .map(|h| h.header)
+            .collect()
+    }
+
+    fn hunk(index: usize, header: &str, lines: Option<Vec<usize>>) -> HunkSelection {
+        HunkSelection {
+            index,
+            header: header.to_string(),
+            lines,
+        }
+    }
+
+    /// Twenty numbered lines; far enough apart, two edits make two hunks.
+    fn numbered(edit: impl Fn(usize) -> Option<String>) -> String {
+        (1..=20)
+            .map(|i| edit(i).unwrap_or_else(|| format!("line {i}")) + "\n")
+            .collect()
+    }
+
+    fn two_hunk_repo(name: &str) -> TestRepo {
+        let repo = TestRepo::new(name);
+        repo.write("f.txt", &numbered(|_| None));
+        repo.commit_all("initial");
+        repo.write(
+            "f.txt",
+            &numbered(|i| match i {
+                2 => Some("TWO".into()),
+                18 => Some("EIGHTEEN".into()),
+                _ => None,
+            }),
+        );
+        repo
+    }
+
+    #[test]
+    fn stages_unstages_and_discards_single_hunks() {
+        let repo = two_hunk_repo("hunks");
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        assert_eq!(headers.len(), 2);
+
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(1, &headers[1], None)],
+        )
+        .unwrap();
+        let cached = repo.git(&["diff", "--cached"]);
+        assert!(cached.contains("+EIGHTEEN") && !cached.contains("+TWO"), "{cached}");
+        let unstaged = repo.git(&["diff"]);
+        assert!(
+            unstaged.contains("+TWO") && !unstaged.contains("+EIGHTEEN"),
+            "{unstaged}"
+        );
+
+        let staged_headers = hunk_headers(&repo, "f.txt", true, false);
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            true,
+            false,
+            PatchAction::Unstage,
+            &[hunk(0, &staged_headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["diff", "--cached"]), "");
+
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        let content = repo.read("f.txt");
+        assert!(
+            content.contains("line 2\n") && content.contains("EIGHTEEN"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_hunk_that_changed_since_it_was_shown() {
+        let repo = two_hunk_repo("hunk-stale");
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        repo.write("f.txt", &numbered(|i| (i == 1).then(|| "ONE".into())));
+        let err = apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap_err();
+        assert_eq!(err, patch::STALE);
+        assert_eq!(repo.git(&["diff", "--cached"]), "");
+        let err = apply_selection(
+            &repo.dir,
+            "f.txt",
+            true,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn stages_and_discards_selected_lines_across_hunks() {
+        let repo = TestRepo::new("lines");
+        repo.write("f.txt", &numbered(|_| None));
+        repo.commit_all("initial");
+        repo.write(
+            "f.txt",
+            &numbered(|i| match i {
+                2 => Some("TWO\nextra a".into()),
+                18 => Some("EIGHTEEN\nextra b".into()),
+                _ => None,
+            }),
+        );
+        let headers = hunk_headers(&repo, "f.txt", false, false);
+        // Hunk bodies: context " line 1", "-line 2", "+TWO", "+extra a", context... (the first hunk
+        // starts at line 1, so it has one line of context before).
+        let diff = working_diff(&repo.dir, "f.txt", false, false).unwrap();
+        let parsed = patch::parse(diff.as_bytes()).unwrap();
+        let index_of = |h: usize, text: &str| parsed.hunks[h].lines.iter().position(|l| l == text.as_bytes()).unwrap();
+        let selection = [
+            hunk(0, &headers[0], Some(vec![index_of(0, "-line 2"), index_of(0, "+TWO")])),
+            hunk(1, &headers[1], Some(vec![index_of(1, "+extra b")])),
+        ];
+        apply_selection(&repo.dir, "f.txt", false, false, PatchAction::Stage, &selection).unwrap();
+        let index = repo.git(&["show", ":f.txt"]);
+        assert!(index.starts_with("line 1\nTWO\nline 3\n"), "{index}");
+        assert!(index.contains("line 18\nextra b\nline 19\n"), "{index}");
+        assert!(!index.contains("extra a") && !index.contains("EIGHTEEN"));
+
+        // Discard "extra a" from the working tree; the rest stays.
+        let diff = working_diff(&repo.dir, "f.txt", false, false).unwrap();
+        let parsed = patch::parse(diff.as_bytes()).unwrap();
+        let (h, i) = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .find_map(|(h, hk)| hk.lines.iter().position(|l| l == b"+extra a").map(|i| (h, i)))
+            .unwrap();
+        apply_selection(
+            &repo.dir,
+            "f.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(h, &parsed.hunks[h].header, Some(vec![i]))],
+        )
+        .unwrap();
+        let content = repo.read("f.txt");
+        assert!(!content.contains("extra a") && content.contains("TWO") && content.contains("EIGHTEEN"));
+    }
+
+    #[test]
+    fn stages_parts_of_untracked_files() {
+        let repo = TestRepo::new("untracked-parts");
+        repo.commit_all_initial();
+        repo.write("dir with space/n.txt", "x\ny\nz\n");
+        let path = "dir with space/n.txt";
+        let headers = hunk_headers(&repo, path, false, true);
+        assert_eq!(headers, ["@@ -0,0 +1,3 @@"]);
+
+        apply_selection(
+            &repo.dir,
+            path,
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], Some(vec![0, 2]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", &format!(":{path}")]), "x\nz\n");
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged[0].status, "A");
+        assert_eq!(st.unstaged[0].status, "M");
+
+        repo.write("w.txt", "a\nb\n");
+        let headers = hunk_headers(&repo, "w.txt", false, true);
+        apply_selection(
+            &repo.dir,
+            "w.txt",
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":w.txt"]), "a\nb\n");
+    }
+
+    #[test]
+    fn discarding_lines_of_an_untracked_file_keeps_it_untracked() {
+        let repo = TestRepo::new("untracked-discard");
+        repo.commit_all_initial();
+        repo.write("n.txt", "x\ny\nz\n");
+        let headers = hunk_headers(&repo, "n.txt", false, true);
+        apply_selection(
+            &repo.dir,
+            "n.txt",
+            false,
+            true,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], Some(vec![1]))],
+        )
+        .unwrap();
+        assert_eq!(repo.read("n.txt"), "x\nz\n");
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].status, "?");
+        assert!(st.staged.is_empty());
+
+        // A failed attempt leaves it untracked too.
+        let err = apply_selection(
+            &repo.dir,
+            "n.txt",
+            false,
+            true,
+            PatchAction::Stage,
+            &[hunk(0, "@@ -0,0 +1,9 @@", None)],
+        );
+        assert!(err.is_err());
+        assert_eq!(status(&repo.dir).unwrap().unstaged[0].status, "?");
+    }
+
+    #[test]
+    fn unstages_lines_of_a_new_file() {
+        let repo = TestRepo::new("unstage-new-lines");
+        repo.commit_all_initial();
+        repo.write("s.txt", "p\nq\nr\n");
+        stage(&repo.dir, &["s.txt".into()]).unwrap();
+        let headers = hunk_headers(&repo, "s.txt", true, false);
+        apply_selection(
+            &repo.dir,
+            "s.txt",
+            true,
+            false,
+            PatchAction::Unstage,
+            &[hunk(0, &headers[0], Some(vec![1]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":s.txt"]), "p\nr\n");
+        assert_eq!(repo.read("s.txt"), "p\nq\nr\n");
+    }
+
+    #[test]
+    fn stages_parts_of_a_deleted_file() {
+        let repo = TestRepo::new("deleted-lines");
+        repo.write("d.txt", "x\ny\n");
+        repo.commit_all("initial");
+        std::fs::remove_file(repo.dir.join("d.txt")).unwrap();
+        let headers = hunk_headers(&repo, "d.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "d.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], Some(vec![0]))],
+        )
+        .unwrap();
+        assert_eq!(repo.git(&["show", ":d.txt"]), "y\n");
+        // Discarding the rest of the deletion brings the line back into the working tree.
+        let headers = hunk_headers(&repo, "d.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "d.txt",
+            false,
+            false,
+            PatchAction::Discard,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(repo.read("d.txt"), "y\n");
+    }
+
+    #[test]
+    fn stages_hunks_with_crlf_and_without_a_final_newline() {
+        let repo = TestRepo::new("hunk-crlf");
+        repo.write_bytes("w.txt", b"a\r\nb\r\nc");
+        repo.commit_all("initial");
+        repo.write_bytes("w.txt", b"a\r\nB\r\nc\r\nd");
+        let headers = hunk_headers(&repo, "w.txt", false, false);
+        apply_selection(
+            &repo.dir,
+            "w.txt",
+            false,
+            false,
+            PatchAction::Stage,
+            &[hunk(0, &headers[0], None)],
+        )
+        .unwrap();
+        assert_eq!(run_bytes(&repo.dir, &["show", ":w.txt"]).unwrap(), b"a\r\nB\r\nc\r\nd");
+        assert_eq!(repo.git(&["diff"]), "");
+    }
+
+    #[test]
+    fn discard_works_before_the_first_commit() {
+        let repo = TestRepo::new("discard-unborn");
+        repo.write("a.txt", "staged\n");
+        stage_all(&repo.dir).unwrap();
+        repo.write("a.txt", "edited\n");
+        repo.write("b.txt", "untracked\n");
+        discard(&repo.dir, &["a.txt".into()], &["b.txt".into()]).unwrap();
+        assert_eq!(repo.read("a.txt"), "staged\n");
+        assert!(!repo.dir.join("b.txt").exists());
     }
 
     #[test]
@@ -2443,6 +3211,44 @@ mod tests {
         // The current branch is refused before anything is deleted.
         assert!(delete("main", true).is_err());
         assert!(on_origin("main"));
+    }
+
+    #[test]
+    fn deletes_remote_branches_only() {
+        let origin = TestRepo::new("delete-remote-only-origin");
+        origin.commit_all_initial();
+        for name in ["tracked", "moved", "gone"] {
+            origin.git(&["branch", name]);
+        }
+        let clone = TestRepo::clone_of(&origin, "delete-remote-only-clone");
+        checkout_remote(&clone.dir, "origin/tracked").unwrap();
+        checkout(&clone.dir, "main").unwrap();
+        let delete = |name: &str| delete_remote_branch(&clone.dir, "origin", name, &mut |_| {});
+        let tracking = |name: &str| rev(&clone.dir, &format!("refs/remotes/origin/{name}")).is_some();
+        let on_origin = |name: &str| rev(&origin.dir, &format!("refs/heads/{name}")).is_some();
+
+        // The local branch tracking it stays.
+        delete("tracked").unwrap();
+        assert!(!tracking("tracked") && !on_origin("tracked"));
+        assert!(rev(&clone.dir, "refs/heads/tracked").is_some());
+
+        // Someone pushed to it since the last fetch: nothing is deleted.
+        origin.git(&["switch", "-q", "moved"]);
+        origin.write("m.txt", "m\n");
+        origin.commit_all("pushed by someone else");
+        origin.git(&["switch", "-q", "main"]);
+        let err = delete("moved").unwrap_err();
+        assert!(err.contains("pushed since it was last fetched"), "{err}");
+        assert!(tracking("moved") && on_origin("moved"));
+
+        // Already deleted on the remote: only the stale remote-tracking branch goes.
+        origin.git(&["branch", "-D", "gone"]);
+        delete("gone").unwrap();
+        assert!(!tracking("gone"));
+
+        assert!(delete("nope").unwrap_err().contains("no remote branch"));
+        assert!(delete_remote_branch(&clone.dir, "nowhere", "main", &mut |_| {}).is_err());
+        assert!(delete("--all").is_err());
     }
 
     #[test]
@@ -3062,6 +3868,79 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         let ours = TestRepo::clone_of(&origin, &format!("{name}-ours"));
         let theirs = TestRepo::clone_of(&origin, &format!("{name}-theirs"));
         (origin, ours, theirs)
+    }
+
+    #[test]
+    fn clones_a_repository_with_progress_and_an_optional_branch() {
+        let (origin, ours, _theirs) = shared("clone");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        ours.write("feature.txt", "feature\n");
+        ours.commit_all("feature work");
+        ours.git(&["push", "-q", "origin", "feature"]);
+        let url = origin.dir.to_str().unwrap();
+
+        let dest = std::env::temp_dir().join(format!("grit-test-{}-clone-dest", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        let mut lines = Vec::new();
+        let info = clone_repo(url, &dest, None, &mut |l| lines.push(l.to_string()));
+        let head = run(&dest, &["symbolic-ref", "--short", "HEAD"]);
+        let not_empty = clone_repo(url, &dest, None, &mut |_| {}).err();
+        let _ = std::fs::remove_dir_all(&dest);
+
+        std::fs::create_dir_all(&dest).unwrap();
+        let on_branch = clone_repo(url, &dest, Some("feature"), &mut |_| {});
+        let branch_head = run(&dest, &["symbolic-ref", "--short", "HEAD"]);
+        let _ = std::fs::remove_dir_all(&dest);
+        let missing = clone_repo(&format!("{url}-missing"), &dest, None, &mut |_| {}).err();
+        let dest_left = dest.exists();
+
+        assert_eq!(info.unwrap().name, dest.file_name().unwrap().to_string_lossy());
+        assert_eq!(head.unwrap().trim(), "main");
+        assert!(lines.iter().any(|l| l.starts_with("Cloning into")), "{lines:?}");
+        assert!(not_empty.unwrap().contains("isn't empty"));
+        assert!(on_branch.is_ok());
+        assert_eq!(branch_head.unwrap().trim(), "feature");
+        assert!(!missing.unwrap().is_empty());
+        assert!(!dest_left, "a failed clone leaves no folder behind");
+    }
+
+    #[test]
+    fn adds_renames_edits_and_removes_remotes() {
+        let (origin, ours, _theirs) = shared("remotes");
+        let url = origin.dir.to_str().unwrap();
+        ours.git(&["branch", "-q", "-u", "origin/main", "main"]);
+
+        add_remote(&ours.dir, "backup", url).unwrap();
+        assert!(
+            add_remote(&ours.dir, "backup", url)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(add_remote(&ours.dir, "--evil", url).is_err());
+        assert!(add_remote(&ours.dir, "bad name", url).is_err());
+        let names = |r: &TestRepo| remotes(&r.dir).unwrap().into_iter().map(|r| r.name).collect::<Vec<_>>();
+        assert_eq!(names(&ours), ["backup", "origin"]);
+
+        rename_remote(&ours.dir, "origin", "upstream").unwrap();
+        assert_eq!(names(&ours), ["backup", "upstream"]);
+        // The upstream of main and the remote-tracking branches move along.
+        assert_eq!(
+            ours.git(&["rev-parse", "--abbrev-ref", "main@{u}"]).trim(),
+            "upstream/main"
+        );
+
+        set_remote_url(&ours.dir, "backup", "https://example.com/x.git").unwrap();
+        let backup = remotes(&ours.dir)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "backup")
+            .unwrap();
+        assert_eq!(backup.url, "https://example.com/x.git");
+
+        remove_remote(&ours.dir, "upstream").unwrap();
+        assert_eq!(names(&ours), ["backup"]);
+        assert!(ours.git(&["for-each-ref", "refs/remotes/upstream"]).trim().is_empty());
+        assert!(remove_remote(&ours.dir, "nope").is_err());
     }
 
     fn push_opts(branch: &str, target: &str) -> PushOptions {

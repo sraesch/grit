@@ -277,6 +277,17 @@ export interface GitProgress {
   text: string;
 }
 
+/** What to do with selected parts of a diff: staging and discarding take unstaged changes, unstaging staged ones. */
+export type PatchAction = "stage" | "unstage" | "discard";
+
+/** Selected changes in one hunk of a diff (see `DiffHunk` in diff.ts). */
+export interface HunkSelection {
+  index: number;
+  header: string;
+  /** Offsets of the selected body lines in the hunk; null selects the whole hunk. */
+  lines: number[] | null;
+}
+
 export interface Settings {
   /** Folder that holds cloned repositories; the Open dialog starts here. Null means the home folder. */
   reposDir: string | null;
@@ -293,6 +304,18 @@ export interface RepoChanged {
 
 export const api = {
   openRepo: (path: string) => invoke<RepoInfo>("open_repo", { path }),
+  /** Whether `path` is a folder inside a repository, i.e. whether `openRepo` would open it. */
+  isRepository: (path: string) => invoke<boolean>("is_repository", { path }),
+  /** The branch new repositories start with: `init.defaultBranch` from the git config, else "main". */
+  defaultBranchName: () => invoke<string>("default_branch_name"),
+  /** Creates a repository in `path` (created if missing) starting on `branch`. Open it with `openRepo`. */
+  initRepo: (path: string, branch: string) => invoke<RepoInfo>("init_repo", { path, branch }),
+  /**
+   * Clones `url` into `dest` (which must not exist or be empty), optionally on `branch`. Progress
+   * arrives as `git-progress` events whose `root` is `dest`. Open the clone with `openRepo`.
+   */
+  cloneRepo: (url: string, dest: string, branch: string | null) =>
+    invoke<RepoInfo>("clone_repo", { url, dest, branch }),
   /** Stops watching a repository whose tab was closed. */
   closeRepo: (root: string) => invoke<void>("close_repo", { root }),
   status: (repo: string) => invoke<Status>("get_status", { repo }),
@@ -310,6 +333,23 @@ export const api = {
   stageAll: (repo: string) => invoke<void>("stage_all", { repo }),
   unstage: (repo: string, paths: string[]) => invoke<void>("unstage", { repo, paths }),
   unstageAll: (repo: string) => invoke<void>("unstage_all", { repo }),
+  /** Reverts the unstaged changes of `tracked` files (staged changes stay) and deletes `untracked` files. */
+  discard: (repo: string, tracked: string[], untracked: string[]) =>
+    invoke<void>("discard", { repo, tracked, untracked }),
+  /**
+   * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
+   * longer matches the selection.
+   */
+  applySelection: (
+    repo: string,
+    path: string,
+    staged: boolean,
+    untracked: boolean,
+    action: PatchAction,
+    selection: HunkSelection[],
+  ) => invoke<void>("apply_selection", { repo, path, staged, untracked, action, selection }),
+  /** Appends `pattern` to the .gitignore in the repository root, creating it if needed. */
+  addToGitignore: (repo: string, pattern: string) => invoke<void>("add_to_gitignore", { repo, pattern }),
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),
   checkout: (repo: string, branch: string) => invoke<void>("checkout_branch", { repo, branch }),
   /** Creates a local branch tracking `branch` (e.g. "origin/feature") and switches to it. */
@@ -336,6 +376,20 @@ export const api = {
   applyStash: (repo: string, sha: string, pop: boolean) => invoke<StashApplyResult>("apply_stash", { repo, sha, pop }),
   dropStash: (repo: string, sha: string) => invoke<void>("drop_stash", { repo, sha }),
   /** Progress arrives as `git-progress` events unless `background` is set. */
+  /**
+   * Deletes `branch` on `remote`, keeping local branches that track it. Rejects without deleting
+   * anything when someone pushed to it since the last fetch. Progress arrives as `git-progress`.
+   */
+  deleteRemoteBranch: (repo: string, remote: string, branch: string) =>
+    invoke<void>("delete_remote_branch", { repo, remote, branch }),
+  /** Adds a remote; rejects with git's message for invalid or taken names. */
+  addRemote: (repo: string, name: string, url: string) => invoke<void>("add_remote", { repo, name, url }),
+  /** Renames a remote along with its remote branches and the upstreams pointing at them. */
+  renameRemote: (repo: string, name: string, newName: string) =>
+    invoke<void>("rename_remote", { repo, name, newName }),
+  setRemoteUrl: (repo: string, name: string, url: string) => invoke<void>("set_remote_url", { repo, name, url }),
+  /** Removes a remote with its remote branches; local branches tracking them lose their upstream. */
+  removeRemote: (repo: string, name: string) => invoke<void>("remove_remote", { repo, name }),
   fetch: (repo: string, options: FetchOptions) => invoke<FetchResult>("fetch", { repo, ...options }),
   /** Progress arrives as `git-progress` events. Conflicts resolve with outcome "conflicts" rather than rejecting. */
   pull: (repo: string, options: PullOptions) => invoke<PullResult>("pull", { repo, ...options }),

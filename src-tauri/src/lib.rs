@@ -2,6 +2,7 @@ mod git;
 mod graph;
 #[cfg(target_os = "macos")]
 mod menu;
+mod patch;
 mod settings;
 mod watcher;
 
@@ -12,7 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    MergeMode, MergeOptions, MergeResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
+    MergeMode, MergeOptions, MergeResult, PatchAction, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
     RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
@@ -36,6 +37,35 @@ async fn open_repo(app: AppHandle, watch: State<'_, WatchState>, path: String) -
         .map_err(|e| e.to_string())?
         .insert(info.root.clone(), debouncer);
     Ok(info)
+}
+
+/// Whether `path` is inside a repository, so Open… can offer to initialize other folders.
+#[tauri::command]
+async fn is_repository(path: String) -> GitResult<bool> {
+    blocking(move || Ok(git::is_repository(&PathBuf::from(path)))).await
+}
+
+/// The branch name new repositories start with.
+#[tauri::command]
+async fn default_branch_name() -> GitResult<String> {
+    blocking(|| Ok(git::default_branch_name())).await
+}
+
+/// Creates a repository; the frontend then opens it with `open_repo`.
+#[tauri::command]
+async fn init_repo(path: String, branch: String) -> GitResult<RepoInfo> {
+    blocking(move || git::init_repo(&PathBuf::from(path), &branch)).await
+}
+
+/// Clones a repository; progress arrives as `git-progress` events whose `root` is `dest`.
+/// The frontend then opens it with `open_repo`.
+#[tauri::command]
+async fn clone_repo(app: AppHandle, url: String, dest: String, branch: Option<String>) -> GitResult<RepoInfo> {
+    blocking(move || {
+        let mut progress = progress_emitter(app, dest.clone());
+        git::clone_repo(&url, &PathBuf::from(&dest), branch.as_deref(), &mut progress)
+    })
+    .await
 }
 
 /// Stops watching a repository whose tab was closed.
@@ -106,8 +136,50 @@ async fn unstage_all(repo: String) -> GitResult<()> {
 }
 
 #[tauri::command]
+async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> GitResult<()> {
+    blocking(move || git::discard(&PathBuf::from(repo), &tracked, &untracked)).await
+}
+
+#[tauri::command]
+async fn apply_selection(
+    repo: String,
+    path: String,
+    staged: bool,
+    untracked: bool,
+    action: PatchAction,
+    selection: Vec<patch::HunkSelection>,
+) -> GitResult<()> {
+    blocking(move || git::apply_selection(&PathBuf::from(repo), &path, staged, untracked, action, &selection)).await
+}
+
+#[tauri::command]
+async fn add_to_gitignore(repo: String, pattern: String) -> GitResult<()> {
+    blocking(move || git::add_to_gitignore(&PathBuf::from(repo), &pattern)).await
+}
+
+#[tauri::command]
 async fn commit(repo: String, message: String, amend: bool) -> GitResult<()> {
     blocking(move || git::commit(&PathBuf::from(repo), &message, amend)).await
+}
+
+#[tauri::command]
+async fn add_remote(repo: String, name: String, url: String) -> GitResult<()> {
+    blocking(move || git::add_remote(&PathBuf::from(repo), &name, &url)).await
+}
+
+#[tauri::command]
+async fn rename_remote(repo: String, name: String, new_name: String) -> GitResult<()> {
+    blocking(move || git::rename_remote(&PathBuf::from(repo), &name, &new_name)).await
+}
+
+#[tauri::command]
+async fn set_remote_url(repo: String, name: String, url: String) -> GitResult<()> {
+    blocking(move || git::set_remote_url(&PathBuf::from(repo), &name, &url)).await
+}
+
+#[tauri::command]
+async fn remove_remote(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::remove_remote(&PathBuf::from(repo), &name)).await
 }
 
 #[tauri::command]
@@ -247,6 +319,16 @@ async fn drop_stash(repo: String, sha: String) -> GitResult<()> {
 }
 
 /// Progress of deleting the remote branch arrives as `git-progress` events.
+/// Deletes a branch on its remote; progress arrives as `git-progress` events.
+#[tauri::command]
+async fn delete_remote_branch(app: AppHandle, repo: String, remote: String, branch: String) -> GitResult<()> {
+    blocking(move || {
+        let mut progress = progress_emitter(app, repo.clone());
+        git::delete_remote_branch(&PathBuf::from(&repo), &remote, &branch, &mut progress)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn delete_branch(
     app: AppHandle,
@@ -338,6 +420,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_repo,
             close_repo,
+            is_repository,
+            default_branch_name,
+            init_repo,
+            clone_repo,
             get_status,
             get_log,
             get_branches,
@@ -349,16 +435,24 @@ pub fn run() {
             stage_all,
             unstage,
             unstage_all,
+            discard,
+            add_to_gitignore,
+            apply_selection,
             commit,
             checkout_branch,
             checkout_remote_branch,
             checkout_commit,
             create_branch,
             delete_branch,
+            delete_remote_branch,
             get_stashes,
             stash,
             apply_stash,
             drop_stash,
+            add_remote,
+            rename_remote,
+            set_remote_url,
+            remove_remote,
             fetch,
             pull,
             push,

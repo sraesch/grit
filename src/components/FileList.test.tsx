@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { file } from "../test/tauri";
@@ -10,7 +10,7 @@ describe("FileList", () => {
   it("shows files under their folders with a status badge", () => {
     render(<FileList files={files} selectedPath={null} onSelect={() => {}} />);
     const rows = screen.getAllByRole("listitem").map((li) => li.textContent);
-    expect(rows).toEqual(["▸src", "Mapp.ts", "Rb.rs", "+new.txt"]);
+    expect(rows).toEqual(["src", "Mapp.ts", "Rb.rs", "+new.txt"]);
     const row = screen.getByText("app.ts").closest("li")!;
     expect(row).toHaveAttribute("title", "src/app.ts");
     expect(row.querySelector(".status-badge")).toHaveTextContent("M");
@@ -37,7 +37,8 @@ describe("FileList", () => {
   it("runs the row action without changing the selection", async () => {
     const onSelect = vi.fn();
     const onAction = vi.fn();
-    render(<FileList files={files} selectedPath={null} onSelect={onSelect} actionLabel="Stage" onAction={onAction} />);
+    const actions = [{ label: "Stage", onFile: onAction }];
+    render(<FileList files={files} selectedPath={null} onSelect={onSelect} actions={actions} />);
 
     const row = screen.getByText("new.txt").closest("li")!;
     await userEvent.click(row.querySelector("button")!);
@@ -84,9 +85,7 @@ describe("FileList", () => {
         files={list}
         selectedPath={null}
         onSelect={() => {}}
-        actionLabel="Stage"
-        onAction={() => {}}
-        onFolderAction={onFolderAction}
+        actions={[{ label: "Stage", onFile: () => {}, onFolder: onFolderAction }]}
       />,
     );
     const src = screen.getByText("src").closest("li")!;
@@ -96,7 +95,45 @@ describe("FileList", () => {
   });
 
   it("has no folder action unless one is given", () => {
-    render(<FileList files={files} selectedPath={null} onSelect={() => {}} actionLabel="Stage" onAction={() => {}} />);
+    const actions = [{ label: "Stage", onFile: () => {} }];
+    render(<FileList files={files} selectedPath={null} onSelect={() => {}} actions={actions} />);
     expect(screen.getByText("src").closest("li")!.querySelector("button")).toBeNull();
+  });
+
+  it("shows several row actions, marking destructive ones", async () => {
+    const onDiscard = vi.fn();
+    const onActivate = vi.fn();
+    render(
+      <FileList
+        files={files}
+        selectedPath={null}
+        onSelect={() => {}}
+        onActivate={onActivate}
+        actions={[
+          { label: "Stage", onFile: () => {} },
+          { label: "Discard", danger: true, onFile: onDiscard, fileTitle: (f) => `Discard ${f.path}` },
+        ]}
+      />,
+    );
+    const row = screen.getByText("new.txt").closest("li")!;
+    const buttons = within(row).getAllByRole("button");
+    expect(buttons.map((b) => b.textContent)).toEqual(["Stage", "Discard"]);
+    expect(buttons[1]).toHaveClass("row-action", "danger");
+    expect(buttons[1]).toHaveAttribute("title", "Discard new.txt");
+    await userEvent.dblClick(buttons[1]);
+    expect(onDiscard).toHaveBeenCalledWith(files[1]);
+    expect(onActivate).not.toHaveBeenCalled();
+  });
+
+  it("reports right-clicks on files and folders", () => {
+    const onContextMenu = vi.fn();
+    const list = [file("src/a.ts"), file("src/lib/b.ts"), file("c.txt")];
+    render(<FileList files={list} selectedPath={null} onSelect={() => {}} onContextMenu={onContextMenu} />);
+
+    fireEvent.contextMenu(screen.getByText("c.txt"), { clientX: 10, clientY: 20 });
+    expect(onContextMenu).toHaveBeenLastCalledWith({ kind: "file", file: list[2] }, 10, 20);
+
+    fireEvent.contextMenu(screen.getByText("src"), { clientX: 5, clientY: 6 });
+    expect(onContextMenu).toHaveBeenLastCalledWith({ kind: "folder", path: "src/", files: [list[1], list[0]] }, 5, 6);
   });
 });

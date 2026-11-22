@@ -10,7 +10,10 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 
 ## Features
 
-- **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button or double-click), stage/unstage all, commit and amend (Ctrl/Cmd+Enter)
+- **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button, double-click or context menu),
+  stage/unstage all, discard changes and delete untracked files (per file, per folder or all, after confirming),
+  stage, unstage or discard single hunks or selected lines, add untracked files and folders to `.gitignore`, commit and amend
+  (Ctrl/Cmd+Enter)
 - **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs; double-click a commit to check it out
 - **Branches**: local, remote and tag lists; double-click a local branch to check it out, right-click it to check it out or delete it
 - **Fetch, pull and push**: fetch one or all remotes (prune, tags), pull by merge or rebase with optional autostash,
@@ -28,6 +31,7 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 ## Architecture
 
 - `src-tauri/src/git.rs`: runs the installed `git` executable for all operations, so hooks, credentials, SSH and signing behave like the CLI
+- `src-tauri/src/patch.rs`: builds patches from selected hunks and lines of a freshly generated diff, for `git apply`
 - `src-tauri/src/graph.rs`: commit graph lane layout, computed in Rust and sent per row to the frontend
 - `src-tauri/src/watcher.rs`: debounced file watcher that emits `repo-changed` events
 - Fetch, pull, push, rebase and merge stream git's progress output to the frontend as `git-progress` events; background fetches run

@@ -3,6 +3,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, RepoInfo, Settings } from "./api";
 import { AboutDialog } from "./components/AboutDialog";
+import { CloneDialog } from "./components/CloneDialog";
+import { ContextMenu, MenuItem } from "./components/ContextMenu";
+import { InitRepoDialog } from "./components/InitRepoDialog";
 import { LogoLockup, LogoTile } from "./components/Logo";
 import { RepoTab, tabPanelId } from "./components/RepoTab";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -28,6 +31,11 @@ function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // "New repository…", or the offer to initialize a folder Open… chose that isn't a repository.
+  const [newRepo, setNewRepo] = useState<{ folder?: string } | null>(null);
+  const [cloneOpen, setCloneOpen] = useState(false);
+  // The tab bar's "+" menu, below the button.
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The active tab puts its fetch, pull and push buttons here.
   const [repoActions, setRepoActions] = useState<HTMLDivElement | null>(null);
   const restoreStarted = useRef(false);
@@ -36,6 +44,9 @@ function App() {
   const clearError = useCallback(() => setError(null), []);
   const closeAbout = useCallback(() => setAboutOpen(false), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const closeNewRepo = useCallback(() => setNewRepo(null), []);
+  const closeClone = useCallback(() => setCloneOpen(false), []);
+  const closeAddMenu = useCallback(() => setAddMenu(null), []);
 
   /** Adds a tab for the repository at `path`, or shows its tab if it is already open. */
   const addTab = useCallback((info: RepoInfo) => {
@@ -65,8 +76,13 @@ function App() {
       title: "Open repository",
       defaultPath: settings?.reposDir ?? undefined,
     });
-    if (typeof selected === "string") openRepo(selected);
+    if (typeof selected !== "string") return;
+    // Offer to initialize a folder that isn't a repository. If that can't be checked, opening reports why.
+    if (await api.isRepository(selected).catch(() => true)) openRepo(selected);
+    else setNewRepo({ folder: selected });
   }, [openRepo]);
+
+  const onRepoCreated = useCallback((info: RepoInfo) => openRepo(info.root), [openRepo]);
 
   const closeTab = useCallback(
     (root: string) => {
@@ -120,13 +136,18 @@ function App() {
     };
   }, [hasTabs, settings]);
 
-  // "Settings…" in the macOS app menu.
+  // "Settings…", "Open…", "Clone…" and "New Repository…" in the macOS app menu.
   useEffect(() => {
-    const unlisten = listen("open-settings", () => setSettingsOpen(true));
+    const unlisten = [
+      listen("open-settings", () => setSettingsOpen(true)),
+      listen("open-repository", () => chooseRepo()),
+      listen("clone-repository", () => setCloneOpen(true)),
+      listen("new-repository", () => setNewRepo({})),
+    ];
     return () => {
-      unlisten.then((fn) => fn());
+      unlisten.forEach((u) => u.then((fn) => fn()));
     };
-  }, []);
+  }, [chooseRepo]);
 
   // App-wide shortcuts: settings, opening, closing and cycling through tabs.
   useEffect(() => {
@@ -152,6 +173,11 @@ function App() {
   }, [tabs, active, chooseRepo, closeTab]);
 
   const labels = tabLabels(tabs);
+  const addItems: MenuItem[] = [
+    { label: "Open Repository…", onSelect: chooseRepo },
+    { label: "Clone Repository…", onSelect: () => setCloneOpen(true) },
+    { label: "New Repository…", onSelect: () => setNewRepo({}) },
+  ];
 
   return (
     <div className="app">
@@ -217,7 +243,17 @@ function App() {
             );
           })}
         </div>
-        <button className="repo-tab-add" onClick={chooseRepo} aria-label="Open repository" title="Open repository (Ctrl/Cmd+O)">
+        <button
+          className="repo-tab-add"
+          aria-label="Open, clone or create a repository"
+          aria-haspopup="menu"
+          aria-expanded={!!addMenu}
+          title="Open, clone or create a repository"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setAddMenu({ x: rect.left, y: rect.bottom });
+          }}
+        >
           +
         </button>
       </nav>
@@ -243,12 +279,22 @@ function App() {
       {tabs.length === 0 && !restoring && (
         <div className="welcome">
           <LogoLockup size={56} as="h1" />
-          <p>Open a local repository to see its changes and history.</p>
-          <button className="primary" onClick={chooseRepo}>
-            Open repository…
-          </button>
+          <p>Open a local repository to see its changes and history, clone one, or create a new one.</p>
+          <div className="welcome-actions">
+            <button className="primary" onClick={chooseRepo}>
+              Open repository…
+            </button>
+            <button onClick={() => setCloneOpen(true)}>Clone repository…</button>
+            <button onClick={() => setNewRepo({})}>New repository…</button>
+          </div>
         </div>
       )}
+
+      {addMenu && (
+        <ContextMenu x={addMenu.x} y={addMenu.y} label="Repositories" items={addItems} onClose={closeAddMenu} />
+      )}
+      {cloneOpen && <CloneDialog onCloned={onRepoCreated} onClose={closeClone} />}
+      {newRepo && <InitRepoDialog folder={newRepo.folder} onCreated={onRepoCreated} onClose={closeNewRepo} />}
 
       {aboutOpen && <AboutDialog onClose={closeAbout} />}
       {settingsOpen && <SettingsDialog onClose={closeSettings} onSaved={setSettings} />}

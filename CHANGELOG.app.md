@@ -8,6 +8,15 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.5.0 — 2026-11-22
+
+- Stage, unstage or discard single hunks or selected lines of a diff, and discard whole files or folders after a confirmation
+- Clone a repository or create a new one from the welcome screen, the "+" menu in the tab bar or the macOS File menu
+- Manage remotes in the sidebar: add, fetch, edit, rename or remove them, and check out, merge or delete their branches with a right-click
+- Branches with names like `feature/login` are grouped in folders in the sidebar
+- Ignore untracked files or folders with a right-click, without editing `.gitignore` by hand
+- Aborting a merge no longer leaves its message in the commit box
+
 ## 0.4.2 — 2026-11-21
 
 - Images stored in Git LFS now show up in the history's image preview instead of failing to load

@@ -1,6 +1,7 @@
 import { ReactNode, useMemo, useState } from "react";
 import { FileChange } from "../api";
 import { buildFileTree, filesIn, TreeNode } from "../fileTree";
+import { Chevron } from "./Chevron";
 
 const INDENT = 14;
 
@@ -24,26 +25,32 @@ export function StatusBadge({ status }: { status: string }) {
   );
 }
 
+/** A button shown on hovered rows, e.g. "Stage". */
+export interface RowAction {
+  label: string;
+  /** Marks a destructive action. */
+  danger?: boolean;
+  onFile: (file: FileChange) => void;
+  /** Runs the action on every file in a folder; without it, folder rows don't show the action. */
+  onFolder?: (files: FileChange[]) => void;
+  /** Tooltip on a file row. */
+  fileTitle?: (file: FileChange) => string | undefined;
+}
+
+/** What a row's context menu is about: one file, or every file in a folder. */
+export type RowTarget = { kind: "file"; file: FileChange } | { kind: "folder"; path: string; files: FileChange[] };
+
 interface FileListProps {
   files: FileChange[];
   selectedPath: string | null;
   onSelect: (file: FileChange) => void;
   onActivate?: (file: FileChange) => void;
-  actionLabel?: string;
-  onAction?: (file: FileChange) => void;
-  /** Runs the action on every file in a folder; shown on folder rows with the same label. */
-  onFolderAction?: (files: FileChange[]) => void;
+  actions?: RowAction[];
+  /** Right-click on a row, at viewport coordinates. */
+  onContextMenu?: (target: RowTarget, x: number, y: number) => void;
 }
 
-export function FileList({
-  files,
-  selectedPath,
-  onSelect,
-  onActivate,
-  actionLabel,
-  onAction,
-  onFolderAction,
-}: FileListProps) {
+export function FileList({ files, selectedPath, onSelect, onActivate, actions = [], onContextMenu }: FileListProps) {
   const tree = useMemo(() => buildFileTree(files), [files]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
@@ -67,22 +74,33 @@ export function FileList({
             style={indent}
             aria-expanded={open}
             onClick={() => toggle(node.path)}
+            onContextMenu={
+              onContextMenu &&
+              ((e) => {
+                e.preventDefault();
+                onContextMenu({ kind: "folder", path: node.path, files: filesIn(node) }, e.clientX, e.clientY);
+              })
+            }
             title={node.path}
           >
-            <span className={`chevron${open ? " open" : ""}`}>▸</span>
+            <Chevron open={open} />
             <span className="file-name">{node.name}</span>
             {!open && <span className="dir-count">{node.fileCount}</span>}
-            {onFolderAction && actionLabel && (
-              <button
-                className="row-action"
-                title={`${actionLabel} ${node.fileCount} file${node.fileCount === 1 ? "" : "s"} in ${node.path}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onFolderAction(filesIn(node));
-                }}
-              >
-                {actionLabel}
-              </button>
+            {actions.map(
+              ({ label, danger, onFolder }) =>
+                onFolder && (
+                  <button
+                    key={label}
+                    className={danger ? "row-action danger" : "row-action"}
+                    title={`${label} ${node.fileCount} file${node.fileCount === 1 ? "" : "s"} in ${node.path}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onFolder(filesIn(node));
+                    }}
+                  >
+                    {label}
+                  </button>
+                ),
             )}
           </li>,
         );
@@ -96,22 +114,33 @@ export function FileList({
             style={indent}
             onClick={() => onSelect(f)}
             onDoubleClick={() => onActivate?.(f)}
+            onContextMenu={
+              onContextMenu &&
+              ((e) => {
+                e.preventDefault();
+                onContextMenu({ kind: "file", file: f }, e.clientX, e.clientY);
+              })
+            }
             title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}
           >
             <span className="chevron-spacer" />
             <StatusBadge status={f.status} />
             <span className="file-name">{node.name}</span>
-            {onAction && actionLabel && (
+            {actions.map(({ label, danger, onFile, fileTitle }) => (
               <button
-                className="row-action"
+                key={label}
+                className={danger ? "row-action danger" : "row-action"}
+                title={fileTitle?.(f)}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onAction(f);
+                  onFile(f);
                 }}
+                // Keep a quick double-click on the button from also activating the row.
+                onDoubleClick={(e) => e.stopPropagation()}
               >
-                {actionLabel}
+                {label}
               </button>
-            )}
+            ))}
           </li>,
         );
       }
