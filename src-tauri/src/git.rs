@@ -98,8 +98,16 @@ pub struct RepoInfo {
 }
 
 pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
-    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"])
-        .map_err(|_| format!("{} is not inside a git repository", path.display()))?;
+    let out = run(path, &["rev-parse", "--show-toplevel", "--absolute-git-dir"]).map_err(|_| {
+        if is_bare(path) {
+            format!(
+                "{} is a bare repository, which has no working tree to show. Clone it to work with it.",
+                path.display()
+            )
+        } else {
+            format!("{} is not inside a git repository", path.display())
+        }
+    })?;
     let mut lines = out.lines();
     let root = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
     let git_dir = lines.next().ok_or("Unexpected rev-parse output")?.to_string();
@@ -108,6 +116,55 @@ pub fn open_repo(path: &Path) -> GitResult<RepoInfo> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.clone());
     Ok(RepoInfo { root, git_dir, name })
+}
+
+/// Whether `path` is an existing folder inside a repository, bare ones included. Such a folder must
+/// never be offered for `init_repo`, even when `open_repo` can't open it (a bare repository).
+pub fn is_repository(path: &Path) -> bool {
+    path.is_dir() && run(path, &["rev-parse", "--git-dir"]).is_ok()
+}
+
+/// Whether `path` is inside a bare repository, which has no working tree.
+fn is_bare(path: &Path) -> bool {
+    path.is_dir() && run(path, &["rev-parse", "--is-bare-repository"]).is_ok_and(|out| out.trim() == "true")
+}
+
+/// The branch name `git init` starts with: `init.defaultBranch` from the user's config, else "main".
+pub fn default_branch_name() -> String {
+    let home = std::env::temp_dir();
+    run(&home, &["config", "--global", "--get", "init.defaultBranch"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Checks that `name` can be a branch name, with git's own rules.
+fn valid_branch_name(name: &str) -> GitResult<()> {
+    branch_arg(name)?;
+    run(&std::env::temp_dir(), &["check-ref-format", "--branch", name])
+        .map(drop)
+        .map_err(|_| format!("'{name}' is not a valid branch name"))
+}
+
+/// Creates a repository in `path` (created if missing) whose first branch is `branch`.
+pub fn init_repo(path: &Path, branch: &str) -> GitResult<RepoInfo> {
+    valid_branch_name(branch)?;
+    if path.join(".git").exists() {
+        return Err(format!("{} is already a git repository", path.display()));
+    }
+    // `git init` in a bare repository would hide it behind a new, empty repository.
+    if is_bare(path) {
+        return Err(format!("{} is inside a bare repository", path.display()));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(format!("{} is not a folder", path.display()));
+    }
+    std::fs::create_dir_all(path).map_err(|e| format!("Could not create {}: {e}", path.display()))?;
+    run(path, &["init", "-q"])?;
+    // Instead of `git init -b`, which needs git 2.28.
+    run(path, &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])?;
+    open_repo(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,6 +2278,37 @@ mod tests {
         let err = open_repo(&dir).err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.unwrap().contains("not inside a git repository"));
+    }
+
+    #[test]
+    fn bare_repositories_are_repositories_but_not_opened_or_initialized() {
+        let origin = bare("bare-detect");
+        let objects = origin.dir.join("objects");
+        assert!(is_repository(&origin.dir));
+        assert!(is_repository(&objects));
+        assert!(open_repo(&origin.dir).err().unwrap().contains("bare repository"));
+        assert!(init_repo(&origin.dir, "main").err().unwrap().contains("bare repository"));
+        assert!(init_repo(&objects, "main").err().unwrap().contains("bare repository"));
+        assert!(!origin.dir.join(".git").exists() && !objects.join(".git").exists());
+    }
+
+    #[test]
+    fn init_repo_creates_the_folder_and_the_first_branch() {
+        let dir = std::env::temp_dir().join(format!("grit-test-{}-init/new/repo", std::process::id()));
+        let base = dir.parent().unwrap().parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!is_repository(&dir));
+        let info = init_repo(&dir, "trunk").unwrap();
+        let head = run(&dir, &["symbolic-ref", "HEAD"]).unwrap();
+        let again = init_repo(&dir, "trunk").err();
+        let bad = init_repo(&base.join("other"), "no..dots").err();
+        let is_repo = is_repository(&dir);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(info.name, "repo");
+        assert_eq!(head.trim(), "refs/heads/trunk");
+        assert!(again.unwrap().contains("already a git repository"));
+        assert!(bad.unwrap().contains("not a valid branch name"));
+        assert!(is_repo);
     }
 
     #[test]

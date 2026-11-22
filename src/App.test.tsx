@@ -19,6 +19,7 @@ const openMock = vi.mocked(open);
 let emitRepoChanged: (payload: RepoChanged) => void = () => {};
 let emitProgress: (payload: GitProgress) => void = () => {};
 let emitOpenSettings: () => void = () => {};
+let emitMenu: (event: string) => void = () => {};
 
 function backend(statusFn = () => makeStatus({ unstaged: [file("a.txt")] })) {
   mockBackend(invokeMock, {
@@ -37,6 +38,7 @@ describe("App", () => {
     emitRepoChanged = (payload) => emit("repo-changed", payload);
     emitProgress = (payload) => emit("git-progress", payload);
     emitOpenSettings = () => emit("open-settings", null);
+    emitMenu = (event) => emit(event, null);
     listenMock.mockImplementation(async (event, handler) => {
       const h = handler as (e: { payload: unknown }) => void;
       if (!handlers.has(event)) handlers.set(event, new Set());
@@ -74,6 +76,65 @@ describe("App", () => {
     render(<App />);
     await userEvent.click(screen.getByRole("button", { name: "Open repository…" }));
     expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/home/ada/code" }));
+  });
+
+  it("offers to initialize a folder that isn't a repository", async () => {
+    const initRepo = vi.fn(({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "fresh" }));
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: null }),
+      is_repository: () => false,
+      default_branch_name: () => "trunk",
+      init_repo: initRepo,
+      open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "fresh" }),
+      get_status: () => makeStatus(),
+      get_log: () => [],
+      get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+    });
+    openMock.mockResolvedValue("/work/fresh");
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Open repository…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Initialize Repository" });
+    expect(within(dialog).getByText(/isn't a git repository yet/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Folder")).toHaveValue("/work/fresh");
+    await waitFor(() => expect(within(dialog).getByLabelText("Initial branch")).toHaveValue("trunk"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Initialize" }));
+
+    expect(initRepo).toHaveBeenCalledWith({ path: "/work/fresh", branch: "trunk" });
+    expect(await screen.findByRole("tab", { name: "fresh" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("creates a new repository in the repositories folder", async () => {
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: "/home/ada/code" }),
+      default_branch_name: () => "main",
+      init_repo: () => {
+        throw "/home/ada/code/ is already a git repository";
+      },
+    });
+    render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "New repository…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "New Repository" });
+    const folder = within(dialog).getByLabelText("Folder");
+    await waitFor(() => expect(folder).toHaveValue("/home/ada/code/"));
+    await waitFor(() => expect(within(dialog).getByLabelText("Initial branch")).toHaveValue("main"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    // Errors stay in the dialog, so the folder can be corrected.
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("already a git repository");
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("opens the New Repository dialog from the menu", async () => {
+    mockBackend(invokeMock, {
+      get_settings: () => ({ reposDir: "/home/ada/code" }),
+      default_branch_name: () => "main",
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "grit" });
+    await act(async () => emitMenu("new-repository"));
+    expect(await screen.findByRole("dialog", { name: "New Repository" })).toBeInTheDocument();
   });
 
   it("opens the settings from the toolbar and with Ctrl+,", async () => {
@@ -149,7 +210,8 @@ describe("App", () => {
 
     async function openViaDialog(path: string) {
       openMock.mockResolvedValueOnce(path);
-      await userEvent.click(screen.getByRole("button", { name: "Open repository" }));
+      await userEvent.click(screen.getByRole("button", { name: "Open or create a repository" }));
+      await userEvent.click(screen.getByRole("menuitem", { name: "Open Repository…" }));
     }
 
     it("opens repositories side by side and switches between them", async () => {

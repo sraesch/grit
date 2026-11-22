@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Branches, FetchOptions, PullOptions, PushOptions, Remote, Status } from "../api";
 import {
   ALL_REMOTES,
@@ -21,11 +21,36 @@ interface DialogProps {
   canSubmit: boolean;
   onSubmit: () => void;
   onClose: () => void;
+  /** While the dialog's work runs: the fields and buttons are disabled and the dialog can't be closed. */
+  busy?: boolean;
+  /** Why the last attempt failed, shown below the fields. */
+  error?: string | null;
+  /** Shown above the buttons, e.g. progress while busy. */
+  status?: ReactNode;
   children: ReactNode;
 }
 
 /** Modal form shared by the fetch, pull, push, rebase and merge dialogs: Enter submits, Escape and Cancel close. */
-export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, onClose, children }: DialogProps) {
+export function Dialog({
+  id,
+  title,
+  submitLabel,
+  danger,
+  canSubmit,
+  onSubmit,
+  onClose,
+  busy = false,
+  error,
+  status,
+  children,
+}: DialogProps) {
+  const ready = canSubmit && !busy;
+  // The handlers below see the latest value without re-subscribing.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  const close = useCallback(() => {
+    if (!busyRef.current) onClose();
+  }, [onClose]);
   const formRef = useRef<HTMLFormElement>(null);
 
   // Start on the first field (or the submit button of a plain confirmation), so the keyboard works right away.
@@ -38,18 +63,18 @@ export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, on
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
       previous?.focus?.();
     };
-  }, [onClose]);
+  }, [close]);
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (canSubmit) onSubmit();
+    if (ready) onSubmit();
   }
 
   // Enter confirms from any field. Forms only do that by themselves from text inputs, and
@@ -57,17 +82,18 @@ export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, on
   function onKeyDown(e: KeyboardEvent<HTMLFormElement>) {
     if (e.key !== "Enter" || e.target instanceof HTMLButtonElement) return;
     e.preventDefault();
-    if (canSubmit) onSubmit();
+    if (ready) onSubmit();
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <form
         ref={formRef}
         className="modal remote-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${id}-title`}
+        aria-busy={busy || undefined}
         onSubmit={submit}
         onKeyDown={onKeyDown}
         noValidate
@@ -75,12 +101,22 @@ export function Dialog({ id, title, submitLabel, danger, canSubmit, onSubmit, on
         <header className="modal-header">
           <h2 id={`${id}-title`}>{title}</h2>
         </header>
-        <div className="settings-body">{children}</div>
+        <div className="settings-body">
+          <fieldset className="dialog-fields" disabled={busy}>
+            {children}
+          </fieldset>
+          {error && (
+            <p id={`${id}-error`} className="settings-error" role="alert">
+              {error}
+            </p>
+          )}
+          {status}
+        </div>
         <footer className="modal-footer">
-          <button type="button" onClick={onClose}>
+          <button type="button" onClick={onClose} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className={danger ? "primary danger" : "primary"} disabled={!canSubmit}>
+          <button type="submit" className={danger ? "primary danger" : "primary"} disabled={!ready}>
             {submitLabel}
           </button>
         </footer>

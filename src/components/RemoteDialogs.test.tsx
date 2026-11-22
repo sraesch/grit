@@ -4,12 +4,42 @@ import { describe, expect, it, vi } from "vitest";
 import { Branch, Branches, Operation, Remote, Status } from "../api";
 import { file, makeStatus } from "../test/tauri";
 import { OperationBanner } from "./OperationBanner";
-import { FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
+import { Dialog, FetchDialog, PullDialog, PushDialog } from "./RemoteDialogs";
 
 const remotes: Remote[] = [
   { name: "origin", url: "git@example.com:ada/demo.git" },
   { name: "upstream", url: "https://example.com/team/demo.git" },
 ];
+
+describe("Dialog", () => {
+  it("can't be closed or submitted while busy, and shows its error and status", async () => {
+    const onSubmit = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <Dialog
+        id="demo"
+        title="Demo"
+        submitLabel="Go"
+        canSubmit
+        onSubmit={onSubmit}
+        onClose={onClose}
+        busy
+        error="It failed"
+        status={<p>Working…</p>}
+      >
+        <input aria-label="Name" />
+      </Dialog>,
+    );
+    expect(screen.getByLabelText("Name")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Go" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("It failed");
+    expect(screen.getByText("Working…")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
 
 describe("FetchDialog", () => {
   function setup(defaultRemote: string | null = "origin", list = remotes) {

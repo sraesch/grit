@@ -304,6 +304,12 @@ export interface RepoChanged {
 
 export const api = {
   openRepo: (path: string) => invoke<RepoInfo>("open_repo", { path }),
+  /** Whether `path` is a folder inside a repository, i.e. whether `openRepo` would open it. */
+  isRepository: (path: string) => invoke<boolean>("is_repository", { path }),
+  /** The branch new repositories start with: `init.defaultBranch` from the git config, else "main". */
+  defaultBranchName: () => invoke<string>("default_branch_name"),
+  /** Creates a repository in `path` (created if missing) starting on `branch`. Open it with `openRepo`. */
+  initRepo: (path: string, branch: string) => invoke<RepoInfo>("init_repo", { path, branch }),
   /** Stops watching a repository whose tab was closed. */
   closeRepo: (root: string) => invoke<void>("close_repo", { root }),
   status: (repo: string) => invoke<Status>("get_status", { repo }),
