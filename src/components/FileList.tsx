@@ -1,6 +1,7 @@
 import { ReactNode, useMemo, useState } from "react";
 import { FileChange } from "../api";
 import { buildFileTree, filesIn, TreeNode } from "../fileTree";
+import { Chevron } from "./Chevron";
 
 const INDENT = 14;
 
@@ -82,7 +83,7 @@ export function FileList({ files, selectedPath, onSelect, onActivate, actions = 
             }
             title={node.path}
           >
-            <span className={`chevron${open ? " open" : ""}`}>▸</span>
+            <Chevron open={open} />
             <span className="file-name">{node.name}</span>
             {!open && <span className="dir-count">{node.fileCount}</span>}
             {actions.map(

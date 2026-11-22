@@ -1,9 +1,11 @@
-import { MouseEvent, useCallback, useState } from "react";
+import { Fragment, MouseEvent, ReactNode, useCallback, useState } from "react";
 import { Branch, Branches, Remote, Stash } from "../api";
 import { SwitchTarget, targetForRemote } from "../branches";
+import { BranchTreeNode, buildBranchTree } from "../branchTree";
 import { groupRemoteBranches } from "../remote";
 import { formatTrack, fullDate, relativeTime } from "../util";
 import { ContextMenu, MenuItem } from "./ContextMenu";
+import { Chevron } from "./Chevron";
 
 export type View = "changes" | "history" | "stash";
 
@@ -40,6 +42,82 @@ interface SidebarProps {
   onDeleteRemoteBranch: (branch: Branch) => void;
 }
 
+/** Left padding of a tree row, in pixels: `base` for top-level rows, deeper rows indented further. */
+const indentOf = (base: number, depth: number) => base + depth * 14;
+
+/** A set of collapsed keys with a toggle; everything not in it is expanded. */
+function useCollapsed(): [Set<string>, (key: string) => void] {
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggle = useCallback(
+    (key: string) =>
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(key)) next.add(key);
+        return next;
+      }),
+    [],
+  );
+  return [collapsed, toggle];
+}
+
+interface BranchTreeProps<T> {
+  nodes: BranchTreeNode<T>[];
+  /** Left padding of top-level branch rows, in pixels. */
+  indent: number;
+  depth?: number;
+  /** Folder paths (with `keyPrefix`) that are collapsed. */
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+  /** Distinguishes the folders of different trees sharing `collapsed`. */
+  keyPrefix?: string;
+  keyOf: (item: T) => string;
+  /** Renders a branch row; `name` is its last path segment, `padding` its left padding. */
+  renderLeaf: (item: T, name: string, padding: number) => ReactNode;
+}
+
+/** Branches nested in collapsible folders by the segments of their names, e.g. "ftr/gitignore". */
+function BranchTree<T>({ nodes, indent, depth = 0, collapsed, onToggle, keyPrefix = "", keyOf, renderLeaf }: BranchTreeProps<T>) {
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === "leaf") return <Fragment key={keyOf(node.item)}>{renderLeaf(node.item, node.name, indentOf(indent, depth))}</Fragment>;
+        const key = `${keyPrefix}${node.path}/`;
+        const expanded = !collapsed.has(key);
+        return (
+          <li key={`folder:${node.path}`} className="branch-folder">
+            <button
+              className="folder-row"
+              aria-expanded={expanded}
+              aria-label={node.name}
+              title={`${node.path}/`}
+              style={{ paddingLeft: indentOf(indent, depth) - 4 }}
+              onClick={() => onToggle(key)}
+            >
+              <Chevron open={expanded} />
+              <span className="branch-name">{node.name}</span>
+              <span className="folder-count">{node.count}</span>
+            </button>
+            {expanded && (
+              <ul aria-label={`Branches in ${node.path}`}>
+                <BranchTree
+                  nodes={node.children}
+                  indent={indent}
+                  depth={depth + 1}
+                  collapsed={collapsed}
+                  onToggle={onToggle}
+                  keyPrefix={keyPrefix}
+                  keyOf={keyOf}
+                  renderLeaf={renderLeaf}
+                />
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </>
+  );
+}
+
 interface RemotesGroupProps {
   branches: Branches;
   onActivate: (b: Branch) => void;
@@ -53,15 +131,10 @@ interface RemotesGroupProps {
 /** The remotes, each with its remote branches; right-click a remote to fetch, edit or remove it. */
 function RemotesGroup({ branches, onActivate, onAdd, onBranchMenu, onGroupMenu, onRemoteMenu }: RemotesGroupProps) {
   const [open, setOpen] = useState(false);
-  // Remotes are expanded unless collapsed.
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Remotes and their folders are expanded unless collapsed.
+  const [collapsed, toggle] = useCollapsed();
+  const [collapsedFolders, toggleFolder] = useCollapsed();
   const groups = groupRemoteBranches(branches.remote, branches.remotes);
-  const toggle = (remote: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(remote)) next.add(remote);
-      return next;
-    });
 
   return (
     <div className="branch-group">
@@ -73,7 +146,7 @@ function RemotesGroup({ branches, onActivate, onAdd, onBranchMenu, onGroupMenu, 
         }}
       >
         <button className="group-title" aria-expanded={open} onClick={() => setOpen(!open)}>
-          <span className={`chevron${open ? " open" : ""}`}>▸</span>
+          <Chevron open={open} />
           Remotes
           <span className="count">{groups.length}</span>
         </button>
@@ -98,27 +171,34 @@ function RemotesGroup({ branches, onActivate, onAdd, onBranchMenu, onGroupMenu, 
                     if (known) onRemoteMenu(known, e);
                   }}
                 >
-                  <span className={`chevron${expanded ? " open" : ""}`} aria-hidden="true">
-                    ▸
-                  </span>
+                  <Chevron open={expanded} />
                   <span className="branch-name">{remote}</span>
                 </button>
                 {expanded && (
                   <ul aria-label={`Branches on ${remote}`}>
                     {items.length === 0 && <li className="empty-remote">No branches fetched</li>}
-                    {items.map(({ branch: b, shortName }) => (
-                      <li
-                        key={b.name}
-                        onDoubleClick={() => onActivate(b)}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          onBranchMenu(b, e);
-                        }}
-                        title={`${b.name}\nDouble-click to switch to a local branch tracking this one`}
-                      >
-                        <span className="branch-name">{shortName}</span>
-                      </li>
-                    ))}
+                    <BranchTree
+                      nodes={buildBranchTree(items, (i) => i.shortName)}
+                      indent={40}
+                      collapsed={collapsedFolders}
+                      onToggle={toggleFolder}
+                      keyPrefix={`${remote}\0`}
+                      keyOf={(i) => i.branch.name}
+                      renderLeaf={({ branch: b }, name, padding) => (
+                        <li
+                          key={b.name}
+                          style={{ paddingLeft: padding }}
+                          onDoubleClick={() => onActivate(b)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            onBranchMenu(b, e);
+                          }}
+                          title={`${b.name}\nDouble-click to switch to a local branch tracking this one`}
+                        >
+                          <span className="branch-name">{name}</span>
+                        </li>
+                      )}
+                    />
                   </ul>
                 )}
               </li>
@@ -143,7 +223,7 @@ function StashGroup({ stashes, selected, onSelect, onMenu }: StashGroupProps) {
   return (
     <div className="branch-group">
       <button className="group-title" onClick={() => setOpen(!open)}>
-        <span className={`chevron${open ? " open" : ""}`}>▸</span>
+        <Chevron open={open} />
         Stashes
         <span className="count">{stashes.length}</span>
       </button>
@@ -184,32 +264,41 @@ function BranchGroup({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [collapsed, toggle] = useCollapsed();
   return (
     <div className="branch-group">
       <button className="group-title" onClick={() => setOpen(!open)}>
-        <span className={`chevron${open ? " open" : ""}`}>▸</span>
+        <Chevron open={open} />
         {title}
         <span className="count">{items.length}</span>
       </button>
       {open && (
         <ul>
-          {items.map((b) => (
-            <li
-              key={b.name}
-              className={b.current ? "current" : undefined}
-              onDoubleClick={() => onActivate?.(b)}
-              onContextMenu={onMenu && ((e) => onMenu(b, e))}
-              title={[
-                [b.name, b.upstream && `→ ${b.upstream}`, b.track].filter(Boolean).join("  "),
-                !b.current && activateHint,
-              ]
-                .filter(Boolean)
-                .join("\n")}
-            >
-              <span className="branch-name">{b.name}</span>
-              {b.track && <span className="track">{formatTrack(b.track)}</span>}
-            </li>
-          ))}
+          <BranchTree
+            nodes={buildBranchTree(items, (b) => b.name)}
+            indent={24}
+            collapsed={collapsed}
+            onToggle={toggle}
+            keyOf={(b) => b.name}
+            renderLeaf={(b, name, padding) => (
+              <li
+                key={b.name}
+                className={b.current ? "current" : undefined}
+                style={{ paddingLeft: padding }}
+                onDoubleClick={() => onActivate?.(b)}
+                onContextMenu={onMenu && ((e) => onMenu(b, e))}
+                title={[
+                  [b.name, b.upstream && `→ ${b.upstream}`, b.track].filter(Boolean).join("  "),
+                  !b.current && activateHint,
+                ]
+                  .filter(Boolean)
+                  .join("\n")}
+              >
+                <span className="branch-name">{name}</span>
+                {b.track && <span className="track">{formatTrack(b.track)}</span>}
+              </li>
+            )}
+          />
         </ul>
       )}
     </div>

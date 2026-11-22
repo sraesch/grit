@@ -179,6 +179,36 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("list", { name: "Branches on origin" })).not.toBeInTheDocument();
   });
 
+  it("nests branches in collapsible folders by their path", async () => {
+    const { onSwitch } = setup({
+      branches: {
+        ...branches,
+        local: [
+          ...branches.local,
+          { name: "ftr/gitignore", sha: "d", current: false, upstream: null, track: null },
+          { name: "ftr/ui/menu", sha: "e", current: false, upstream: null, track: null },
+        ],
+        remote: [...branches.remote, { name: "origin/ftr/gitignore", sha: "d", current: false, upstream: null, track: null }],
+      },
+    });
+    const ftr = screen.getByRole("list", { name: "Branches in ftr" });
+    expect(within(ftr).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["ui1menu", "menu", "gitignore"]);
+    expect(screen.getByRole("button", { name: "ftr" })).toHaveAttribute("title", "ftr/");
+
+    await userEvent.dblClick(within(ftr).getByText("gitignore"));
+    expect(onSwitch).toHaveBeenCalledWith({ kind: "local", name: "ftr/gitignore" });
+
+    await userEvent.click(screen.getByRole("button", { name: "ftr" }));
+    expect(screen.queryByRole("list", { name: "Branches in ftr" })).not.toBeInTheDocument();
+    expect(screen.getByText("main")).toBeInTheDocument();
+
+    // Remote branches are nested by their name on the remote.
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    const origin = screen.getByRole("list", { name: "Branches on origin" });
+    const remoteFtr = within(origin).getByRole("list", { name: "Branches in ftr" });
+    expect(within(remoteFtr).getByText("gitignore").closest("li")).toHaveAttribute("title", expect.stringMatching(/^origin\/ftr\/gitignore\n/));
+  });
+
   it("fetches, edits, renames and removes a remote from its context menu", async () => {
     const { onFetchRemote, onEditRemote, onRemoveRemote, onAddRemote } = setup();
     await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
