@@ -12,7 +12,7 @@ See the [changelog](CHANGELOG.md) for what changed in each release.
 
 - **Local changes**: unstaged/staged file lists, per-file diff, stage/unstage (button, double-click or context menu),
   stage/unstage all, discard changes and delete untracked files (per file, per folder or all, after confirming),
-  stage, unstage or discard single hunks, add untracked files and folders to `.gitignore`, commit and amend
+  stage, unstage or discard single hunks or selected lines, add untracked files and folders to `.gitignore`, commit and amend
   (Ctrl/Cmd+Enter)
 - **History**: virtualized commit list with branch graph, ref badges, keyboard navigation, commit details, changed files and diffs; double-click a commit to check it out
 - **Branches**: local, remote and tag lists; double-click a local branch to check it out, right-click it to check it out or delete it

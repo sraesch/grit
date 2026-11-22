@@ -3,7 +3,7 @@ import { api, errorMessage, FileChange, HunkSelection, PatchAction, Status } fro
 import { DiffHunk } from "../diff";
 import { IgnoreTarget } from "../gitignore";
 import { ContextMenu, MenuItem } from "./ContextMenu";
-import { DiffView, HunkAction } from "./DiffView";
+import { DiffView, HunkAction, LineAction } from "./DiffView";
 import { DiscardDialog } from "./DiscardDialog";
 import { FileList, RowAction, RowTarget } from "./FileList";
 import { IgnoreDialog } from "./IgnoreDialog";
@@ -131,9 +131,15 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     applySelection(action, [{ index: hunk.index, header: hunk.header, lines: null }]);
 
   let hunkActions: HunkAction[] | undefined;
+  let lineActions: LineAction[] | undefined;
   if (selection?.staged) {
     hunkActions = [{ label: "Unstage hunk", onClick: applyHunk("unstage") }];
+    lineActions = [{ label: "Unstage", onClick: (parts) => applySelection("unstage", parts) }];
   } else if (selection && !selectedConflict) {
+    lineActions = [
+      { label: "Stage", onClick: (parts) => applySelection("stage", parts) },
+      { label: "Discard", danger: true, onClick: (parts) => applySelection("discard", parts) },
+    ];
     hunkActions = [{ label: "Stage hunk", onClick: applyHunk("stage") }];
     // An untracked file's diff is one hunk, the whole file: it is deleted from its row, with a confirmation.
     if (!selectedUntracked) {
@@ -380,6 +386,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
           error={diffError}
           title={selection ? `${selection.path}${selection.staged ? "  (staged)" : ""}` : undefined}
           hunkActions={hunkActions}
+          lineActions={lineActions}
           hunkActionsDisabled={busy}
         />
       </Split>

@@ -1132,6 +1132,28 @@ button.primary.danger:hover:not(:disabled) {
   display: flex;
   white-space: pre;
 }
+.diff-line .gutter {
+  display: flex;
+  flex-shrink: 0;
+}
+.selectable-lines .diff-add .gutter,
+.selectable-lines .diff-del .gutter {
+  cursor: pointer;
+}
+.diff-line.selected {
+  --selected-tint: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  /* Tints the line's own add/del/context background. */
+  background-image: linear-gradient(var(--selected-tint), var(--selected-tint));
+}
+.line-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.line-actions button {
+  margin-left: 0;
+}
 .diff-line .ln {
   width: 48px;
   flex-shrink: 0;

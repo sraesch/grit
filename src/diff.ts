@@ -69,3 +69,34 @@ export function parseDiff(diff: string): ParsedDiff {
   }
   return { lines, hunks, binary, truncated: false, renamed };
 }
+
+/** Whether a line can be selected for staging, unstaging or discarding: only changed lines can. */
+export const isChange = (line: DiffLine) => line.kind === "add" || line.kind === "del";
+
+/** The changed lines between two line indexes, both included, in either order. */
+export function changesBetween(lines: DiffLine[], from: number, to: number): number[] {
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  const range: number[] = [];
+  for (let i = start; i <= end; i++) if (lines[i] && isChange(lines[i])) range.push(i);
+  return range;
+}
+
+/** Selected changes in one hunk, as the backend takes them (see `HunkSelection` in api.ts). */
+export interface LineSelection {
+  index: number;
+  header: string;
+  lines: number[];
+}
+
+/** Groups selected line indexes into per-hunk selections of body offsets, in diff order. */
+export function selectionByHunk(parsed: ParsedDiff, selected: Iterable<number>): LineSelection[] {
+  const byHunk = new Map<number, number[]>();
+  for (const i of [...selected].sort((a, b) => a - b)) {
+    const line = parsed.lines[i];
+    if (!line || !isChange(line) || line.hunk === undefined || line.offset === undefined) continue;
+    const offsets = byHunk.get(line.hunk) ?? [];
+    offsets.push(line.offset);
+    byHunk.set(line.hunk, offsets);
+  }
+  return [...byHunk].map(([index, lines]) => ({ index, header: parsed.hunks[index].header, lines }));
+}

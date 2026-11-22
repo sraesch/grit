@@ -440,4 +440,41 @@ describe("ChangesView", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledWith("The file changed since its diff was shown."));
     expect(onChanged).toHaveBeenCalled();
   });
+  it("stages, discards and unstages selected lines", async () => {
+    const { onChanged } = setup();
+    await userEvent.click(screen.getByText("edit.ts"));
+    const added = (await screen.findByText("new src/edit.ts")).closest(".diff-line")!;
+    fireEvent.mouseDown(added.querySelector(".gutter")!);
+    await userEvent.click(screen.getByRole("button", { name: "Stage 1 line" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(invokeMock).toHaveBeenCalledWith("apply_selection", {
+      repo: "/repo",
+      path: "src/edit.ts",
+      staged: false,
+      untracked: false,
+      action: "stage",
+      selection: [{ index: 0, header: "@@ -1 +1 @@", lines: [1] }],
+    });
+
+    fireEvent.mouseDown(screen.getByText("old src/edit.ts").closest(".diff-line")!.querySelector(".gutter")!);
+    await userEvent.click(screen.getByRole("button", { name: "Discard 1 line" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenLastCalledWith(
+        "apply_selection",
+        expect.objectContaining({ action: "discard", selection: [{ index: 0, header: "@@ -1 +1 @@", lines: [0] }] }),
+      ),
+    );
+
+    await userEvent.click(screen.getByText("ready.rs"));
+    const staged = (await screen.findByText("new ready.rs")).closest(".diff-line")!;
+    fireEvent.mouseDown(staged.querySelector(".gutter")!);
+    expect(screen.queryByRole("button", { name: "Discard 1 line" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Unstage 1 line" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenLastCalledWith(
+        "apply_selection",
+        expect.objectContaining({ path: "ready.rs", staged: true, action: "unstage" }),
+      ),
+    );
+  });
 });
