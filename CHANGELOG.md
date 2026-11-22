@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stage, unstage and discard selected lines: click a changed line in a diff in Local changes to select it, Shift+click to select a range (across hunks too), Ctrl/Cmd+click to add or remove a line, or drag over the line numbers. The header then offers to stage or discard the selected lines (unstaged changes) or to unstage them (staged changes); Escape clears the selection. Discarding lines takes effect right away
 - Ignore untracked files without editing `.gitignore` by hand: right-click an untracked file and choose "Ignore…" to ignore only this file, all files with its name, or all files with its extension; on a folder of untracked files, "Ignore Folder…" ignores only this folder or all folders with its name. The pattern can be adjusted before it is added to the `.gitignore` in the repository root, which is created if needed
 
+### Fixed
+
+- Aborting a merge or squash merge (or finishing it outside grit) no longer leaves its prepared message, e.g. "Merge branch 'other'", in the commit message box of Local changes; a message you edited is kept
+
 ## [0.4.2] - 2026-11-21
 
 ### Fixed

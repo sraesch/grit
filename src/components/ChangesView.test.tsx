@@ -91,6 +91,34 @@ describe("ChangesView", () => {
     expect(editor).toHaveValue("Mine");
   });
 
+  it("takes back the offered merge message when the merge is aborted", () => {
+    const merging = makeStatus({
+      ...status,
+      operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'clash'" },
+    });
+    const { rerender } = render(<ChangesView repo="/repo" status={merging} onChanged={vi.fn()} onError={vi.fn()} />);
+    const editor = screen.getByRole("textbox", { name: "Commit message" });
+    expect(editor).toHaveValue("Merge branch 'clash'");
+    rerender(<ChangesView repo="/repo" status={status} onChanged={vi.fn()} onError={vi.fn()} />);
+    expect(editor).toHaveValue("");
+
+    // A later merge with the same message is offered again.
+    rerender(<ChangesView repo="/repo" status={merging} onChanged={vi.fn()} onError={vi.fn()} />);
+    expect(editor).toHaveValue("Merge branch 'clash'");
+  });
+
+  it("keeps an edited merge message when the merge is aborted", async () => {
+    const merging = makeStatus({
+      ...status,
+      operation: { kind: "merge", head: null, step: null, total: null, message: "Merge branch 'clash'" },
+    });
+    const { rerender } = render(<ChangesView repo="/repo" status={merging} onChanged={vi.fn()} onError={vi.fn()} />);
+    const editor = screen.getByRole("textbox", { name: "Commit message" });
+    await userEvent.type(editor, " into main");
+    rerender(<ChangesView repo="/repo" status={status} onChanged={vi.fn()} onError={vi.fn()} />);
+    expect(editor).toHaveValue("Merge branch 'clash' into main");
+  });
+
   it("lists unstaged and staged files with counts", () => {
     setup();
     expect(screen.getByText("Unstaged changes").parentElement).toHaveTextContent("2");
