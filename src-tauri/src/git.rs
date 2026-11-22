@@ -699,6 +699,38 @@ pub fn unstage_all(repo: &Path) -> GitResult<()> {
     }
 }
 
+/// Throws away local changes: `tracked` files get their unstaged changes reverted to the
+/// staged (or committed) version, staged changes stay; `untracked` files are deleted, along
+/// with folders they leave empty. Paths are taken literally, never as glob patterns.
+pub fn discard(repo: &Path, tracked: &[String], untracked: &[String]) -> GitResult<()> {
+    if !tracked.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "restore", "--worktree", "--"];
+        args.extend(tracked.iter().map(String::as_str));
+        run(repo, &args)?;
+    }
+    if !untracked.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "clean", "-f", "-q", "--"];
+        args.extend(untracked.iter().map(String::as_str));
+        run(repo, &args)?;
+        remove_empty_parents(repo, untracked);
+    }
+    Ok(())
+}
+
+/// Removes the folders that deleting `paths` left empty, up to (not including) the repository root.
+fn remove_empty_parents(repo: &Path, paths: &[String]) {
+    for path in paths {
+        let mut dir = Path::new(path).parent();
+        while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            // Fails, and stops the walk, as soon as a folder still has something in it.
+            if std::fs::remove_dir(repo.join(d)).is_err() {
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+}
+
 pub fn commit(repo: &Path, message: &str, amend: bool) -> GitResult<()> {
     let mut args = vec!["commit", "-F", "-"];
     if amend {
@@ -2101,6 +2133,76 @@ mod tests {
         assert_eq!(st.staged[0].status, "A");
         let sha = repo.commit_all("unicode");
         assert_eq!(commit_details(&repo.dir, &sha).unwrap().files[0].path, name);
+    }
+
+    #[test]
+    fn discard_reverts_unstaged_changes_and_keeps_staged_ones() {
+        let repo = TestRepo::new("discard-tracked");
+        repo.write("a.txt", "one\n");
+        repo.write("gone.txt", "keep me\n");
+        repo.commit_all("initial");
+        repo.write("a.txt", "two\n");
+        stage(&repo.dir, &["a.txt".into()]).unwrap();
+        repo.write("a.txt", "three\n");
+        std::fs::remove_file(repo.dir.join("gone.txt")).unwrap();
+
+        discard(&repo.dir, &["a.txt".into(), "gone.txt".into()], &[]).unwrap();
+        assert_eq!(repo.read("a.txt"), "two\n");
+        assert_eq!(repo.read("gone.txt"), "keep me\n");
+        let st = status(&repo.dir).unwrap();
+        assert!(st.unstaged.is_empty());
+        assert_eq!(st.staged.len(), 1);
+    }
+
+    #[test]
+    fn discard_deletes_untracked_files_and_the_folders_they_leave_empty() {
+        let repo = TestRepo::new("discard-untracked");
+        repo.commit_all_initial();
+        repo.write("dir/sub/new.txt", "x\n");
+        repo.write("dir/other.txt", "y\n");
+        repo.write("dir with space/ü [x].txt", "z\n");
+        repo.write("ignored.log", "log\n");
+        repo.write(".gitignore", "*.log\n");
+        repo.git(&["add", ".gitignore"]);
+
+        discard(
+            &repo.dir,
+            &[],
+            &["dir/sub/new.txt".into(), "dir with space/ü [x].txt".into()],
+        )
+        .unwrap();
+        assert!(!repo.dir.join("dir/sub").exists());
+        assert!(!repo.dir.join("dir with space").exists());
+        assert_eq!(repo.read("dir/other.txt"), "y\n");
+        assert!(repo.dir.join("ignored.log").exists());
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.unstaged.len(), 1);
+        assert_eq!(st.unstaged[0].path, "dir/other.txt");
+    }
+
+    #[test]
+    fn discard_takes_paths_literally() {
+        let repo = TestRepo::new("discard-literal");
+        repo.write("[ab].txt", "star\n");
+        repo.write("a.txt", "a\n");
+        repo.commit_all("initial");
+        repo.write("[ab].txt", "changed\n");
+        repo.write("a.txt", "changed\n");
+        discard(&repo.dir, &["[ab].txt".into()], &[]).unwrap();
+        assert_eq!(repo.read("[ab].txt"), "star\n");
+        assert_eq!(repo.read("a.txt"), "changed\n");
+    }
+
+    #[test]
+    fn discard_works_before_the_first_commit() {
+        let repo = TestRepo::new("discard-unborn");
+        repo.write("a.txt", "staged\n");
+        stage_all(&repo.dir).unwrap();
+        repo.write("a.txt", "edited\n");
+        repo.write("b.txt", "untracked\n");
+        discard(&repo.dir, &["a.txt".into()], &["b.txt".into()]).unwrap();
+        assert_eq!(repo.read("a.txt"), "staged\n");
+        assert!(!repo.dir.join("b.txt").exists());
     }
 
     #[test]

@@ -106,6 +106,11 @@ async fn unstage_all(repo: String) -> GitResult<()> {
 }
 
 #[tauri::command]
+async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> GitResult<()> {
+    blocking(move || git::discard(&PathBuf::from(repo), &tracked, &untracked)).await
+}
+
+#[tauri::command]
 async fn commit(repo: String, message: String, amend: bool) -> GitResult<()> {
     blocking(move || git::commit(&PathBuf::from(repo), &message, amend)).await
 }
@@ -349,6 +354,7 @@ pub fn run() {
             stage_all,
             unstage,
             unstage_all,
+            discard,
             commit,
             checkout_branch,
             checkout_remote_branch,
