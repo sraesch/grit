@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { file, makeStatus, mockBackend } from "../test/tauri";
@@ -29,6 +29,7 @@ describe("ChangesView", () => {
       unstage: () => undefined,
       unstage_all: () => undefined,
       commit: () => undefined,
+      discard: () => undefined,
     });
   });
 
@@ -230,5 +231,102 @@ describe("ChangesView", () => {
     await userEvent.dblClick(screen.getByText("edit.ts"));
     await waitFor(() => expect(onError).toHaveBeenCalledWith("fatal: pathspec did not match"));
     expect(onChanged).not.toHaveBeenCalled();
+  });
+  it("discards a file's changes after confirming", async () => {
+    const { onChanged } = setup();
+    const row = screen.getByText("edit.ts").closest("li")!;
+    await userEvent.click(within(row).getByRole("button", { name: "Discard" }));
+    const dialog = screen.getByRole("dialog", { name: "Discard Changes" });
+    expect(dialog).toHaveTextContent("Discard the unstaged changes to this file?");
+    expect(dialog).toHaveTextContent("src/edit.ts");
+    expect(dialog).toHaveTextContent("Staged changes are kept.");
+    expect(invokeMock).not.toHaveBeenCalledWith("discard", expect.anything());
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(invokeMock).toHaveBeenCalledWith("discard", { repo: "/repo", tracked: ["src/edit.ts"], untracked: [] });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("deletes an untracked file from its context menu", async () => {
+    setup();
+    fireEvent.contextMenu(screen.getByText("fresh.txt"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete File…" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete File" });
+    expect(dialog).toHaveTextContent("Delete this untracked file?");
+    expect(dialog).not.toHaveTextContent("Staged changes");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("discard", { repo: "/repo", tracked: [], untracked: ["fresh.txt"] }),
+    );
+  });
+
+  it("does nothing when the discard is cancelled", async () => {
+    const { onChanged } = setup();
+    await userEvent.click(screen.getByRole("button", { name: "Discard all…" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("discard", expect.anything());
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("discards everything unstaged, but no conflicts", async () => {
+    setup({
+      status: makeStatus({
+        unstaged: [file("a.txt"), file("b.txt", "D"), file("new.txt", "?")],
+        conflicted: [file("c.txt", "U")],
+      }),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Discard all…" }));
+    const dialog = screen.getByRole("dialog", { name: "Discard Changes" });
+    expect(dialog).toHaveTextContent("Discard the unstaged changes to 2 files and delete 1 untracked file?");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("discard", {
+        repo: "/repo",
+        tracked: ["a.txt", "b.txt"],
+        untracked: ["new.txt"],
+      }),
+    );
+  });
+
+  it("discards a folder from its row and context menu", async () => {
+    setup({ status: makeStatus({ unstaged: [file("src/a.ts"), file("src/b.ts", "?"), file("top.txt")] }) });
+    const src = screen.getByText("src").closest("li")!;
+    await userEvent.click(within(src).getByRole("button", { name: "Discard" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("src/a.ts");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.contextMenu(src);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Discard Folder…" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("discard", {
+        repo: "/repo",
+        tracked: ["src/a.ts"],
+        untracked: ["src/b.ts"],
+      }),
+    );
+  });
+
+  it("lists only the first files of a large discard", async () => {
+    setup({ status: makeStatus({ unstaged: Array.from({ length: 13 }, (_, i) => file(`f${i}.txt`)) }) });
+    await userEvent.click(screen.getByRole("button", { name: "Discard all…" }));
+    const items = within(screen.getByRole("dialog")).getAllByRole("listitem");
+    expect(items).toHaveLength(11);
+    expect(items[10]).toHaveTextContent("and 3 more");
+  });
+
+  it("stages and unstages from the context menu", async () => {
+    setup();
+    fireEvent.contextMenu(screen.getByText("edit.ts"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Stage" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("stage", { repo: "/repo", paths: ["src/edit.ts"] }));
+
+    fireEvent.contextMenu(screen.getByText("ready.rs"));
+    expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual(["Unstage"]);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Unstage" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("unstage", { repo: "/repo", paths: ["ready.rs"] }));
   });
 });

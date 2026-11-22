@@ -846,6 +846,9 @@ button.primary.danger:hover:not(:disabled) {
   margin-left: auto;
   font-weight: normal;
 }
+.pane-header button + button {
+  margin-left: 0;
+}
 
 .changes-sidebar,
 .commit-panel {
@@ -915,6 +918,9 @@ button.primary.danger:hover:not(:disabled) {
 }
 .file-list li:hover .row-action {
   display: inline-block;
+}
+.row-action + .row-action {
+  margin-left: -3px;
 }
 
 .status-badge {
@@ -1465,6 +1471,23 @@ body.resizing-vertical {
 }
 .settings-row input[aria-invalid="true"] {
   border-color: var(--danger);
+}
+.discard-list {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  list-style: none;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.discard-list .more {
+  color: var(--text-muted);
 }
 .settings-hint {
   margin: 6px 0 0;

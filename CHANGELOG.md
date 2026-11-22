@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Discard local changes without leaving grit: the Discard button on a file in Unstaged changes (or "Discard Changes…" in its context menu) throws away its unstaged changes and keeps the staged ones; on an untracked file it deletes the file. The Discard button on a folder does this for every file in it, and "Discard all…" in the section header for all unstaged changes and untracked files. A confirmation names the files first, since discarded changes can't be recovered. Conflicted files are never discarded
+- Right-clicking a file or folder in Local changes opens a menu to stage, unstage or discard it
+
 ## [0.4.2] - 2026-11-21
 
 ### Fixed

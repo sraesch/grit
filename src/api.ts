@@ -310,6 +310,9 @@ export const api = {
   stageAll: (repo: string) => invoke<void>("stage_all", { repo }),
   unstage: (repo: string, paths: string[]) => invoke<void>("unstage", { repo, paths }),
   unstageAll: (repo: string) => invoke<void>("unstage_all", { repo }),
+  /** Reverts the unstaged changes of `tracked` files (staged changes stay) and deletes `untracked` files. */
+  discard: (repo: string, tracked: string[], untracked: string[]) =>
+    invoke<void>("discard", { repo, tracked, untracked }),
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),
   checkout: (repo: string, branch: string) => invoke<void>("checkout_branch", { repo, branch }),
   /** Creates a local branch tracking `branch` (e.g. "origin/feature") and switches to it. */
