@@ -717,6 +717,41 @@ pub fn discard(repo: &Path, tracked: &[String], untracked: &[String]) -> GitResu
     Ok(())
 }
 
+/// Appends `pattern` as a line to the `.gitignore` in the repository root, creating the file
+/// if needed. A pattern that is already listed is not added again. Keeps the file's line
+/// endings (LF or CRLF).
+pub fn add_to_gitignore(repo: &Path, pattern: &str) -> GitResult<()> {
+    if pattern.trim().is_empty() {
+        return Err("The pattern is empty".into());
+    }
+    if pattern.contains(['\n', '\r']) {
+        return Err("The pattern must be a single line".into());
+    }
+    let path = repo.join(".gitignore");
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("Could not read .gitignore: {e}")),
+    };
+    if existing.lines().any(|line| line.trim_end_matches('\r') == pattern) {
+        return Ok(());
+    }
+    let newline = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut addition = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        addition.push_str(newline);
+    }
+    addition.push_str(pattern);
+    addition.push_str(newline);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Could not write .gitignore: {e}"))?;
+    file.write_all(addition.as_bytes())
+        .map_err(|e| format!("Could not write .gitignore: {e}"))
+}
+
 /// Removes the folders that deleting `paths` left empty, up to (not including) the repository root.
 fn remove_empty_parents(repo: &Path, paths: &[String]) {
     for path in paths {
@@ -2191,6 +2226,46 @@ mod tests {
         discard(&repo.dir, &["[ab].txt".into()], &[]).unwrap();
         assert_eq!(repo.read("[ab].txt"), "star\n");
         assert_eq!(repo.read("a.txt"), "changed\n");
+    }
+
+    #[test]
+    fn add_to_gitignore_creates_the_file_and_hides_the_file() {
+        let repo = TestRepo::new("ignore-create");
+        repo.commit_all_initial();
+        repo.write("build/out.bin", "x");
+        repo.write("debug.log", "x");
+        add_to_gitignore(&repo.dir, "/build/").unwrap();
+        assert_eq!(repo.read(".gitignore"), "/build/\n");
+        let paths: Vec<String> = status(&repo.dir)
+            .unwrap()
+            .unstaged
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(paths, [".gitignore", "debug.log"]);
+    }
+
+    #[test]
+    fn add_to_gitignore_appends_once_and_keeps_line_endings() {
+        let repo = TestRepo::new("ignore-append");
+        repo.write(".gitignore", "node_modules");
+        add_to_gitignore(&repo.dir, "*.log").unwrap();
+        add_to_gitignore(&repo.dir, "*.log").unwrap();
+        add_to_gitignore(&repo.dir, "node_modules").unwrap();
+        assert_eq!(repo.read(".gitignore"), "node_modules\n*.log\n");
+
+        repo.write(".gitignore", "a\r\nb\r\n");
+        add_to_gitignore(&repo.dir, "c").unwrap();
+        add_to_gitignore(&repo.dir, "b").unwrap();
+        assert_eq!(repo.read(".gitignore"), "a\r\nb\r\nc\r\n");
+    }
+
+    #[test]
+    fn add_to_gitignore_rejects_empty_and_multiline_patterns() {
+        let repo = TestRepo::new("ignore-invalid");
+        assert!(add_to_gitignore(&repo.dir, "  ").is_err());
+        assert!(add_to_gitignore(&repo.dir, "a\nb").is_err());
+        assert!(!repo.dir.join(".gitignore").exists());
     }
 
     #[test]

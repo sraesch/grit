@@ -313,6 +313,8 @@ export const api = {
   /** Reverts the unstaged changes of `tracked` files (staged changes stay) and deletes `untracked` files. */
   discard: (repo: string, tracked: string[], untracked: string[]) =>
     invoke<void>("discard", { repo, tracked, untracked }),
+  /** Appends `pattern` to the .gitignore in the repository root, creating it if needed. */
+  addToGitignore: (repo: string, pattern: string) => invoke<void>("add_to_gitignore", { repo, pattern }),
   commit: (repo: string, message: string, amend: boolean) => invoke<void>("commit", { repo, message, amend }),
   checkout: (repo: string, branch: string) => invoke<void>("checkout_branch", { repo, branch }),
   /** Creates a local branch tracking `branch` (e.g. "origin/feature") and switches to it. */

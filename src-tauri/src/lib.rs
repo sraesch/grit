@@ -111,6 +111,11 @@ async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> 
 }
 
 #[tauri::command]
+async fn add_to_gitignore(repo: String, pattern: String) -> GitResult<()> {
+    blocking(move || git::add_to_gitignore(&PathBuf::from(repo), &pattern)).await
+}
+
+#[tauri::command]
 async fn commit(repo: String, message: String, amend: bool) -> GitResult<()> {
     blocking(move || git::commit(&PathBuf::from(repo), &message, amend)).await
 }
@@ -355,6 +360,7 @@ pub fn run() {
             unstage,
             unstage_all,
             discard,
+            add_to_gitignore,
             commit,
             checkout_branch,
             checkout_remote_branch,

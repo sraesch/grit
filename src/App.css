@@ -1456,6 +1456,15 @@ body.resizing-vertical {
   font-size: 13px;
   color: var(--text);
 }
+.ignore-pattern {
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.ignore-pattern-label {
+  margin-top: 14px;
+}
 .warning-text,
 .settings-hint.warning-text {
   color: var(--warn-text);
