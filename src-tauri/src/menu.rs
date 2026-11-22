@@ -1,24 +1,41 @@
-//! The macOS app menu: Tauri's default menu plus a "Settings…" entry that opens the in-app settings.
+//! The macOS app menu: Tauri's default menu plus "Settings…" and the File menu's entries for
+//! opening and creating repositories, which the frontend carries out.
 
 use tauri::menu::{Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri::{AppHandle, Emitter, Runtime};
 
-const SETTINGS_ID: &str = "settings";
+/// Menu item ids and the event each one emits to the frontend.
+const EVENTS: [(&str, &str); 3] = [
+    ("settings", "open-settings"),
+    ("open-repository", "open-repository"),
+    ("new-repository", "new-repository"),
+];
 
-/// The default menu with "Settings…" (⌘,) after "About grit", where macOS apps keep it.
+/// The default menu with "Settings…" (⌘,) after "About grit", where macOS apps keep it, and
+/// "New Repository…" and "Open…" at the top of the File menu.
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
-    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
-        let settings = MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, Some("CmdOrCtrl+,"))?;
+    let items = menu.items()?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = items.first() {
+        let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
         // The app menu starts with "About grit" and a separator.
         app_menu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], 2)?;
+    }
+    let file = items.iter().find_map(|item| match item {
+        MenuItemKind::Submenu(sub) if sub.text().is_ok_and(|t| t == "File") => Some(sub),
+        _ => None,
+    });
+    if let Some(file) = file {
+        let new = MenuItem::with_id(app, "new-repository", "New Repository…", true, None::<&str>)?;
+        let open = MenuItem::with_id(app, "open-repository", "Open…", true, Some("CmdOrCtrl+O"))?;
+        file.insert_items(&[&new, &open, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     Ok(menu)
 }
 
-/// Tells the frontend to open the settings dialog when "Settings…" is chosen.
+/// Tells the frontend which menu item was chosen.
 pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
-    if event.id() == SETTINGS_ID {
-        let _ = app.emit("open-settings", ());
+    if let Some((_, name)) = EVENTS.iter().find(|(id, _)| event.id() == *id) {
+        let _ = app.emit(name, ());
     }
 }

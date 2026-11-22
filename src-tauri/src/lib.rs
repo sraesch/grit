@@ -39,6 +39,24 @@ async fn open_repo(app: AppHandle, watch: State<'_, WatchState>, path: String) -
     Ok(info)
 }
 
+/// Whether `path` is inside a repository, so Open… can offer to initialize other folders.
+#[tauri::command]
+async fn is_repository(path: String) -> GitResult<bool> {
+    blocking(move || Ok(git::is_repository(&PathBuf::from(path)))).await
+}
+
+/// The branch name new repositories start with.
+#[tauri::command]
+async fn default_branch_name() -> GitResult<String> {
+    blocking(|| Ok(git::default_branch_name())).await
+}
+
+/// Creates a repository; the frontend then opens it with `open_repo`.
+#[tauri::command]
+async fn init_repo(path: String, branch: String) -> GitResult<RepoInfo> {
+    blocking(move || git::init_repo(&PathBuf::from(path), &branch)).await
+}
+
 /// Stops watching a repository whose tab was closed.
 #[tauri::command]
 fn close_repo(watch: State<'_, WatchState>, root: String) -> GitResult<()> {
@@ -361,6 +379,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_repo,
             close_repo,
+            is_repository,
+            default_branch_name,
+            init_repo,
             get_status,
             get_log,
             get_branches,
