@@ -194,6 +194,8 @@ describe("Sidebar", () => {
     const ftr = screen.getByRole("list", { name: "Branches in ftr" });
     expect(within(ftr).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["ui1menu", "menu", "gitignore"]);
     expect(screen.getByRole("button", { name: "ftr" })).toHaveAttribute("title", "ftr/");
+    const folderIcon = () => screen.getByRole("button", { name: "ftr" }).querySelector(".folder-icon");
+    expect(folderIcon()).toHaveAttribute("data-open", "true");
 
     await userEvent.dblClick(within(ftr).getByText("gitignore"));
     expect(onSwitch).toHaveBeenCalledWith({ kind: "local", name: "ftr/gitignore" });
@@ -201,6 +203,7 @@ describe("Sidebar", () => {
     await userEvent.click(screen.getByRole("button", { name: "ftr" }));
     expect(screen.queryByRole("list", { name: "Branches in ftr" })).not.toBeInTheDocument();
     expect(screen.getByText("main")).toBeInTheDocument();
+    expect(folderIcon()).toHaveAttribute("data-open", "false");
 
     // Remote branches are nested by their name on the remote.
     await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));

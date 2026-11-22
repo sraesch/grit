@@ -6,6 +6,7 @@ import { groupRemoteBranches } from "../remote";
 import { formatTrack, fullDate, relativeTime } from "../util";
 import { ContextMenu, MenuItem } from "./ContextMenu";
 import { Chevron } from "./Chevron";
+import { FolderIcon } from "./FolderIcon";
 
 export type View = "changes" | "history" | "stash";
 
@@ -94,6 +95,7 @@ function BranchTree<T>({ nodes, indent, depth = 0, collapsed, onToggle, keyPrefi
               onClick={() => onToggle(key)}
             >
               <Chevron open={expanded} />
+              <FolderIcon open={expanded} />
               <span className="branch-name">{node.name}</span>
               <span className="folder-count">{node.count}</span>
             </button>
