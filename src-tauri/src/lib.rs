@@ -13,8 +13,8 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    MergeMode, MergeOptions, MergeResult, PatchAction, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
-    RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
+    MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult, PushOptions,
+    PushResult, RebaseOptions, RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -378,6 +378,19 @@ async fn merge(
 }
 
 #[tauri::command]
+async fn cherry_pick(repo: String, commit: String, no_commit: bool, mainline: Option<u32>) -> GitResult<PickResult> {
+    blocking(move || {
+        let opts = PickOptions {
+            commit,
+            no_commit,
+            mainline,
+        };
+        git::cherry_pick(&PathBuf::from(repo), &opts)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -459,6 +472,7 @@ pub fn run() {
             get_divergence,
             rebase,
             merge,
+            cherry_pick,
             abort_operation,
             continue_operation,
             skip_operation,

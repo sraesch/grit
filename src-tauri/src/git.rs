@@ -2123,6 +2123,118 @@ pub fn merge(repo: &Path, opts: &MergeOptions, on_progress: &mut dyn FnMut(&str)
 }
 
 // ---------------------------------------------------------------------------
+// Cherry-pick and revert
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum PickOutcome {
+    /// A new commit was created.
+    Committed,
+    /// The changes were applied and staged without committing (`no_commit`).
+    Staged,
+    /// Stopped on conflicts; `Status::operation` describes it, and it is continued or aborted from there.
+    Conflicts,
+    /// `no_commit` applied the changes with conflicts. git keeps no state for it, so there is
+    /// nothing to continue or abort: the conflicts are resolved and committed like any change.
+    ConflictsNoCommit,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PickResult {
+    pub outcome: PickOutcome,
+    /// Files with conflicts, for the `Conflicts` and `ConflictsNoCommit` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct PickOptions {
+    /// The commit to apply (cherry-pick) or undo (revert).
+    pub commit: String,
+    /// Only apply the changes to the index and working tree, without committing.
+    pub no_commit: bool,
+    /// For a merge commit: the parent (1-based) whose side is the mainline, as `-m` takes it.
+    pub mainline: Option<u32>,
+}
+
+/// Applies a commit onto HEAD.
+pub fn cherry_pick(repo: &Path, opts: &PickOptions) -> GitResult<PickResult> {
+    apply_commit(repo, OperationKind::CherryPick, opts)
+}
+
+/// Cherry-picks or reverts `opts.commit`; conflicts are an outcome, not an error.
+fn apply_commit(repo: &Path, kind: OperationKind, opts: &PickOptions) -> GitResult<PickResult> {
+    let commit = plain_arg(&opts.commit, "commit")?;
+    let verb = match kind {
+        OperationKind::Revert => "reverting",
+        _ => "cherry-picking",
+    };
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before {verb}.",
+            op.kind.label()
+        ));
+    }
+    if !has_head(repo) {
+        return Err(format!(
+            "There are no commits yet, so there is nothing to apply {verb} to."
+        ));
+    }
+    let sha = rev(repo, &format!("{commit}^{{commit}}")).ok_or_else(|| format!("'{commit}' is not a commit."))?;
+    let short = &sha[..sha.len().min(7)];
+
+    let mainline = opts.mainline.map(|m| m.to_string());
+    let mut args = vec![kind.label()];
+    if opts.no_commit {
+        args.push("--no-commit");
+    }
+    if let Some(m) = &mainline {
+        args.extend(["-m", m.as_str()]);
+    }
+    args.push(&sha);
+    // English messages to recognize an empty pick; an editor would never open.
+    let out = exec_streaming(repo, &args, &[("GIT_EDITOR", "true"), ("LC_ALL", "C")], &mut |_| {})?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    if conflicts > 0 {
+        let outcome = if st.operation.is_some() {
+            PickOutcome::Conflicts
+        } else {
+            PickOutcome::ConflictsNoCommit
+        };
+        return Ok(PickResult { outcome, conflicts });
+    }
+    if out.code != 0 {
+        let text = if out.stderr.trim().is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        // The changes are on HEAD already: git stops with nothing to commit. Nothing is left to
+        // do, so give the operation up rather than leave a banner behind.
+        if text.contains("is now empty") || text.contains("nothing to commit") {
+            if st.operation.is_some_and(|op| op.kind == kind) {
+                let _ = run(repo, &[kind.label(), "--abort"]);
+            }
+            return Err(match kind {
+                OperationKind::Revert => format!("Reverting {short} changes nothing: its changes aren't on HEAD."),
+                _ => format!("The changes of {short} are already on HEAD; there is nothing to cherry-pick."),
+            });
+        }
+        return Err(error_text(text, &format!("git {} failed", kind.label())));
+    }
+    Ok(PickResult {
+        outcome: if opts.no_commit {
+            PickOutcome::Staged
+        } else {
+            PickOutcome::Committed
+        },
+        conflicts: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Merge, rebase, cherry-pick and revert in progress
 // ---------------------------------------------------------------------------
 
@@ -4569,6 +4681,114 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         repo.git(&["switch", "-q", "main"]);
         repo.git(&["branch", "-q", "-D", "feature"]);
         assert_eq!(branches(&repo.dir).unwrap().previous, None);
+    }
+
+    /// A repository whose main and `other` branches changed the same line of f.txt; returns the
+    /// sha of the change on `other`.
+    fn diverged_line(name: &str) -> (TestRepo, String) {
+        let repo = TestRepo::new(name);
+        repo.write("f.txt", "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", "other\n");
+        let pick = repo.commit_all("other");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("f.txt", "main\n");
+        repo.commit_all("main");
+        (repo, pick)
+    }
+
+    fn pick_opts(commit: &str, no_commit: bool) -> PickOptions {
+        PickOptions {
+            commit: commit.to_string(),
+            no_commit,
+            mainline: None,
+        }
+    }
+
+    #[test]
+    fn cherry_picks_commits() {
+        let repo = TestRepo::new("cherry-pick-clean");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("g.txt", "g\n");
+        let pick = repo.commit_all("add g");
+        repo.git(&["switch", "-q", "main"]);
+        let before = repo.head();
+
+        // Without committing, the changes are staged and HEAD stays.
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Staged);
+        assert_eq!(repo.head(), before);
+        assert_eq!(status(&repo.dir).unwrap().staged.len(), 1);
+        repo.git(&["reset", "-q", "--hard"]);
+
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Committed);
+        assert_eq!(repo.read("g.txt"), "g\n");
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "add g");
+        assert_eq!(repo.git(&["rev-parse", "HEAD^"]).trim(), before);
+
+        // Picking it again changes nothing, and leaves nothing in progress.
+        let err = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap_err();
+        assert!(err.contains("already on HEAD"), "{err}");
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+
+        assert!(cherry_pick(&repo.dir, &pick_opts("no-such-commit", false)).is_err());
+        assert!(cherry_pick(&repo.dir, &pick_opts("--abort", false)).is_err());
+    }
+
+    #[test]
+    fn cherry_pick_conflicts_stop_for_the_banner() {
+        let (repo, pick) = diverged_line("cherry-pick-conflict");
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::CherryPick
+        );
+
+        // Nothing else starts until it is finished.
+        assert!(
+            cherry_pick(&repo.dir, &pick_opts(&pick, false))
+                .unwrap_err()
+                .contains("cherry-pick is in progress")
+        );
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.read("f.txt"), "main\n");
+    }
+
+    #[test]
+    fn cherry_pick_without_commit_conflicts_leave_no_operation() {
+        let (repo, pick) = diverged_line("cherry-pick-no-commit-conflict");
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::ConflictsNoCommit);
+        assert_eq!(result.conflicts, 1);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn cherry_picks_merge_commits_with_a_mainline() {
+        let repo = TestRepo::new("cherry-pick-merge");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "feature"]);
+        repo.write("feature.txt", "feature\n");
+        repo.commit_all("feature");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("main.txt", "main\n");
+        repo.commit_all("main");
+        repo.git(&["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+        let merge = repo.head();
+        repo.git(&["switch", "-q", "-c", "target", "HEAD~1"]);
+
+        assert!(cherry_pick(&repo.dir, &pick_opts(&merge, false)).is_err());
+        let opts = PickOptions {
+            mainline: Some(1),
+            ..pick_opts(&merge, false)
+        };
+        assert_eq!(cherry_pick(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
+        assert_eq!(repo.read("feature.txt"), "feature\n");
     }
 
     #[test]
