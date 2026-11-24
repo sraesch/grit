@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reset the current branch to a commit from its context menu in the history: soft keeps the changes staged, mixed keeps them unstaged, and hard discards them. The dialog says how many commits the branch drops, warns when some of them were already pushed and, for a hard reset, when uncommitted changes would be lost. Soft or mixed is remembered; hard is chosen each time. Afterwards the message names the commit the branch pointed at, so it can be restored
 - Create tags: "New Tag Here…" in a commit's context menu creates a lightweight tag, or an annotated one when you enter a message, and can push it to a remote right away (remembered)
 - Right-clicking a tag in the sidebar opens a menu to check it out (as double-clicking does), push it to a remote, copy its name, delete it, or delete it on a remote after a confirmation. Pushing a single tag never overwrites a different tag of the same name on the remote. Annotated tags now show the commit they point at
+- More in the branch context menus of the sidebar: "Rename…" renames a local branch and optionally the remote branch it tracks (pushed under the new name, then the old one deleted unless someone pushed to it since the last fetch); "Set Upstream…" chooses the remote branch it tracks and "Clear Upstream" stops tracking it, without pushing; and "New Branch from Here…" on a local or remote branch creates a branch starting there
 
 ## [0.5.0] - 2026-11-22
 

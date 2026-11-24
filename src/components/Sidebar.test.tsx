@@ -43,6 +43,10 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     onCopyName: vi.fn(),
     onDeleteRemoteBranch: vi.fn(),
     onPushTag: vi.fn(),
+    onCreateBranchFrom: vi.fn(),
+    onRenameBranch: vi.fn(),
+    onSetUpstream: vi.fn(),
+    onClearUpstream: vi.fn(),
     onDeleteTag: vi.fn(),
     onDeleteRemoteTag: vi.fn(),
   };
@@ -127,6 +131,34 @@ describe("Sidebar", () => {
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("creates branches from, renames and sets or clears the upstream of a local branch", async () => {
+    const { onCreateBranchFrom, onRenameBranch, onSetUpstream, onClearUpstream } = setup();
+    const choose = async (name: string, item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText(name) });
+      await userEvent.click(screen.getByRole("menuitem", { name: item }));
+    };
+    await choose("main", "New Branch from Here…");
+    expect(onCreateBranchFrom).toHaveBeenLastCalledWith("main");
+    await choose("main", "Rename…");
+    expect(onRenameBranch).toHaveBeenLastCalledWith(branches.local[0]);
+    await choose("main", "Set Upstream…");
+    expect(onSetUpstream).toHaveBeenLastCalledWith(branches.local[0]);
+    await choose("main", "Clear Upstream");
+    expect(onClearUpstream).toHaveBeenLastCalledWith(branches.local[0]);
+
+    // Without an upstream there is nothing to clear.
+    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("feature") });
+    expect(screen.queryByRole("menuitem", { name: "Clear Upstream" })).not.toBeInTheDocument();
+  });
+
+  it("creates a branch from a remote branch", async () => {
+    const { onCreateBranchFrom } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/new-work") });
+    await userEvent.click(screen.getByRole("menuitem", { name: "New Branch from Here…" }));
+    expect(onCreateBranchFrom).toHaveBeenCalledWith("origin/new-work");
   });
 
   it("checks out, pushes, copies and deletes a tag from its context menu", async () => {

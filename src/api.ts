@@ -464,6 +464,16 @@ export const api = {
   /** Deletes a tag on a remote, keeping the local one. Progress arrives as `git-progress` events. */
   deleteRemoteTag: (repo: string, remote: string, name: string) =>
     invoke<void>("delete_remote_tag", { repo, remote, name }),
+  /**
+   * Renames a local branch and, with `renameRemote`, the remote branch it tracks: pushed under the new
+   * name, then the old one deleted unless someone pushed to it since the last fetch. Progress arrives
+   * as `git-progress` events.
+   */
+  renameBranch: (repo: string, name: string, newName: string, renameRemote: boolean) =>
+    invoke<void>("rename_branch", { repo, name, newName, renameRemote }),
+  /** Makes `branch` track a remote branch such as "origin/main", or nothing when `upstream` is null. */
+  setUpstream: (repo: string, branch: string, upstream: string | null) =>
+    invoke<void>("set_upstream", { repo, branch, upstream }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */

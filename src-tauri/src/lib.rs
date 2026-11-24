@@ -451,6 +451,31 @@ async fn delete_remote_tag(app: AppHandle, repo: String, remote: String, name: S
 }
 
 #[tauri::command]
+async fn rename_branch(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    new_name: String,
+    rename_remote: bool,
+) -> GitResult<()> {
+    blocking(move || {
+        git::rename_branch(
+            &PathBuf::from(&repo),
+            &name,
+            &new_name,
+            rename_remote,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_upstream(repo: String, branch: String, upstream: Option<String>) -> GitResult<()> {
+    blocking(move || git::set_upstream(&PathBuf::from(repo), &branch, upstream.as_deref())).await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -540,6 +565,8 @@ pub fn run() {
             delete_tag,
             push_tag,
             delete_remote_tag,
+            rename_branch,
+            set_upstream,
             abort_operation,
             continue_operation,
             skip_operation,
