@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Right-clicking a commit in the history opens a menu to check it out (as double-clicking does), create a branch at it, or copy its SHA or message. Shift+F10 or the menu key opens the menu for the selected commit. A new branch can be checked out right away or just created; the choice is remembered
+
 ## [0.5.0] - 2026-11-22
 
 ### Added

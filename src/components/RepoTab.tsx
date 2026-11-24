@@ -21,6 +21,7 @@ import {
   Status,
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
+import { CommitAction, commitMenu } from "../commit";
 import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
@@ -37,8 +38,10 @@ import {
 } from "../remote";
 import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
+import { CreateBranchDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
+import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
 import { HistoryView } from "./HistoryView";
@@ -123,6 +126,12 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [remoteEdit, setRemoteEdit] = useState<
     { kind: "add" } | { kind: "url" | "name" | "remove"; remote: Remote } | null
   >(null);
+  // The commit whose context menu is open in the history, and where.
+  const [commitMenuAt, setCommitMenuAt] = useState<{ entry: LogEntry; x: number; y: number } | null>(null);
+  // Its full message, loaded when the menu opens so "Copy Message" can copy it right away.
+  const [commitMenuMessage, setCommitMenuMessage] = useState<string | null>(null);
+  // A branch being created at `start`; `label` describes the start in the dialog, `short` in the message after.
+  const [creatingBranch, setCreatingBranch] = useState<{ start: string; label: string; short: string } | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -411,6 +420,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setDropping(null);
       setRemoteEdit(null);
       setDeletingRemote(null);
+      setCommitMenuAt(null);
+      setCreatingBranch(null);
     }
   }, [active]);
 
@@ -568,11 +579,81 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     }
   }
 
-  function copyName(name: string) {
-    navigator.clipboard.writeText(name).then(
-      () => mounted.current && setNotice({ kind: "info", text: `Copied ${name}.` }),
-      (e) => mounted.current && onError(`Could not copy ${name}: ${errorMessage(e)}`),
+  /** Copies `text`; `what` names it in the messages, e.g. "the message of abc1234". */
+  function copyText(text: string, what = text) {
+    navigator.clipboard.writeText(text).then(
+      () => mounted.current && setNotice({ kind: "info", text: `Copied ${what}.` }),
+      (e) => mounted.current && onError(`Could not copy ${what}: ${errorMessage(e)}`),
     );
+  }
+
+  const openCommitMenu = useCallback(
+    (entry: LogEntry, x: number, y: number) => {
+      setCommitMenuAt({ entry, x, y });
+      setCommitMenuMessage(null);
+      api.commitDetails(root, entry.sha).then(
+        (d) => mounted.current && setCommitMenuMessage(d.message.trimEnd()),
+        () => {
+          /* "Copy Message" falls back to the subject */
+        },
+      );
+    },
+    [root],
+  );
+  const closeCommitMenu = useCallback(() => setCommitMenuAt(null), []);
+
+  function commitMenuItems(entry: LogEntry): MenuEntry[] {
+    const busy = remoteOp
+      ? "Wait until the running operation is done"
+      : switching
+        ? "Wait until the branch switch is done"
+        : null;
+    return commitMenu(entry, { branches, busy }).map((item) =>
+      item === "separator"
+        ? SEPARATOR
+        : {
+            label: item.label,
+            danger: item.danger,
+            disabled: item.blocked !== null,
+            title: item.blocked ?? item.title,
+            onSelect: () => runCommitAction(item.action, entry),
+          },
+    );
+  }
+
+  function runCommitAction(action: CommitAction, entry: LogEntry) {
+    const short = entry.sha.slice(0, 7);
+    switch (action) {
+      case "checkout": {
+        const target = targetForCommit(entry, branches);
+        if (target) switchBranch(target);
+        break;
+      }
+      case "create-branch":
+        setCreatingBranch({ start: entry.sha, label: `${short} ${entry.subject}`, short });
+        break;
+      case "copy-sha":
+        copyText(entry.sha);
+        break;
+      case "copy-message":
+        copyText(commitMenuMessage ?? entry.subject, `the message of ${short}`);
+        break;
+    }
+  }
+
+  const closeCreateBranch = useCallback(() => setCreatingBranch(null), []);
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function createBranch(name: string, checkout: boolean) {
+    if (!creatingBranch) return;
+    await api.createBranch(root, name, creatingBranch.start, checkout);
+    setCreatingBranch(null);
+    onClearError();
+    setNotice({
+      kind: "info",
+      text: checkout ? `Switched to the new branch ${name}.` : `Created branch ${name} at ${creatingBranch.short}.`,
+    });
+    refreshAll();
   }
 
   const fetchRemote = useCallback(
@@ -810,6 +891,18 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         />
       )}
       {dropping && <DropStashDialog stash={dropping} onDrop={dropStash} onClose={closeDrop} />}
+      {creatingBranch && (
+        <CreateBranchDialog startLabel={creatingBranch.label} onCreate={createBranch} onClose={closeCreateBranch} />
+      )}
+      {commitMenuAt && (
+        <ContextMenu
+          x={commitMenuAt.x}
+          y={commitMenuAt.y}
+          label={`Commit ${commitMenuAt.entry.sha.slice(0, 7)}`}
+          items={commitMenuItems(commitMenuAt.entry)}
+          onClose={closeCommitMenu}
+        />
+      )}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar
           view={view}
@@ -846,7 +939,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
                     ? "Wait until the running operation is done"
                     : "Nothing can be merged right now"
           }
-          onCopyName={copyName}
+          onCopyName={(name) => copyText(name)}
           onDeleteRemoteBranch={askDeleteRemoteBranch}
         />
         <main className="main">
@@ -872,6 +965,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
                 const target = targetForCommit(entry, branches);
                 if (target) switchBranch(target);
               }}
+              onMenu={openCommitMenu}
             />
           )}
         </main>

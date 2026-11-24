@@ -411,7 +411,12 @@ describe("App", () => {
 
       await userEvent.keyboard("{Control>}b{/Control}");
       await userEvent.keyboard("hotfix{Enter}");
-      expect(invokeMock).toHaveBeenCalledWith("create_branch", { repo: "/work/demo", name: "hotfix" });
+      expect(invokeMock).toHaveBeenCalledWith("create_branch", {
+        repo: "/work/demo",
+        name: "hotfix",
+        start: null,
+        checkout: true,
+      });
       expect(await screen.findByRole("button", { name: /^hotfix/ })).toBeInTheDocument();
     });
 

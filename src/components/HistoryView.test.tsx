@@ -98,6 +98,26 @@ describe("HistoryView", () => {
     expect(onCheckout).toHaveBeenCalledWith(log[1]);
   });
 
+  it("opens a commit's menu on right-click, selecting it", async () => {
+    const onMenu = vi.fn();
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} onMenu={onMenu} />);
+    fireEvent.contextMenu(await screen.findByText("Second commit"), { clientX: 30, clientY: 40 });
+    expect(onMenu).toHaveBeenCalledWith(log[1], 30, 40);
+    expect(await screen.findByText("Subject of c2")).toBeInTheDocument();
+  });
+
+  it("opens the selected commit's menu with Shift+F10 or the menu key", async () => {
+    const onMenu = vi.fn();
+    render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} onMenu={onMenu} />);
+    await screen.findByText("Subject of c3");
+    const list = document.querySelector(".history-scroll")!;
+    fireEvent.keyDown(list, { key: "F10", shiftKey: true });
+    expect(onMenu).toHaveBeenLastCalledWith(log[0], expect.any(Number), expect.any(Number));
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    fireEvent.keyDown(list, { key: "ContextMenu" });
+    expect(onMenu).toHaveBeenLastCalledWith(log[1], expect.any(Number), expect.any(Number));
+  });
+
   it("moves the selection with the arrow keys", async () => {
     render(<HistoryView repo="/repo" log={log} onError={() => {}} onCheckout={() => {}} />);
     await screen.findByText("Subject of c3");

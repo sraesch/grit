@@ -970,9 +970,19 @@ pub fn checkout_commit(repo: &Path, sha: &str) -> GitResult<()> {
     run(repo, &["switch", "--detach", &format!("{sha}^{{commit}}")]).map(drop)
 }
 
-/// Creates a branch at HEAD and switches to it.
-pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
-    run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
+/// Creates a branch at `start` (a commit, branch or tag; HEAD when None) and, with `checkout`,
+/// switches to it. Starting at a remote branch makes the new branch track it, as git does by
+/// default (`branch.autoSetupMerge`).
+pub fn create_branch(repo: &Path, name: &str, start: Option<&str>, checkout: bool) -> GitResult<()> {
+    let mut args = if checkout {
+        vec!["switch", "-c", branch_arg(name)?]
+    } else {
+        vec!["branch", branch_arg(name)?]
+    };
+    if let Some(start) = start {
+        args.push(plain_arg(start, "start point")?);
+    }
+    run(repo, &args).map(drop)
 }
 
 #[derive(Serialize, Debug, PartialEq, Clone, Copy)]
@@ -3107,14 +3117,14 @@ mod tests {
         assert!(local.current);
         assert_eq!(local.upstream.as_deref(), Some("origin/feature/remote"));
 
-        create_branch(&clone.dir, "topic").unwrap();
+        create_branch(&clone.dir, "topic", None, true).unwrap();
         assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("topic"));
         assert!(
-            create_branch(&clone.dir, "topic")
+            create_branch(&clone.dir, "topic", None, true)
                 .unwrap_err()
                 .contains("already exists")
         );
-        assert!(create_branch(&clone.dir, "bad..name").is_err());
+        assert!(create_branch(&clone.dir, "bad..name", None, true).is_err());
 
         checkout(&clone.dir, "main").unwrap();
         assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("main"));
@@ -3126,9 +3136,35 @@ mod tests {
                     .unwrap_err()
                     .contains("not a valid branch name")
             );
-            assert!(create_branch(&clone.dir, name).is_err());
+            assert!(create_branch(&clone.dir, name, None, true).is_err());
+            assert!(create_branch(&clone.dir, "ok", Some(name), false).is_err());
             assert!(checkout_remote(&clone.dir, name).is_err());
         }
+    }
+
+    #[test]
+    fn creates_branches_at_a_start_point() {
+        let repo = TestRepo::new("create-branch-at");
+        let first = repo.commit_all_initial();
+        repo.write("b.txt", "b");
+        let second = repo.commit_all("second");
+
+        // Without checkout, the branch is created and HEAD stays where it is.
+        create_branch(&repo.dir, "old", Some(&first), false).unwrap();
+        assert_eq!(repo.git(&["rev-parse", "old"]).trim(), first);
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("main"));
+        assert_eq!(repo.head(), second);
+
+        // With checkout, it is switched to.
+        create_branch(&repo.dir, "older", Some("old"), true).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("older"));
+        assert_eq!(repo.head(), first);
+
+        // At HEAD without a start point.
+        create_branch(&repo.dir, "here", None, false).unwrap();
+        assert_eq!(repo.git(&["rev-parse", "here"]).trim(), first);
+
+        assert!(create_branch(&repo.dir, "x", Some("no-such-commit"), false).is_err());
     }
 
     #[test]

@@ -10,13 +10,18 @@ export interface MenuItem {
   onSelect: () => void;
 }
 
+/** A line between groups of items. */
+export const SEPARATOR = { separator: true } as const;
+
+export type MenuEntry = MenuItem | typeof SEPARATOR;
+
 interface ContextMenuProps {
   /** Where the menu was asked for, in viewport coordinates. */
   x: number;
   y: number;
   /** What the menu is about, for screen readers. */
   label: string;
-  items: MenuItem[];
+  items: MenuEntry[];
   onClose: () => void;
 }
 
@@ -83,9 +88,12 @@ export function ContextMenu({ x, y, label, items, onClose }: ContextMenuProps) {
       onKeyDown={onKeyDown}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {items.map((item) => (
+      {items.map((item, i) =>
+        "separator" in item ? (
+          <div key={i} className="context-menu-separator" role="separator" />
+        ) : (
         <button
-          key={item.label}
+          key={i}
           role="menuitem"
           className={item.danger ? "danger" : undefined}
           disabled={item.disabled}
@@ -97,7 +105,8 @@ export function ContextMenu({ x, y, label, items, onClose }: ContextMenuProps) {
         >
           {item.label}
         </button>
-      ))}
+        ),
+      )}
     </div>
   );
 }
