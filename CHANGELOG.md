@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Right-clicking a commit in the history opens a menu to check it out (as double-clicking does), create a branch at it, or copy its SHA or message. Shift+F10 or the menu key opens the menu for the selected commit. A new branch can be checked out right away or just created; the choice is remembered
 - Cherry-pick a commit onto the current branch from its context menu in the history. The dialog names the commit and the branch, can only apply the changes without committing them (remembered), and asks which parent is the mainline for a merge commit. Conflicts stop in the banner, which continues, skips or aborts the cherry-pick; when the changes were only applied, the conflicts are resolved and committed like any other change
+- Revert a commit from its context menu in the history: a new commit undoes its changes, or, if you choose so (remembered separately from cherry-pick), the changes are only staged and the revert stays in the banner until they are committed. For a merge commit, the dialog asks which parent is the mainline. Conflicts stop in the banner, which continues, skips or aborts the revert
 
 ## [0.5.0] - 2026-11-22
 
