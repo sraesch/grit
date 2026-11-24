@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
+### Added
+
+- Right-clicking a commit in the history opens a menu to check it out (as double-clicking does), create a branch at it, or copy its SHA or message. Shift+F10 or the menu key opens the menu for the selected commit. A new branch can be checked out right away or just created; the choice is remembered
+- Cherry-pick a commit onto the current branch from its context menu in the history. The dialog names the commit and the branch, can only apply the changes without committing them (remembered), and asks which parent is the mainline for a merge commit. Conflicts stop in the banner, which continues, skips or aborts the cherry-pick; when the changes were only applied, the conflicts are resolved and committed like any other change
+- Revert a commit from its context menu in the history: a new commit undoes its changes, or, if you choose so (remembered separately from cherry-pick), the changes are only staged and the revert stays in the banner until they are committed. For a merge commit, the dialog asks which parent is the mainline. Conflicts stop in the banner, which continues, skips or aborts the revert
+- Reset the current branch to a commit from its context menu in the history: soft keeps the changes staged, mixed keeps them unstaged, and hard discards them. The dialog says how many commits the branch drops, warns when some of them were already pushed and, for a hard reset, when uncommitted changes would be lost. Soft or mixed is remembered; hard is chosen each time. Afterwards the message names the commit the branch pointed at, so it can be restored
+- Create tags: "New Tag Here…" in a commit's context menu creates a lightweight tag, or an annotated one when you enter a message, and can push it to a remote right away (remembered)
+- Right-clicking a tag in the sidebar opens a menu to check it out (as double-clicking does), push it to a remote, copy its name, delete it, or delete it on a remote after a confirmation. Pushing a single tag never overwrites a different tag of the same name on the remote. Annotated tags now show the commit they point at
+- More in the branch context menus of the sidebar: "Rename…" renames a local branch and optionally the remote branch it tracks (pushed under the new name, then the old one deleted unless someone pushed to it since the last fetch); "Set Upstream…" chooses the remote branch it tracks and "Clear Upstream" stops tracking it, without pushing; and "New Branch from Here…" on a local or remote branch creates a branch starting there
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
@@ -105,7 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sraesch/grit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sraesch/grit/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/sraesch/grit/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sraesch/grit/compare/v0.4.0...v0.4.1

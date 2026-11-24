@@ -13,8 +13,9 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    MergeMode, MergeOptions, MergeResult, PatchAction, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions,
-    RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
+    MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult, PushOptions,
+    PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult, StashOptions,
+    Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -198,8 +199,8 @@ async fn checkout_commit(repo: String, sha: String) -> GitResult<()> {
 }
 
 #[tauri::command]
-async fn create_branch(repo: String, name: String) -> GitResult<()> {
-    blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
+async fn create_branch(repo: String, name: String, start: Option<String>, checkout: Option<bool>) -> GitResult<()> {
+    blocking(move || git::create_branch(&PathBuf::from(repo), &name, start.as_deref(), checkout.unwrap_or(true))).await
 }
 
 /// A progress line of a running fetch, pull, push, rebase or merge, e.g. "Receiving objects:  45% (450/1000)".
@@ -378,6 +379,103 @@ async fn merge(
 }
 
 #[tauri::command]
+async fn cherry_pick(repo: String, commit: String, no_commit: bool, mainline: Option<u32>) -> GitResult<PickResult> {
+    blocking(move || {
+        let opts = PickOptions {
+            commit,
+            no_commit,
+            mainline,
+        };
+        git::cherry_pick(&PathBuf::from(repo), &opts)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn revert(repo: String, commit: String, no_commit: bool, mainline: Option<u32>) -> GitResult<PickResult> {
+    blocking(move || {
+        let opts = PickOptions {
+            commit,
+            no_commit,
+            mainline,
+        };
+        git::revert(&PathBuf::from(repo), &opts)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_reset_preview(repo: String, target: String) -> GitResult<ResetPreview> {
+    blocking(move || git::reset_preview(&PathBuf::from(repo), &target)).await
+}
+
+#[tauri::command]
+async fn reset(repo: String, target: String, mode: ResetMode) -> GitResult<String> {
+    blocking(move || git::reset(&PathBuf::from(repo), &target, mode)).await
+}
+
+#[tauri::command]
+async fn create_tag(repo: String, name: String, commit: String, message: Option<String>) -> GitResult<()> {
+    blocking(move || git::create_tag(&PathBuf::from(repo), &name, &commit, message.as_deref())).await
+}
+
+#[tauri::command]
+async fn delete_tag(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::delete_tag(&PathBuf::from(repo), &name)).await
+}
+
+#[tauri::command]
+async fn push_tag(app: AppHandle, repo: String, remote: String, name: String) -> GitResult<()> {
+    blocking(move || {
+        git::push_tag(
+            &PathBuf::from(&repo),
+            &remote,
+            &name,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_remote_tag(app: AppHandle, repo: String, remote: String, name: String) -> GitResult<()> {
+    blocking(move || {
+        git::delete_remote_tag(
+            &PathBuf::from(&repo),
+            &remote,
+            &name,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn rename_branch(
+    app: AppHandle,
+    repo: String,
+    name: String,
+    new_name: String,
+    rename_remote: bool,
+) -> GitResult<()> {
+    blocking(move || {
+        git::rename_branch(
+            &PathBuf::from(&repo),
+            &name,
+            &new_name,
+            rename_remote,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_upstream(repo: String, branch: String, upstream: Option<String>) -> GitResult<()> {
+    blocking(move || git::set_upstream(&PathBuf::from(repo), &branch, upstream.as_deref())).await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -459,6 +557,16 @@ pub fn run() {
             get_divergence,
             rebase,
             merge,
+            cherry_pick,
+            revert,
+            get_reset_preview,
+            reset,
+            create_tag,
+            delete_tag,
+            push_tag,
+            delete_remote_tag,
+            rename_branch,
+            set_upstream,
             abort_operation,
             continue_operation,
             skip_operation,

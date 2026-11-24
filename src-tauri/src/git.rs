@@ -669,7 +669,9 @@ pub fn branches(repo: &Path) -> GitResult<Branches> {
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname)%1f%(objectname:short)%1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)",
+            // Annotated tags list the commit they point at rather than the tag object.
+            "--format=%(refname)%1f%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)\
+             %1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
@@ -970,9 +972,19 @@ pub fn checkout_commit(repo: &Path, sha: &str) -> GitResult<()> {
     run(repo, &["switch", "--detach", &format!("{sha}^{{commit}}")]).map(drop)
 }
 
-/// Creates a branch at HEAD and switches to it.
-pub fn create_branch(repo: &Path, name: &str) -> GitResult<()> {
-    run(repo, &["switch", "-c", branch_arg(name)?]).map(drop)
+/// Creates a branch at `start` (a commit, branch or tag; HEAD when None) and, with `checkout`,
+/// switches to it. Starting at a remote branch makes the new branch track it, as git does by
+/// default (`branch.autoSetupMerge`).
+pub fn create_branch(repo: &Path, name: &str, start: Option<&str>, checkout: bool) -> GitResult<()> {
+    let mut args = if checkout {
+        vec!["switch", "-c", branch_arg(name)?]
+    } else {
+        vec!["branch", branch_arg(name)?]
+    };
+    if let Some(start) = start {
+        args.push(plain_arg(start, "start point")?);
+    }
+    run(repo, &args).map(drop)
 }
 
 #[derive(Serialize, Debug, PartialEq, Clone, Copy)]
@@ -1068,6 +1080,138 @@ pub fn delete_remote_branch(
         return Err(format!("There is no remote branch '{remote}/{branch}'"));
     }
     delete_remote_ref(repo, remote, &format!("refs/heads/{branch}"), &tracking, on_progress)
+}
+
+/// Renames a local branch. With `rename_remote`, the remote branch it tracks is renamed too: the
+/// branch is pushed under its new name (and tracks that), then the old remote branch is deleted,
+/// but only if nobody pushed to it since the last fetch. A failure on the remote leaves the local
+/// rename in place and says what is left to do.
+pub fn rename_branch(
+    repo: &Path,
+    name: &str,
+    new_name: &str,
+    rename_remote: bool,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let name = branch_arg(name)?;
+    let new_name = branch_arg(new_name)?;
+    let old_ref = format!("refs/heads/{name}");
+    if rev(repo, &old_ref).is_none() {
+        return Err(format!("There is no branch '{name}'."));
+    }
+    if run(repo, &["check-ref-format", "--branch", new_name]).is_err() {
+        return Err(format!("'{new_name}' is not a valid branch name."));
+    }
+    let upstream = if rename_remote {
+        Some(upstream_of(repo, &old_ref).ok_or_else(|| format!("{name} doesn't track a remote branch."))?)
+    } else {
+        None
+    };
+    run(repo, &["branch", "-m", name, new_name])?;
+    let Some((remote, remote_ref, tracking)) = upstream else {
+        return Ok(());
+    };
+
+    let new_ref = format!("refs/heads/{new_name}");
+    let refspec = format!("{new_ref}:{new_ref}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", "--set-upstream", &remote, &refspec],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let pushed = parse_push_porcelain(&out.stdout)
+        .iter()
+        .any(|r| r.dst == new_ref && matches!(r.flag, '*' | '=' | ' '));
+    if !pushed {
+        return Err(format!(
+            "Renamed {name} to {new_name}, but pushing it to {remote} failed: {}",
+            error_text(&out.stderr, "git push failed")
+        ));
+    }
+    let old_remote = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
+    delete_remote_ref(repo, &remote, &remote_ref, &tracking, on_progress)
+        .map_err(|e| format!("Renamed {name} to {new_name} and pushed it to {remote}, but {old_remote} was kept: {e}"))
+}
+
+/// Makes `branch` track `upstream` (a remote branch such as "origin/main"), or nothing when None.
+pub fn set_upstream(repo: &Path, branch: &str, upstream: Option<&str>) -> GitResult<()> {
+    let branch = branch_arg(branch)?;
+    match upstream {
+        Some(upstream) => {
+            let upstream = plain_arg(upstream, "remote branch")?;
+            run(repo, &["branch", &format!("--set-upstream-to={upstream}"), branch]).map(drop)
+        }
+        None => run(repo, &["branch", "--unset-upstream", branch]).map(drop),
+    }
+}
+
+/// Checks a tag name the way git does for `refs/tags/<name>`.
+fn tag_arg<'a>(repo: &Path, name: &'a str) -> GitResult<&'a str> {
+    let invalid = || format!("'{name}' is not a valid tag name.");
+    let name = plain_arg(name, "tag name").map_err(|_| invalid())?;
+    run(repo, &["check-ref-format", &format!("refs/tags/{name}")]).map_err(|_| invalid())?;
+    Ok(name)
+}
+
+/// Creates a tag at `commit`: annotated with `message` when given, lightweight otherwise.
+pub fn create_tag(repo: &Path, name: &str, commit: &str, message: Option<&str>) -> GitResult<()> {
+    let name = tag_arg(repo, name)?;
+    let sha = resolve_commit(repo, commit)?;
+    match message.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(message) => run_with(repo, &["tag", "-a", "-F", "-", name, &sha], Some(message), &[0]).map(drop),
+        None => run(repo, &["tag", name, &sha]).map(drop),
+    }
+}
+
+pub fn delete_tag(repo: &Path, name: &str) -> GitResult<()> {
+    run(repo, &["tag", "-d", plain_arg(name, "tag name")?]).map(drop)
+}
+
+/// Pushes one tag to `remote`. Refused when the remote has a different tag of that name.
+pub fn push_tag(repo: &Path, remote: &str, name: &str, on_progress: &mut dyn FnMut(&str)) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let name = plain_arg(name, "tag name")?;
+    let tag_ref = format!("refs/tags/{name}");
+    if rev(repo, &tag_ref).is_none() {
+        return Err(format!("There is no tag '{name}'."));
+    }
+    let refspec = format!("{tag_ref}:{tag_ref}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", remote, &refspec],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    match parse_push_porcelain(&out.stdout).iter().find(|r| r.dst == tag_ref) {
+        Some(r) if matches!(r.flag, '*' | '=' | ' ' | '+') => Ok(()),
+        Some(r) if r.flag == '!' => Err(format!(
+            "{remote} already has a different tag {name}, so it wasn't pushed ({}).",
+            r.summary.trim_matches(|c| c == '[' || c == ']')
+        )),
+        _ => Err(error_text(&out.stderr, &format!("Pushing {name} to {remote} failed"))),
+    }
+}
+
+/// Deletes tag `name` on `remote`; the local tag is kept.
+pub fn delete_remote_tag(repo: &Path, remote: &str, name: &str, on_progress: &mut dyn FnMut(&str)) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let name = plain_arg(name, "tag name")?;
+    let tag_ref = format!("refs/tags/{name}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", remote, "--delete", &tag_ref],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    // Depending on the transport, git refuses or "deletes" a missing ref with a warning.
+    if out.stderr.contains("remote ref does not exist") || out.stderr.contains("non-existent ref") {
+        return Err(format!("{remote} has no tag {name}."));
+    }
+    match parse_push_porcelain(&out.stdout).iter().find(|r| r.dst == tag_ref) {
+        Some(r) if r.flag == '-' => Ok(()),
+        _ => Err(error_text(&out.stderr, &format!("Deleting {name} on {remote} failed"))),
+    }
 }
 
 /// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
@@ -2113,6 +2257,192 @@ pub fn merge(repo: &Path, opts: &MergeOptions, on_progress: &mut dyn FnMut(&str)
 }
 
 // ---------------------------------------------------------------------------
+// Cherry-pick and revert
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum PickOutcome {
+    /// A new commit was created.
+    Committed,
+    /// The changes were applied and staged without committing (`no_commit`). After a revert,
+    /// REVERT_HEAD stays until they are committed, so the revert also shows as in progress.
+    Staged,
+    /// Stopped on conflicts; `Status::operation` describes it, and it is continued or aborted from there.
+    Conflicts,
+    /// `no_commit` cherry-picked the changes with conflicts. git keeps no state for it, so there
+    /// is nothing to continue or abort: the conflicts are resolved and committed like any change.
+    /// (`revert --no-commit` keeps REVERT_HEAD, so a revert stops with `Conflicts` instead.)
+    ConflictsNoCommit,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PickResult {
+    pub outcome: PickOutcome,
+    /// Files with conflicts, for the `Conflicts` and `ConflictsNoCommit` outcomes.
+    pub conflicts: u32,
+}
+
+pub struct PickOptions {
+    /// The commit to apply (cherry-pick) or undo (revert).
+    pub commit: String,
+    /// Only apply the changes to the index and working tree, without committing.
+    pub no_commit: bool,
+    /// For a merge commit: the parent (1-based) whose side is the mainline, as `-m` takes it.
+    pub mainline: Option<u32>,
+}
+
+/// Applies a commit onto HEAD.
+pub fn cherry_pick(repo: &Path, opts: &PickOptions) -> GitResult<PickResult> {
+    apply_commit(repo, OperationKind::CherryPick, opts)
+}
+
+/// Creates a commit that undoes `opts.commit` (or, with `no_commit`, only stages that).
+pub fn revert(repo: &Path, opts: &PickOptions) -> GitResult<PickResult> {
+    apply_commit(repo, OperationKind::Revert, opts)
+}
+
+/// Cherry-picks or reverts `opts.commit`; conflicts are an outcome, not an error.
+fn apply_commit(repo: &Path, kind: OperationKind, opts: &PickOptions) -> GitResult<PickResult> {
+    let commit = plain_arg(&opts.commit, "commit")?;
+    let verb = match kind {
+        OperationKind::Revert => "reverting",
+        _ => "cherry-picking",
+    };
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before {verb}.",
+            op.kind.label()
+        ));
+    }
+    if !has_head(repo) {
+        return Err(format!(
+            "There are no commits yet, so there is nothing to apply {verb} to."
+        ));
+    }
+    let sha = rev(repo, &format!("{commit}^{{commit}}")).ok_or_else(|| format!("'{commit}' is not a commit."))?;
+    let short = &sha[..sha.len().min(7)];
+
+    let mainline = opts.mainline.map(|m| m.to_string());
+    let mut args = vec![kind.label()];
+    if opts.no_commit {
+        args.push("--no-commit");
+    }
+    if let Some(m) = &mainline {
+        args.extend(["-m", m.as_str()]);
+    }
+    args.push(&sha);
+    // English messages to recognize an empty pick; an editor would never open.
+    let out = exec_streaming(repo, &args, &[("GIT_EDITOR", "true"), ("LC_ALL", "C")], &mut |_| {})?;
+
+    let st = status(repo)?;
+    let conflicts = st.conflicted.len() as u32;
+    if conflicts > 0 {
+        let outcome = if st.operation.is_some() {
+            PickOutcome::Conflicts
+        } else {
+            PickOutcome::ConflictsNoCommit
+        };
+        return Ok(PickResult { outcome, conflicts });
+    }
+    if out.code != 0 {
+        let text = if out.stderr.trim().is_empty() {
+            &out.stdout
+        } else {
+            &out.stderr
+        };
+        // The changes are on HEAD already: git stops with nothing to commit. Nothing is left to
+        // do, so give the operation up rather than leave a banner behind.
+        if text.contains("is now empty") || text.contains("nothing to commit") {
+            if st.operation.is_some_and(|op| op.kind == kind) {
+                let _ = run(repo, &[kind.label(), "--abort"]);
+            }
+            return Err(match kind {
+                OperationKind::Revert => format!("Reverting {short} changes nothing: its changes aren't on HEAD."),
+                _ => format!("The changes of {short} are already on HEAD; there is nothing to cherry-pick."),
+            });
+        }
+        return Err(error_text(text, &format!("git {} failed", kind.label())));
+    }
+    Ok(PickResult {
+        outcome: if opts.no_commit {
+            PickOutcome::Staged
+        } else {
+            PickOutcome::Committed
+        },
+        conflicts: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Reset
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResetMode {
+    /// Keep the changes of the dropped commits and the local changes staged.
+    Soft,
+    /// Keep them as unstaged changes.
+    Mixed,
+    /// Discard them: the working tree matches the commit.
+    Hard,
+}
+
+/// What resetting HEAD to a commit does to the current branch.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetPreview {
+    /// Commits the branch contains now and no longer will.
+    pub dropped: u32,
+    /// Of those, the commits that are on a remote branch, i.e. were pushed.
+    pub dropped_pushed: u32,
+    /// Commits the branch will contain that it doesn't now (when the commit isn't an ancestor of HEAD).
+    pub added: u32,
+}
+
+fn resolve_commit(repo: &Path, commit: &str) -> GitResult<String> {
+    let commit = plain_arg(commit, "commit")?;
+    rev(repo, &format!("{commit}^{{commit}}")).ok_or_else(|| format!("'{commit}' is not a commit."))
+}
+
+/// What `reset` to `target` would drop from (and add to) the current branch.
+pub fn reset_preview(repo: &Path, target: &str) -> GitResult<ResetPreview> {
+    let sha = resolve_commit(repo, target)?;
+    let dropped = count(repo, &format!("{sha}..HEAD"));
+    let unpushed = run(repo, &["rev-list", "--count", "HEAD", "--not", &sha, "--remotes"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(dropped);
+    Ok(ResetPreview {
+        dropped,
+        dropped_pushed: dropped.saturating_sub(unpushed),
+        added: count(repo, &format!("HEAD..{sha}")),
+    })
+}
+
+/// Moves the current branch (or the detached HEAD) to `target`. Returns the commit it pointed at
+/// before, which brings it back if the reset was a mistake.
+pub fn reset(repo: &Path, target: &str, mode: ResetMode) -> GitResult<String> {
+    let sha = resolve_commit(repo, target)?;
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before resetting.",
+            op.kind.label()
+        ));
+    }
+    let old = rev(repo, "HEAD").ok_or("There are no commits to reset yet.")?;
+    let flag = match mode {
+        ResetMode::Soft => "--soft",
+        ResetMode::Mixed => "--mixed",
+        ResetMode::Hard => "--hard",
+    };
+    run(repo, &["reset", "-q", flag, &sha])?;
+    Ok(old)
+}
+
+// ---------------------------------------------------------------------------
 // Merge, rebase, cherry-pick and revert in progress
 // ---------------------------------------------------------------------------
 
@@ -3107,14 +3437,14 @@ mod tests {
         assert!(local.current);
         assert_eq!(local.upstream.as_deref(), Some("origin/feature/remote"));
 
-        create_branch(&clone.dir, "topic").unwrap();
+        create_branch(&clone.dir, "topic", None, true).unwrap();
         assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("topic"));
         assert!(
-            create_branch(&clone.dir, "topic")
+            create_branch(&clone.dir, "topic", None, true)
                 .unwrap_err()
                 .contains("already exists")
         );
-        assert!(create_branch(&clone.dir, "bad..name").is_err());
+        assert!(create_branch(&clone.dir, "bad..name", None, true).is_err());
 
         checkout(&clone.dir, "main").unwrap();
         assert_eq!(status(&clone.dir).unwrap().branch.as_deref(), Some("main"));
@@ -3126,9 +3456,35 @@ mod tests {
                     .unwrap_err()
                     .contains("not a valid branch name")
             );
-            assert!(create_branch(&clone.dir, name).is_err());
+            assert!(create_branch(&clone.dir, name, None, true).is_err());
+            assert!(create_branch(&clone.dir, "ok", Some(name), false).is_err());
             assert!(checkout_remote(&clone.dir, name).is_err());
         }
+    }
+
+    #[test]
+    fn creates_branches_at_a_start_point() {
+        let repo = TestRepo::new("create-branch-at");
+        let first = repo.commit_all_initial();
+        repo.write("b.txt", "b");
+        let second = repo.commit_all("second");
+
+        // Without checkout, the branch is created and HEAD stays where it is.
+        create_branch(&repo.dir, "old", Some(&first), false).unwrap();
+        assert_eq!(repo.git(&["rev-parse", "old"]).trim(), first);
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("main"));
+        assert_eq!(repo.head(), second);
+
+        // With checkout, it is switched to.
+        create_branch(&repo.dir, "older", Some("old"), true).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("older"));
+        assert_eq!(repo.head(), first);
+
+        // At HEAD without a start point.
+        create_branch(&repo.dir, "here", None, false).unwrap();
+        assert_eq!(repo.git(&["rev-parse", "here"]).trim(), first);
+
+        assert!(create_branch(&repo.dir, "x", Some("no-such-commit"), false).is_err());
     }
 
     #[test]
@@ -4533,6 +4889,381 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         repo.git(&["switch", "-q", "main"]);
         repo.git(&["branch", "-q", "-D", "feature"]);
         assert_eq!(branches(&repo.dir).unwrap().previous, None);
+    }
+
+    /// A repository whose main and `other` branches changed the same line of f.txt; returns the
+    /// sha of the change on `other`.
+    fn diverged_line(name: &str) -> (TestRepo, String) {
+        let repo = TestRepo::new(name);
+        repo.write("f.txt", "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", "other\n");
+        let pick = repo.commit_all("other");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("f.txt", "main\n");
+        repo.commit_all("main");
+        (repo, pick)
+    }
+
+    fn pick_opts(commit: &str, no_commit: bool) -> PickOptions {
+        PickOptions {
+            commit: commit.to_string(),
+            no_commit,
+            mainline: None,
+        }
+    }
+
+    #[test]
+    fn cherry_picks_commits() {
+        let repo = TestRepo::new("cherry-pick-clean");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("g.txt", "g\n");
+        let pick = repo.commit_all("add g");
+        repo.git(&["switch", "-q", "main"]);
+        let before = repo.head();
+
+        // Without committing, the changes are staged and HEAD stays.
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Staged);
+        assert_eq!(repo.head(), before);
+        assert_eq!(status(&repo.dir).unwrap().staged.len(), 1);
+        repo.git(&["reset", "-q", "--hard"]);
+
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Committed);
+        assert_eq!(repo.read("g.txt"), "g\n");
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "add g");
+        assert_eq!(repo.git(&["rev-parse", "HEAD^"]).trim(), before);
+
+        // Picking it again changes nothing, and leaves nothing in progress.
+        let err = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap_err();
+        assert!(err.contains("already on HEAD"), "{err}");
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+
+        assert!(cherry_pick(&repo.dir, &pick_opts("no-such-commit", false)).is_err());
+        assert!(cherry_pick(&repo.dir, &pick_opts("--abort", false)).is_err());
+    }
+
+    #[test]
+    fn cherry_pick_conflicts_stop_for_the_banner() {
+        let (repo, pick) = diverged_line("cherry-pick-conflict");
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::CherryPick
+        );
+
+        // Nothing else starts until it is finished.
+        assert!(
+            cherry_pick(&repo.dir, &pick_opts(&pick, false))
+                .unwrap_err()
+                .contains("cherry-pick is in progress")
+        );
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.read("f.txt"), "main\n");
+    }
+
+    #[test]
+    fn cherry_pick_without_commit_conflicts_leave_no_operation() {
+        let (repo, pick) = diverged_line("cherry-pick-no-commit-conflict");
+        let result = cherry_pick(&repo.dir, &pick_opts(&pick, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::ConflictsNoCommit);
+        assert_eq!(result.conflicts, 1);
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn cherry_picks_merge_commits_with_a_mainline() {
+        let repo = TestRepo::new("cherry-pick-merge");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "feature"]);
+        repo.write("feature.txt", "feature\n");
+        repo.commit_all("feature");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("main.txt", "main\n");
+        repo.commit_all("main");
+        repo.git(&["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+        let merge = repo.head();
+        repo.git(&["switch", "-q", "-c", "target", "HEAD~1"]);
+
+        assert!(cherry_pick(&repo.dir, &pick_opts(&merge, false)).is_err());
+        let opts = PickOptions {
+            mainline: Some(1),
+            ..pick_opts(&merge, false)
+        };
+        assert_eq!(cherry_pick(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
+        assert_eq!(repo.read("feature.txt"), "feature\n");
+    }
+
+    #[test]
+    fn reverts_commits() {
+        let repo = TestRepo::new("revert");
+        repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        let added = repo.commit_all("add g");
+        repo.write("h.txt", "h\n");
+        repo.commit_all("add h");
+
+        let result = revert(&repo.dir, &pick_opts(&added, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Staged);
+        assert!(!repo.dir.join("g.txt").exists());
+        repo.git(&["reset", "-q", "--hard"]);
+
+        let result = revert(&repo.dir, &pick_opts(&added, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Committed);
+        assert!(!repo.dir.join("g.txt").exists());
+        assert!(repo.dir.join("h.txt").exists());
+        assert!(repo.git(&["log", "-1", "--format=%s"]).contains("Revert \"add g\""));
+
+        // Its changes are gone already: nothing to do, and nothing left in progress.
+        let err = revert(&repo.dir, &pick_opts(&added, false)).unwrap_err();
+        assert!(err.contains("changes nothing"), "{err}");
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn revert_conflicts_stop_for_the_banner() {
+        let repo = TestRepo::new("revert-conflict");
+        repo.write("f.txt", "one\n");
+        repo.commit_all("one");
+        repo.write("f.txt", "two\n");
+        let two = repo.commit_all("two");
+        repo.write("f.txt", "three\n");
+        repo.commit_all("three");
+
+        let result = revert(&repo.dir, &pick_opts(&two, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Revert
+        );
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.read("f.txt"), "three\n");
+
+        // Unlike cherry-pick, `revert --no-commit` keeps REVERT_HEAD, so it shows in the banner too.
+        let result = revert(&repo.dir, &pick_opts(&two, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Revert
+        );
+    }
+
+    #[test]
+    fn reverts_merge_commits_with_a_mainline() {
+        let repo = TestRepo::new("revert-merge");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "feature"]);
+        repo.write("feature.txt", "feature\n");
+        repo.commit_all("feature");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+        let merge = repo.head();
+
+        assert!(revert(&repo.dir, &pick_opts(&merge, false)).is_err());
+        let opts = PickOptions {
+            mainline: Some(1),
+            ..pick_opts(&merge, false)
+        };
+        assert_eq!(revert(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
+        assert!(!repo.dir.join("feature.txt").exists());
+    }
+
+    #[test]
+    fn resets_in_each_mode() {
+        let repo = TestRepo::new("reset");
+        let first = repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        let second = repo.commit_all("add g");
+        repo.write("local.txt", "local\n");
+        repo.git(&["add", "local.txt"]);
+
+        let preview = reset_preview(&repo.dir, &first).unwrap();
+        assert_eq!(
+            preview,
+            ResetPreview {
+                dropped: 1,
+                dropped_pushed: 0,
+                added: 0
+            }
+        );
+
+        // Soft: the dropped commit's changes join the staged local changes.
+        assert_eq!(reset(&repo.dir, &first, ResetMode::Soft).unwrap(), second);
+        assert_eq!(repo.head(), first);
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged.len(), 2);
+        assert!(st.unstaged.is_empty());
+
+        // Mixed: everything becomes unstaged.
+        reset(&repo.dir, &second, ResetMode::Soft).unwrap();
+        reset(&repo.dir, &first, ResetMode::Mixed).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.staged.is_empty());
+        assert_eq!(st.unstaged.len(), 2);
+
+        // Hard: tracked changes are gone; the reset can be undone with the returned sha.
+        repo.git(&["add", "-A"]);
+        assert_eq!(reset(&repo.dir, &first, ResetMode::Hard).unwrap(), first);
+        assert!(!repo.dir.join("g.txt").exists());
+        assert!(!repo.dir.join("local.txt").exists());
+        reset(&repo.dir, &second, ResetMode::Hard).unwrap();
+        assert_eq!(repo.read("g.txt"), "g\n");
+
+        // Moving to a commit HEAD doesn't contain adds it.
+        assert_eq!(reset_preview(&repo.dir, &second).unwrap().dropped, 0);
+        repo.git(&["reset", "-q", "--hard", &first]);
+        assert_eq!(reset_preview(&repo.dir, &second).unwrap().added, 1);
+
+        assert!(reset(&repo.dir, "--hard", ResetMode::Hard).is_err());
+        assert!(reset(&repo.dir, "no-such-commit", ResetMode::Hard).is_err());
+    }
+
+    #[test]
+    fn reset_preview_counts_pushed_commits() {
+        let (_origin, ours, _theirs) = shared("reset-pushed");
+        let base = ours.head();
+        ours.write("a.txt", "a\n");
+        ours.commit_all("pushed");
+        ours.git(&["push", "-q", "origin", "main"]);
+        ours.write("b.txt", "b\n");
+        ours.commit_all("local only");
+        let preview = reset_preview(&ours.dir, &base).unwrap();
+        assert_eq!(preview.dropped, 2);
+        assert_eq!(preview.dropped_pushed, 1);
+    }
+
+    #[test]
+    fn creates_and_deletes_tags() {
+        let repo = TestRepo::new("tags");
+        let first = repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        repo.commit_all("second");
+
+        create_tag(&repo.dir, "v1", &first, None).unwrap();
+        create_tag(&repo.dir, "v1-annotated", &first, Some("Release 1\n\nNotes")).unwrap();
+        assert_eq!(repo.git(&["cat-file", "-t", "v1"]).trim(), "commit");
+        assert_eq!(repo.git(&["cat-file", "-t", "v1-annotated"]).trim(), "tag");
+        assert!(repo.git(&["tag", "-l", "-n9", "v1-annotated"]).contains("Release 1"));
+        // A blank message makes a lightweight tag.
+        create_tag(&repo.dir, "v1-blank", &first, Some("  ")).unwrap();
+        assert_eq!(repo.git(&["cat-file", "-t", "v1-blank"]).trim(), "commit");
+
+        // Both list the commit they point at.
+        let short = &first[..7];
+        for tag in branches(&repo.dir).unwrap().tags {
+            assert!(tag.sha.starts_with(short), "{} → {}", tag.name, tag.sha);
+        }
+
+        assert!(
+            create_tag(&repo.dir, "v1", &first, None)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        for bad in ["bad..name", "-d", "", "with space"] {
+            assert!(create_tag(&repo.dir, bad, &first, None).is_err(), "{bad}");
+        }
+
+        delete_tag(&repo.dir, "v1").unwrap();
+        assert!(rev(&repo.dir, "refs/tags/v1").is_none());
+        assert!(delete_tag(&repo.dir, "v1").is_err());
+    }
+
+    #[test]
+    fn pushes_and_deletes_tags_on_a_remote() {
+        let (origin, ours, theirs) = shared("push-tag");
+        let head = ours.head();
+        create_tag(&ours.dir, "v1", &head, Some("Release")).unwrap();
+        create_tag(&ours.dir, "other", &head, None).unwrap();
+
+        push_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/tags/v1").is_some());
+        // Only that tag.
+        assert!(rev(&origin.dir, "refs/tags/other").is_none());
+        // Again: up to date.
+        push_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+
+        // A different tag of the same name on the remote is never overwritten.
+        theirs.write("t.txt", "t\n");
+        let t = theirs.commit_all("theirs");
+        create_tag(&theirs.dir, "v1", &t, None).unwrap();
+        let err = push_tag(&theirs.dir, "origin", "v1", &mut no_progress).unwrap_err();
+        assert!(err.contains("already has a different tag v1"), "{err}");
+
+        delete_remote_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/tags/v1").is_none());
+        assert!(rev(&ours.dir, "refs/tags/v1").is_some());
+        let err = delete_remote_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap_err();
+        assert!(err.contains("has no tag v1"), "{err}");
+
+        assert!(push_tag(&ours.dir, "origin", "missing", &mut no_progress).is_err());
+        assert!(push_tag(&ours.dir, "--all", "v1", &mut no_progress).is_err());
+    }
+
+    #[test]
+    fn renames_branches_locally() {
+        let repo = TestRepo::new("rename-branch");
+        repo.commit_all_initial();
+        repo.git(&["branch", "feature"]);
+        rename_branch(&repo.dir, "feature", "feature/renamed", false, &mut no_progress).unwrap();
+        let b = branches(&repo.dir).unwrap();
+        assert!(b.local.iter().any(|x| x.name == "feature/renamed"));
+        assert!(!b.local.iter().any(|x| x.name == "feature"));
+
+        // The current branch too.
+        rename_branch(&repo.dir, "main", "trunk", false, &mut no_progress).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("trunk"));
+
+        assert!(rename_branch(&repo.dir, "trunk", "feature/renamed", false, &mut no_progress).is_err());
+        assert!(rename_branch(&repo.dir, "trunk", "bad..name", false, &mut no_progress).is_err());
+        assert!(rename_branch(&repo.dir, "missing", "x", false, &mut no_progress).is_err());
+        assert!(
+            rename_branch(&repo.dir, "trunk", "x", true, &mut no_progress)
+                .unwrap_err()
+                .contains("doesn't track")
+        );
+    }
+
+    #[test]
+    fn renames_the_remote_branch_too() {
+        let (origin, ours, _theirs) = shared("rename-remote");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        ours.write("f.txt", "f\n");
+        ours.commit_all("feature");
+        ours.git(&["push", "-q", "-u", "origin", "feature"]);
+
+        rename_branch(&ours.dir, "feature", "topic", true, &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/heads/topic").is_some());
+        assert!(rev(&origin.dir, "refs/heads/feature").is_none());
+        let b = branches(&ours.dir).unwrap();
+        let topic = b.local.iter().find(|x| x.name == "topic").unwrap();
+        assert_eq!(topic.upstream.as_deref(), Some("origin/topic"));
+        assert!(!b.remote.iter().any(|x| x.name == "origin/feature"));
+    }
+
+    #[test]
+    fn sets_and_clears_upstreams() {
+        let (_origin, ours, _theirs) = shared("set-upstream");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        set_upstream(&ours.dir, "feature", Some("origin/main")).unwrap();
+        let upstream = |repo: &TestRepo| {
+            branches(&repo.dir)
+                .unwrap()
+                .local
+                .into_iter()
+                .find(|x| x.name == "feature")
+                .unwrap()
+                .upstream
+        };
+        assert_eq!(upstream(&ours).as_deref(), Some("origin/main"));
+        set_upstream(&ours.dir, "feature", None).unwrap();
+        assert_eq!(upstream(&ours), None);
+        assert!(set_upstream(&ours.dir, "feature", Some("origin/missing")).is_err());
+        assert!(set_upstream(&ours.dir, "feature", Some("--all")).is_err());
     }
 
     #[test]

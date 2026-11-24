@@ -10,17 +10,20 @@ import {
   GitProgress,
   LogEntry,
   MergeOptions,
+  PickOptions,
   PullOptions,
   PushOptions,
   RebaseOptions,
   Remote,
   RepoChanged,
   RepoInfo,
+  ResetMode,
   Stash,
   StashOptions,
   Status,
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
+import { CommitAction, commitMenu, PickKind, pickSummary } from "../commit";
 import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
@@ -37,8 +40,13 @@ import {
 } from "../remote";
 import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
+import { CreateBranchDialog, RenameBranchDialog, UpstreamDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
+import { PickDialog } from "./CommitOpDialog";
+import { ResetDialog } from "./ResetDialog";
+import { CreateTagDialog, DeleteRemoteTagDialog, DeleteTagDialog } from "./TagDialogs";
+import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
 import { HistoryView } from "./HistoryView";
@@ -123,6 +131,23 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [remoteEdit, setRemoteEdit] = useState<
     { kind: "add" } | { kind: "url" | "name" | "remove"; remote: Remote } | null
   >(null);
+  // The commit whose context menu is open in the history, and where.
+  const [commitMenuAt, setCommitMenuAt] = useState<{ entry: LogEntry; x: number; y: number } | null>(null);
+  // Its full message, loaded when the menu opens so "Copy Message" can copy it right away.
+  const [commitMenuMessage, setCommitMenuMessage] = useState<string | null>(null);
+  // A branch being created at `start`; `label` describes the start in the dialog, `short` in the message after.
+  const [creatingBranch, setCreatingBranch] = useState<{ start: string; label: string; short: string } | null>(null);
+  // The commit being cherry-picked or reverted.
+  const [commitOp, setCommitOp] = useState<{ kind: PickKind; entry: LogEntry } | null>(null);
+  // A tag being created at a commit, as for creatingBranch.
+  const [creatingTag, setCreatingTag] = useState<{ start: string; label: string; short: string } | null>(null);
+  // The tag whose deletion is being confirmed, here or on a remote.
+  const [deletingTag, setDeletingTag] = useState<{ tag: Branch; onRemote: boolean } | null>(null);
+  // The local branch being renamed, or whose upstream is being chosen.
+  const [renaming, setRenaming] = useState<Branch | null>(null);
+  const [settingUpstream, setSettingUpstream] = useState<Branch | null>(null);
+  // The commit the current branch is being reset to.
+  const [resetting, setResetting] = useState<LogEntry | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -411,6 +436,14 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setDropping(null);
       setRemoteEdit(null);
       setDeletingRemote(null);
+      setCommitMenuAt(null);
+      setCreatingBranch(null);
+      setCommitOp(null);
+      setResetting(null);
+      setCreatingTag(null);
+      setDeletingTag(null);
+      setRenaming(null);
+      setSettingUpstream(null);
     }
   }, [active]);
 
@@ -568,11 +601,260 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     }
   }
 
-  function copyName(name: string) {
-    navigator.clipboard.writeText(name).then(
-      () => mounted.current && setNotice({ kind: "info", text: `Copied ${name}.` }),
-      (e) => mounted.current && onError(`Could not copy ${name}: ${errorMessage(e)}`),
+  /** Copies `text`; `what` names it in the messages, e.g. "the message of abc1234". */
+  function copyText(text: string, what = text) {
+    navigator.clipboard.writeText(text).then(
+      () => mounted.current && setNotice({ kind: "info", text: `Copied ${what}.` }),
+      (e) => mounted.current && onError(`Could not copy ${what}: ${errorMessage(e)}`),
     );
+  }
+
+  const openCommitMenu = useCallback(
+    (entry: LogEntry, x: number, y: number) => {
+      setCommitMenuAt({ entry, x, y });
+      setCommitMenuMessage(null);
+      api.commitDetails(root, entry.sha).then(
+        (d) => mounted.current && setCommitMenuMessage(d.message.trimEnd()),
+        () => {
+          /* "Copy Message" falls back to the subject */
+        },
+      );
+    },
+    [root],
+  );
+  const closeCommitMenu = useCallback(() => setCommitMenuAt(null), []);
+
+  function commitMenuItems(entry: LogEntry): MenuEntry[] {
+    const busy = remoteOp
+      ? "Wait until the running operation is done"
+      : switching
+        ? "Wait until the branch switch is done"
+        : null;
+    const headSha = log?.find((e) => e.refs.some((r) => r.current))?.sha ?? null;
+    const operationBlocked = !status
+      ? "Loading…"
+      : status.operation
+        ? "Finish or abort the current operation first"
+        : status.conflicted.length > 0
+          ? "Resolve the conflicts first"
+          : null;
+    const branch = status?.branch ?? null;
+    return commitMenu(entry, { branches, branch, headSha, operationBlocked, busy }).map((item) =>
+      item === "separator"
+        ? SEPARATOR
+        : {
+            label: item.label,
+            danger: item.danger,
+            disabled: item.blocked !== null,
+            title: item.blocked ?? item.title,
+            onSelect: () => runCommitAction(item.action, entry),
+          },
+    );
+  }
+
+  function runCommitAction(action: CommitAction, entry: LogEntry) {
+    const short = entry.sha.slice(0, 7);
+    switch (action) {
+      case "checkout": {
+        const target = targetForCommit(entry, branches);
+        if (target) switchBranch(target);
+        break;
+      }
+      case "create-branch":
+        setCreatingBranch({ start: entry.sha, label: `${short} ${entry.subject}`, short });
+        break;
+      case "create-tag":
+        setCreatingTag({ start: entry.sha, label: `${short} ${entry.subject}`, short });
+        break;
+      case "cherry-pick":
+      case "revert":
+        setCommitOp({ kind: action, entry });
+        break;
+      case "reset":
+        setResetting(entry);
+        break;
+      case "copy-sha":
+        copyText(entry.sha);
+        break;
+      case "copy-message":
+        copyText(commitMenuMessage ?? entry.subject, `the message of ${short}`);
+        break;
+    }
+  }
+
+  const closeCreateBranch = useCallback(() => setCreatingBranch(null), []);
+  const closeCommitOp = useCallback(() => setCommitOp(null), []);
+  const closeReset = useCallback(() => setResetting(null), []);
+  const closeCreateTag = useCallback(() => setCreatingTag(null), []);
+  const closeRename = useCallback(() => setRenaming(null), []);
+  const closeUpstream = useCallback(() => setSettingUpstream(null), []);
+
+  /** The remote branch a local branch tracks, if it still exists. */
+  function trackedRemoteBranch(branch: Branch): string | null {
+    return branch.upstream && branches?.remote.some((b) => b.name === branch.upstream) ? branch.upstream : null;
+  }
+
+  // Renaming only here is quick and the dialog shows its errors; renaming on the remote too runs
+  // like a push, with progress, and reports errors like one.
+  async function renameBranch(branch: Branch, newName: string, withRemote: boolean) {
+    if (!withRemote) {
+      await api.renameBranch(root, branch.name, newName, false);
+      setRenaming(null);
+      onClearError();
+      setNotice({ kind: "info", text: `Renamed ${branch.name} to ${newName}.` });
+      refreshAll();
+      return;
+    }
+    setRenaming(null);
+    const remote = splitRemoteBranch(branch.upstream ?? "", branches?.remotes ?? [])?.remote ?? "its remote";
+    try {
+      const done = await runRemote({ label: `Renaming ${branch.name} to ${newName} on ${remote}…`, background: false }, () =>
+        api.renameBranch(root, branch.name, newName, true).then(() => true),
+      );
+      if (!done || !mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `Renamed ${branch.name} to ${newName}, here and on ${remote}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    }
+  }
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function setUpstream(branch: Branch, upstream: string) {
+    await api.setUpstream(root, branch.name, upstream);
+    setSettingUpstream(null);
+    onClearError();
+    setNotice({ kind: "info", text: `${branch.name} now tracks ${upstream}.` });
+    refreshAll();
+  }
+
+  async function clearUpstream(branch: Branch) {
+    try {
+      await api.setUpstream(root, branch.name, null);
+      if (!mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `${branch.name} no longer tracks ${branch.upstream}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshAll();
+    }
+  }
+  const closeDeleteTag = useCallback(() => setDeletingTag(null), []);
+
+  /** Pushes a tag; `created` says it was just created, for the messages. */
+  const pushTag = useCallback(
+    async (name: string, remote: string, created?: string) => {
+      try {
+        const done = await runRemote({ label: `Pushing tag ${name} to ${remote}…`, background: false }, () =>
+          api.pushTag(root, remote, name).then(() => true),
+        );
+        if (!done || !mounted.current) return;
+        onClearError();
+        const text = created ? `${created} and pushed it to ${remote}.` : `Pushed tag ${name} to ${remote}.`;
+        setNotice({ kind: "info", text });
+      } catch (e) {
+        if (!mounted.current) return;
+        onError(created ? `${created}, but pushing it to ${remote} failed: ${errorMessage(e)}` : errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function createTag(name: string, message: string | null, pushTo: string | null) {
+    if (!creatingTag) return;
+    await api.createTag(root, name, creatingTag.start, message);
+    const created = `Created tag ${name} at ${creatingTag.short}`;
+    setCreatingTag(null);
+    onClearError();
+    refreshHistory();
+    if (pushTo) pushTag(name, pushTo, created);
+    else setNotice({ kind: "info", text: `${created}.` });
+  }
+
+  async function deleteTag(tag: Branch) {
+    setDeletingTag(null);
+    try {
+      await api.deleteTag(root, tag.name);
+      if (!mounted.current) return;
+      onClearError();
+      // The commit it pointed at brings it back if it was deleted by mistake.
+      setNotice({ kind: "info", text: `Deleted tag ${tag.name} (was ${tag.sha.slice(0, 7)}).` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshHistory();
+    }
+  }
+
+  async function deleteRemoteTag(tag: Branch, remote: string) {
+    setDeletingTag(null);
+    try {
+      const done = await runRemote({ label: `Deleting tag ${tag.name} on ${remote}…`, background: false }, () =>
+        api.deleteRemoteTag(root, remote, tag.name).then(() => true),
+      );
+      if (!done || !mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `Deleted tag ${tag.name} on ${remote}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    }
+  }
+
+  const resetNow = useCallback(
+    async (entry: LogEntry, mode: ResetMode) => {
+      setResetting(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      const short = entry.sha.slice(0, 7);
+      try {
+        const old = await runRemote({ label: `Resetting ${branch} to ${short}…`, background: false }, () =>
+          api.reset(root, entry.sha, mode),
+        );
+        if (!old || !mounted.current) return;
+        onClearError();
+        // The commit it pointed at brings it back if the reset was a mistake.
+        setNotice({ kind: "info", text: `Reset ${branch} to ${short} (was ${old.slice(0, 7)}).` });
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  const pickNow = useCallback(
+    async (kind: PickKind, options: PickOptions) => {
+      setCommitOp(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      const short = options.commit.slice(0, 7);
+      const label = `${kind === "revert" ? "Reverting" : "Cherry-picking"} ${short}…`;
+      try {
+        const result = await runRemote({ label, background: false }, () =>
+          (kind === "revert" ? api.revert : api.cherryPick)(root, options),
+        );
+        if (!result || !mounted.current) return;
+        setNotice(pickSummary(kind, result, short, branch));
+        onClearError();
+        // Staged changes and conflicts are in the changes view.
+        if (result.outcome !== "committed") setView("changes");
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function createBranch(name: string, checkout: boolean) {
+    if (!creatingBranch) return;
+    await api.createBranch(root, name, creatingBranch.start, checkout);
+    setCreatingBranch(null);
+    onClearError();
+    setNotice({
+      kind: "info",
+      text: checkout ? `Switched to the new branch ${name}.` : `Created branch ${name} at ${creatingBranch.short}.`,
+    });
+    refreshAll();
   }
 
   const fetchRemote = useCallback(
@@ -769,11 +1051,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       {deleting && (
         <DeleteBranchDialog
           branch={deleting.branch}
-          remoteBranch={
-            deleting.branch.upstream && branches?.remote.some((b) => b.name === deleting.branch.upstream)
-              ? deleting.branch.upstream
-              : null
-          }
+          remoteBranch={trackedRemoteBranch(deleting.branch)}
           withRemote={deleting.withRemote}
           unmerged={deleting.unmerged}
           onDelete={deleteBranch}
@@ -810,6 +1088,80 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         />
       )}
       {dropping && <DropStashDialog stash={dropping} onDrop={dropStash} onClose={closeDrop} />}
+      {creatingBranch && (
+        <CreateBranchDialog startLabel={creatingBranch.label} onCreate={createBranch} onClose={closeCreateBranch} />
+      )}
+      {commitOp && (
+        <PickDialog
+          key={`${commitOp.kind}:${commitOp.entry.sha}`}
+          kind={commitOp.kind}
+          entry={commitOp.entry}
+          parents={commitOp.entry.parents.map((sha) => ({
+            sha,
+            subject: log?.find((e) => e.sha === sha)?.subject ?? null,
+          }))}
+          branch={status?.branch ?? null}
+          onPick={(options) => pickNow(commitOp.kind, options)}
+          onClose={closeCommitOp}
+        />
+      )}
+      {renaming && (
+        <RenameBranchDialog
+          key={renaming.name}
+          branch={renaming}
+          remoteBranch={trackedRemoteBranch(renaming)}
+          onRename={renameBranch}
+          onClose={closeRename}
+        />
+      )}
+      {settingUpstream && (
+        <UpstreamDialog
+          key={settingUpstream.name}
+          branch={settingUpstream}
+          remoteBranches={(branches?.remote ?? []).map((b) => b.name)}
+          onSet={setUpstream}
+          onClose={closeUpstream}
+        />
+      )}
+      {creatingTag && (
+        <CreateTagDialog
+          startLabel={creatingTag.label}
+          remotes={branches?.remotes ?? []}
+          onCreate={createTag}
+          onClose={closeCreateTag}
+        />
+      )}
+      {deletingTag && !deletingTag.onRemote && (
+        <DeleteTagDialog tag={deletingTag.tag} onDelete={deleteTag} onClose={closeDeleteTag} />
+      )}
+      {deletingTag?.onRemote && branches && (
+        <DeleteRemoteTagDialog
+          tag={deletingTag.tag}
+          remotes={branches.remotes}
+          onDelete={deleteRemoteTag}
+          onClose={closeDeleteTag}
+        />
+      )}
+      {resetting && status && (
+        <ResetDialog
+          key={resetting.sha}
+          repo={root}
+          entry={resetting}
+          branch={status.branch}
+          status={status}
+          onReset={(mode) => resetNow(resetting, mode)}
+          onClose={closeReset}
+        />
+      )}
+      {commitMenuAt && (
+        <ContextMenu
+          x={commitMenuAt.x}
+          y={commitMenuAt.y}
+          label={`Commit ${commitMenuAt.entry.sha.slice(0, 7)}`}
+          items={commitMenuItems(commitMenuAt.entry)}
+          onClose={closeCommitMenu}
+        />
+      )}
       <Split direction="horizontal" initial={240} min={160} storageKey="sidebar">
         <Sidebar
           view={view}
@@ -846,8 +1198,15 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
                     ? "Wait until the running operation is done"
                     : "Nothing can be merged right now"
           }
-          onCopyName={copyName}
+          onCopyName={(name) => copyText(name)}
           onDeleteRemoteBranch={askDeleteRemoteBranch}
+          onPushTag={(tag, remote) => pushTag(tag.name, remote)}
+          onCreateBranchFrom={(start) => setCreatingBranch({ start, label: start, short: start })}
+          onRenameBranch={setRenaming}
+          onSetUpstream={setSettingUpstream}
+          onClearUpstream={clearUpstream}
+          onDeleteTag={(tag) => setDeletingTag({ tag, onRemote: false })}
+          onDeleteRemoteTag={(tag) => setDeletingTag({ tag, onRemote: true })}
         />
         <main className="main">
           {view === "changes" ? (
@@ -872,6 +1231,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
                 const target = targetForCommit(entry, branches);
                 if (target) switchBranch(target);
               }}
+              onMenu={openCommitMenu}
             />
           )}
         </main>

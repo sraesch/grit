@@ -42,6 +42,13 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     onMerge: vi.fn(),
     onCopyName: vi.fn(),
     onDeleteRemoteBranch: vi.fn(),
+    onPushTag: vi.fn(),
+    onCreateBranchFrom: vi.fn(),
+    onRenameBranch: vi.fn(),
+    onSetUpstream: vi.fn(),
+    onClearUpstream: vi.fn(),
+    onDeleteTag: vi.fn(),
+    onDeleteRemoteTag: vi.fn(),
   };
   render(
     <Sidebar
@@ -126,11 +133,64 @@ describe("Sidebar", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
-  it("has no context menu for tags", async () => {
-    setup();
+  it("creates branches from, renames and sets or clears the upstream of a local branch", async () => {
+    const { onCreateBranchFrom, onRenameBranch, onSetUpstream, onClearUpstream } = setup();
+    const choose = async (name: string, item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText(name) });
+      await userEvent.click(screen.getByRole("menuitem", { name: item }));
+    };
+    await choose("main", "New Branch from Here…");
+    expect(onCreateBranchFrom).toHaveBeenLastCalledWith("main");
+    await choose("main", "Rename…");
+    expect(onRenameBranch).toHaveBeenLastCalledWith(branches.local[0]);
+    await choose("main", "Set Upstream…");
+    expect(onSetUpstream).toHaveBeenLastCalledWith(branches.local[0]);
+    await choose("main", "Clear Upstream");
+    expect(onClearUpstream).toHaveBeenLastCalledWith(branches.local[0]);
+
+    // Without an upstream there is nothing to clear.
+    await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("feature") });
+    expect(screen.queryByRole("menuitem", { name: "Clear Upstream" })).not.toBeInTheDocument();
+  });
+
+  it("creates a branch from a remote branch", async () => {
+    const { onCreateBranchFrom } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Remotes/ }));
+    await userEvent.pointer({ keys: "[MouseRight]", target: remoteBranch("origin/new-work") });
+    await userEvent.click(screen.getByRole("menuitem", { name: "New Branch from Here…" }));
+    expect(onCreateBranchFrom).toHaveBeenCalledWith("origin/new-work");
+  });
+
+  it("checks out, pushes, copies and deletes a tag from its context menu", async () => {
+    const { onSwitch, onPushTag, onCopyName, onDeleteTag, onDeleteRemoteTag } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Tags/ }));
+    const tag = branches.tags[0];
+    const choose = async (item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("v1.0") });
+      const menu = screen.getByRole("menu", { name: "Tag v1.0" });
+      await userEvent.click(within(menu).getByRole("menuitem", { name: item }));
+    };
+    await choose("Check Out");
+    expect(onSwitch).toHaveBeenLastCalledWith({ kind: "commit", name: "refs/tags/v1.0" });
+    await choose("Push to backup");
+    expect(onPushTag).toHaveBeenLastCalledWith(tag, "backup");
+    await choose("Copy Name");
+    expect(onCopyName).toHaveBeenLastCalledWith("v1.0");
+    await choose("Delete Tag…");
+    expect(onDeleteTag).toHaveBeenLastCalledWith(tag);
+    await choose("Delete on Remote…");
+    expect(onDeleteRemoteTag).toHaveBeenLastCalledWith(tag);
+
+    await userEvent.dblClick(screen.getByText("v1.0"));
+    expect(onSwitch).toHaveBeenCalledTimes(2);
+  });
+
+  it("can't push or delete tags on remotes without remotes", async () => {
+    setup({ branches: { ...branches, remotes: [] } });
     await userEvent.click(screen.getByRole("button", { name: /Tags/ }));
     await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("v1.0") });
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Push" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Delete on Remote…" })).toBeDisabled();
   });
 
   it("checks out, merges, copies and deletes a remote branch from its context menu", async () => {

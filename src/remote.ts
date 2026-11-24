@@ -230,6 +230,28 @@ export function groupRemoteBranches<B extends { name: string }>(
   return [...groups.values()];
 }
 
+export interface PickPrefs {
+  /** Only apply the changes, without committing. */
+  noCommit: boolean;
+}
+
+export interface ResetPrefs {
+  /** Never "hard": discarding changes is chosen each time. */
+  mode: "soft" | "mixed";
+}
+
+export interface CreateTagPrefs {
+  /** Push the new tag right away. */
+  push: boolean;
+  /** The remote it was pushed to last. */
+  remote: string;
+}
+
+export interface CreateBranchPrefs {
+  /** Switch to the new branch. */
+  checkout: boolean;
+}
+
 export interface MergePrefs {
   mode: MergeMode;
   autostash: boolean;
@@ -273,4 +295,17 @@ export const prefs = {
   saveStash: (p: StashPrefs) => savePrefs("stashOptions", p),
   addRemote: () => readPrefs<AddRemotePrefs>("addRemoteOptions", { fetch: true }),
   saveAddRemote: (p: AddRemotePrefs) => savePrefs("addRemoteOptions", p),
+  cherryPick: () => readPrefs<PickPrefs>("cherryPickOptions", { noCommit: false }),
+  saveCherryPick: (p: PickPrefs) => savePrefs("cherryPickOptions", p),
+  revert: () => readPrefs<PickPrefs>("revertOptions", { noCommit: false }),
+  saveRevert: (p: PickPrefs) => savePrefs("revertOptions", p),
+  reset: (): ResetPrefs => {
+    const stored = readPrefs<ResetPrefs>("resetOptions", { mode: "mixed" });
+    return { mode: stored.mode === "soft" ? "soft" : "mixed" };
+  },
+  saveReset: (p: ResetPrefs) => savePrefs("resetOptions", p),
+  createTag: () => readPrefs<CreateTagPrefs>("createTagOptions", { push: false, remote: "" }),
+  saveCreateTag: (p: CreateTagPrefs) => savePrefs("createTagOptions", p),
+  createBranch: () => readPrefs<CreateBranchPrefs>("createBranchOptions", { checkout: true }),
+  saveCreateBranch: (p: CreateBranchPrefs) => savePrefs("createBranchOptions", p),
 };

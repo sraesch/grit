@@ -263,6 +263,40 @@ export interface MergeResult {
   conflicts: number;
 }
 
+export interface PickOptions {
+  /** The commit to apply (cherry-pick) or undo (revert). */
+  commit: string;
+  /** Only apply the changes to the index and working tree, without committing. */
+  noCommit: boolean;
+  /** For a merge commit: the parent (1-based) whose side is the mainline. */
+  mainline: number | null;
+}
+
+/**
+ * "conflicts" stopped with an operation for the banner; "conflicts-no-commit" cherry-picked the
+ * changes with conflicts but left no operation, so they are resolved and committed like any change.
+ */
+export type PickOutcome = "committed" | "staged" | "conflicts" | "conflicts-no-commit";
+
+export interface PickResult {
+  outcome: PickOutcome;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
+/** soft keeps the changes staged, mixed keeps them unstaged, hard discards them. */
+export type ResetMode = "soft" | "mixed" | "hard";
+
+/** What resetting to a commit does to the current branch. */
+export interface ResetPreview {
+  /** Commits the branch contains now and no longer will. */
+  dropped: number;
+  /** Of those, the commits that are on a remote branch, i.e. were pushed. */
+  droppedPushed: number;
+  /** Commits the branch will contain that it doesn't now. */
+  added: number;
+}
+
 /** How far HEAD and another branch or commit have diverged. */
 export interface Divergence {
   /** Commits only on HEAD. */
@@ -359,8 +393,12 @@ export const api = {
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
   /** Checks out a commit without a branch (detached HEAD). */
   checkoutCommit: (repo: string, sha: string) => invoke<void>("checkout_commit", { repo, sha }),
-  /** Creates a branch at HEAD and switches to it. */
-  createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
+  /**
+   * Creates a branch at `start` (a commit, branch or tag; HEAD when null) and, with `checkout`, switches
+   * to it. Starting at a remote branch makes the new branch track it.
+   */
+  createBranch: (repo: string, name: string, start: string | null = null, checkout = true) =>
+    invoke<void>("create_branch", { repo, name, start, checkout }),
   /**
    * Deletes a local branch and, with `deleteRemote`, the remote branch it tracks (first; progress
    * arrives as `git-progress` events). Without `force`, a branch with unmerged commits is kept
@@ -407,6 +445,35 @@ export const api = {
    * Conflicts resolve with outcome "conflicts" rather than rejecting.
    */
   merge: (repo: string, options: MergeOptions) => invoke<MergeResult>("merge", { repo, ...options }),
+  /** Applies a commit onto HEAD. Conflicts resolve with a "conflicts" outcome rather than rejecting. */
+  cherryPick: (repo: string, options: PickOptions) => invoke<PickResult>("cherry_pick", { repo, ...options }),
+  /**
+   * Creates a commit that undoes another one. Conflicts resolve with a "conflicts" outcome rather than
+   * rejecting. With `noCommit`, the revert stays in progress until its staged changes are committed.
+   */
+  revert: (repo: string, options: PickOptions) => invoke<PickResult>("revert", { repo, ...options }),
+  resetPreview: (repo: string, target: string) => invoke<ResetPreview>("get_reset_preview", { repo, target }),
+  /** Moves the current branch (or detached HEAD) to `target`; resolves to the commit it pointed at before. */
+  reset: (repo: string, target: string, mode: ResetMode) => invoke<string>("reset", { repo, target, mode }),
+  /** Creates a tag at `commit`: annotated with `message`, or lightweight when it is null or blank. */
+  createTag: (repo: string, name: string, commit: string, message: string | null) =>
+    invoke<void>("create_tag", { repo, name, commit, message }),
+  deleteTag: (repo: string, name: string) => invoke<void>("delete_tag", { repo, name }),
+  /** Pushes one tag; rejects when the remote has a different tag of that name. Progress arrives as `git-progress`. */
+  pushTag: (repo: string, remote: string, name: string) => invoke<void>("push_tag", { repo, remote, name }),
+  /** Deletes a tag on a remote, keeping the local one. Progress arrives as `git-progress` events. */
+  deleteRemoteTag: (repo: string, remote: string, name: string) =>
+    invoke<void>("delete_remote_tag", { repo, remote, name }),
+  /**
+   * Renames a local branch and, with `renameRemote`, the remote branch it tracks: pushed under the new
+   * name, then the old one deleted unless someone pushed to it since the last fetch. Progress arrives
+   * as `git-progress` events.
+   */
+  renameBranch: (repo: string, name: string, newName: string, renameRemote: boolean) =>
+    invoke<void>("rename_branch", { repo, name, newName, renameRemote }),
+  /** Makes `branch` track a remote branch such as "origin/main", or nothing when `upstream` is null. */
+  setUpstream: (repo: string, branch: string, upstream: string | null) =>
+    invoke<void>("set_upstream", { repo, branch, upstream }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
