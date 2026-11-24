@@ -263,6 +263,27 @@ export interface MergeResult {
   conflicts: number;
 }
 
+export interface PickOptions {
+  /** The commit to apply (cherry-pick) or undo (revert). */
+  commit: string;
+  /** Only apply the changes to the index and working tree, without committing. */
+  noCommit: boolean;
+  /** For a merge commit: the parent (1-based) whose side is the mainline. */
+  mainline: number | null;
+}
+
+/**
+ * "conflicts" stopped with an operation for the banner; "conflicts-no-commit" applied the changes
+ * with conflicts but left no operation, so they are resolved and committed like any change.
+ */
+export type PickOutcome = "committed" | "staged" | "conflicts" | "conflicts-no-commit";
+
+export interface PickResult {
+  outcome: PickOutcome;
+  /** Files with conflicts. */
+  conflicts: number;
+}
+
 /** How far HEAD and another branch or commit have diverged. */
 export interface Divergence {
   /** Commits only on HEAD. */
@@ -411,6 +432,8 @@ export const api = {
    * Conflicts resolve with outcome "conflicts" rather than rejecting.
    */
   merge: (repo: string, options: MergeOptions) => invoke<MergeResult>("merge", { repo, ...options }),
+  /** Applies a commit onto HEAD. Conflicts resolve with a "conflicts" outcome rather than rejecting. */
+  cherryPick: (repo: string, options: PickOptions) => invoke<PickResult>("cherry_pick", { repo, ...options }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
