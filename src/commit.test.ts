@@ -68,15 +68,34 @@ describe("cherry-pick", () => {
   });
 
   it("summarizes the outcome", () => {
-    expect(pickSummary({ outcome: "committed", conflicts: 0 }, "abc1234", "main")).toEqual({
+    expect(pickSummary("cherry-pick", { outcome: "committed", conflicts: 0 }, "abc1234", "main")).toEqual({
       kind: "info",
       text: "Cherry-picked abc1234 onto main.",
     });
-    expect(pickSummary({ outcome: "conflicts", conflicts: 2 }, "abc1234", "main").text).toContain(
+    expect(pickSummary("cherry-pick", { outcome: "conflicts", conflicts: 2 }, "abc1234", "main").text).toContain(
       "conflicts in 2 files",
     );
-    expect(pickSummary({ outcome: "conflicts-no-commit", conflicts: 1 }, "abc1234", "main").text).toContain(
-      "then commit",
+    expect(
+      pickSummary("cherry-pick", { outcome: "conflicts-no-commit", conflicts: 1 }, "abc1234", "main").text,
+    ).toContain("then commit");
+  });
+});
+
+describe("revert", () => {
+  const ctx = { branches, headSha: "c2", operationBlocked: null, busy: null };
+
+  it("is offered for any commit, HEAD too", () => {
+    const head = makeCommit("c2", "Head", { refs: [{ name: "main", kind: "local", current: true }] });
+    expect(item(commitMenu(head, ctx), "revert").blocked).toBeNull();
+    expect(item(commitMenu(head, { ...ctx, operationBlocked: "Busy" }), "revert").blocked).toBe("Busy");
+  });
+
+  it("summarizes the outcome", () => {
+    expect(pickSummary("revert", { outcome: "committed", conflicts: 0 }, "abc1234", "main").text).toBe(
+      "Reverted abc1234 on main.",
+    );
+    expect(pickSummary("revert", { outcome: "conflicts", conflicts: 1 }, "abc1234", "main").text).toMatch(
+      /^Reverting abc1234 stopped with conflicts in 1 file\./,
     );
   });
 });

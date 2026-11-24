@@ -22,7 +22,7 @@ import {
   Status,
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
-import { CommitAction, commitMenu, pickSummary } from "../commit";
+import { CommitAction, commitMenu, PickKind, pickSummary } from "../commit";
 import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
@@ -42,7 +42,7 @@ import { relativeTime } from "../util";
 import { CreateBranchDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
-import { CherryPickDialog } from "./CommitOpDialog";
+import { PickDialog } from "./CommitOpDialog";
 import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
@@ -134,8 +134,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [commitMenuMessage, setCommitMenuMessage] = useState<string | null>(null);
   // A branch being created at `start`; `label` describes the start in the dialog, `short` in the message after.
   const [creatingBranch, setCreatingBranch] = useState<{ start: string; label: string; short: string } | null>(null);
-  // The commit being cherry-picked.
-  const [commitOp, setCommitOp] = useState<{ kind: "cherry-pick"; entry: LogEntry } | null>(null);
+  // The commit being cherry-picked or reverted.
+  const [commitOp, setCommitOp] = useState<{ kind: PickKind; entry: LogEntry } | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -646,7 +646,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         setCreatingBranch({ start: entry.sha, label: `${short} ${entry.subject}`, short });
         break;
       case "cherry-pick":
-        setCommitOp({ kind: "cherry-pick", entry });
+      case "revert":
+        setCommitOp({ kind: action, entry });
         break;
       case "copy-sha":
         copyText(entry.sha);
@@ -660,17 +661,18 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const closeCreateBranch = useCallback(() => setCreatingBranch(null), []);
   const closeCommitOp = useCallback(() => setCommitOp(null), []);
 
-  const cherryPickNow = useCallback(
-    async (options: PickOptions) => {
+  const pickNow = useCallback(
+    async (kind: PickKind, options: PickOptions) => {
       setCommitOp(null);
       const branch = latest.current.status?.branch ?? "HEAD";
       const short = options.commit.slice(0, 7);
+      const label = `${kind === "revert" ? "Reverting" : "Cherry-picking"} ${short}…`;
       try {
-        const result = await runRemote({ label: `Cherry-picking ${short}…`, background: false }, () =>
-          api.cherryPick(root, options),
+        const result = await runRemote({ label, background: false }, () =>
+          (kind === "revert" ? api.revert : api.cherryPick)(root, options),
         );
         if (!result || !mounted.current) return;
-        setNotice(pickSummary(result, short, branch));
+        setNotice(pickSummary(kind, result, short, branch));
         onClearError();
         // Staged changes and conflicts are in the changes view.
         if (result.outcome !== "committed") setView("changes");
@@ -932,15 +934,17 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       {creatingBranch && (
         <CreateBranchDialog startLabel={creatingBranch.label} onCreate={createBranch} onClose={closeCreateBranch} />
       )}
-      {commitOp?.kind === "cherry-pick" && (
-        <CherryPickDialog
+      {commitOp && (
+        <PickDialog
+          key={`${commitOp.kind}:${commitOp.entry.sha}`}
+          kind={commitOp.kind}
           entry={commitOp.entry}
           parents={commitOp.entry.parents.map((sha) => ({
             sha,
             subject: log?.find((e) => e.sha === sha)?.subject ?? null,
           }))}
           branch={status?.branch ?? null}
-          onPick={cherryPickNow}
+          onPick={(options) => pickNow(commitOp.kind, options)}
           onClose={closeCommitOp}
         />
       )}

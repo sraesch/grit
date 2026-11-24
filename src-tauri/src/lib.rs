@@ -391,6 +391,19 @@ async fn cherry_pick(repo: String, commit: String, no_commit: bool, mainline: Op
 }
 
 #[tauri::command]
+async fn revert(repo: String, commit: String, no_commit: bool, mainline: Option<u32>) -> GitResult<PickResult> {
+    blocking(move || {
+        let opts = PickOptions {
+            commit,
+            no_commit,
+            mainline,
+        };
+        git::revert(&PathBuf::from(repo), &opts)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -473,6 +486,7 @@ pub fn run() {
             rebase,
             merge,
             cherry_pick,
+            revert,
             abort_operation,
             continue_operation,
             skip_operation,

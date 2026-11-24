@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { LogEntry, PickOptions } from "../api";
+import { PickKind } from "../commit";
 import { prefs } from "../remote";
 import { Dialog } from "./RemoteDialogs";
 
@@ -10,7 +11,8 @@ export interface ParentInfo {
   subject: string | null;
 }
 
-interface CherryPickDialogProps {
+interface PickDialogProps {
+  kind: PickKind;
   entry: LogEntry;
   parents: ParentInfo[];
   /** The current branch; null for a detached HEAD. */
@@ -19,30 +21,48 @@ interface CherryPickDialogProps {
   onClose: () => void;
 }
 
-/** Confirms cherry-picking a commit onto HEAD, with the option to only apply its changes. */
-export function CherryPickDialog({ entry, parents, branch, onPick, onClose }: CherryPickDialogProps) {
-  const [noCommit, setNoCommit] = useState(() => prefs.cherryPick().noCommit);
+/**
+ * Confirms cherry-picking a commit onto HEAD, or reverting it, with the option to only apply the
+ * changes; for a merge commit it asks for the mainline.
+ */
+export function PickDialog({ kind, entry, parents, branch, onPick, onClose }: PickDialogProps) {
+  const revert = kind === "revert";
+  const [noCommit, setNoCommit] = useState(() => (revert ? prefs.revert() : prefs.cherryPick()).noCommit);
   const [mainline, setMainline] = useState(1);
   const isMerge = entry.parents.length > 1;
+  const target = branch ? <strong className="mono">{branch}</strong> : "the detached HEAD";
 
   return (
     <Dialog
-      id="cherry-pick"
-      title="Cherry-pick"
-      submitLabel="Cherry-pick"
+      id={kind}
+      title={revert ? "Revert Commit" : "Cherry-pick"}
+      submitLabel={revert ? "Revert" : "Cherry-pick"}
       canSubmit
       onSubmit={() => {
-        prefs.saveCherryPick({ noCommit });
+        (revert ? prefs.saveRevert : prefs.saveCherryPick)({ noCommit });
         onPick({ commit: entry.sha, noCommit, mainline: isMerge ? mainline : null });
       }}
       onClose={onClose}
     >
-      <p className="settings-hint">
-        Apply the changes of <CommitRef entry={entry} /> onto{" "}
-        {branch ? <strong className="mono">{branch}</strong> : "the detached HEAD"}
-        {noCommit ? ", without committing them." : " as a new commit."}
-      </p>
-      {isMerge && <MainlineSelect id="cherry-pick" parents={parents} value={mainline} onChange={setMainline} />}
+      {revert ? (
+        noCommit ? (
+          <p className="settings-hint">
+            Undo the changes of <CommitRef entry={entry} /> on {target}, without committing.
+          </p>
+        ) : (
+          <p className="settings-hint">
+            Create a commit on {target} that undoes the changes of <CommitRef entry={entry} />.
+          </p>
+        )
+      ) : (
+        <p className="settings-hint">
+          Apply the changes of <CommitRef entry={entry} /> onto {target}
+          {noCommit ? ", without committing them." : " as a new commit."}
+        </p>
+      )}
+      {isMerge && (
+        <MainlineSelect id={kind} parents={parents} value={mainline} onChange={setMainline} revert={revert} />
+      )}
       <div className="dialog-options">
         <label className="checkbox">
           <input type="checkbox" checked={noCommit} onChange={(e) => setNoCommit(e.target.checked)} />
@@ -67,10 +87,11 @@ interface MainlineSelectProps {
   /** 1-based, as `git -m` takes it. */
   value: number;
   onChange: (mainline: number) => void;
+  revert: boolean;
 }
 
 /** Which parent of a merge commit its changes are taken relative to. */
-function MainlineSelect({ id, parents, value, onChange }: MainlineSelectProps) {
+function MainlineSelect({ id, parents, value, onChange, revert }: MainlineSelectProps) {
   return (
     <>
       <label className="settings-label" htmlFor={`${id}-mainline`}>
@@ -91,8 +112,9 @@ function MainlineSelect({ id, parents, value, onChange }: MainlineSelectProps) {
         </select>
       </div>
       <p id={`${id}-mainline-hint`} className="settings-hint">
-        This is a merge commit. Its changes are taken relative to the mainline, usually parent 1, the branch that was
-        merged into.
+        {revert
+          ? "This is a merge commit. Reverting it undoes what it brought in relative to the mainline, usually parent 1, the branch that was merged into."
+          : "This is a merge commit. Its changes are taken relative to the mainline, usually parent 1, the branch that was merged into."}
       </p>
     </>
   );

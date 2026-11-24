@@ -273,8 +273,8 @@ export interface PickOptions {
 }
 
 /**
- * "conflicts" stopped with an operation for the banner; "conflicts-no-commit" applied the changes
- * with conflicts but left no operation, so they are resolved and committed like any change.
+ * "conflicts" stopped with an operation for the banner; "conflicts-no-commit" cherry-picked the
+ * changes with conflicts but left no operation, so they are resolved and committed like any change.
  */
 export type PickOutcome = "committed" | "staged" | "conflicts" | "conflicts-no-commit";
 
@@ -434,6 +434,11 @@ export const api = {
   merge: (repo: string, options: MergeOptions) => invoke<MergeResult>("merge", { repo, ...options }),
   /** Applies a commit onto HEAD. Conflicts resolve with a "conflicts" outcome rather than rejecting. */
   cherryPick: (repo: string, options: PickOptions) => invoke<PickResult>("cherry_pick", { repo, ...options }),
+  /**
+   * Creates a commit that undoes another one. Conflicts resolve with a "conflicts" outcome rather than
+   * rejecting. With `noCommit`, the revert stays in progress until its staged changes are committed.
+   */
+  revert: (repo: string, options: PickOptions) => invoke<PickResult>("revert", { repo, ...options }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */

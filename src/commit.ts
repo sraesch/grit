@@ -3,7 +3,10 @@ import { SwitchTarget, targetForCommit } from "./branches";
 import { NoticeKind, plural } from "./remote";
 
 /** What an item of a commit's context menu does. */
-export type CommitAction = "checkout" | "create-branch" | "cherry-pick" | "copy-sha" | "copy-message";
+export type CommitAction = "checkout" | "create-branch" | "cherry-pick" | "revert" | "copy-sha" | "copy-message";
+
+/** Applying a commit's changes, or undoing them. */
+export type PickKind = "cherry-pick" | "revert";
 
 export interface CommitMenuItem {
   action: CommitAction;
@@ -59,24 +62,41 @@ export function commitMenu(entry: LogEntry, ctx: CommitMenuContext): CommitMenuE
       blocked: isHead ? "This commit is checked out" : changeBlocked,
       title: "Apply the changes of this commit onto HEAD",
     },
+    {
+      action: "revert",
+      label: "Revert…",
+      blocked: changeBlocked,
+      title: "Create a commit that undoes the changes of this commit",
+    },
     "separator",
     { action: "copy-sha", label: "Copy SHA", blocked: null },
     { action: "copy-message", label: "Copy Message", blocked: null },
   ];
 }
 
-/** "Cherry-picked a1b2c3d onto main", and how to go on after conflicts. */
-export function pickSummary(result: PickResult, short: string, branch: string): { text: string; kind: NoticeKind } {
+/** "Cherry-picked a1b2c3d onto main" or "Reverted a1b2c3d on main", and how to go on after conflicts. */
+export function pickSummary(
+  kind: PickKind,
+  result: PickResult,
+  short: string,
+  branch: string,
+): { text: string; kind: NoticeKind } {
   const files = plural(result.conflicts, "file");
+  const revert = kind === "revert";
   switch (result.outcome) {
     case "committed":
-      return { kind: "info", text: `Cherry-picked ${short} onto ${branch}.` };
+      return { kind: "info", text: revert ? `Reverted ${short} on ${branch}.` : `Cherry-picked ${short} onto ${branch}.` };
     case "staged":
-      return { kind: "info", text: `Staged the changes of ${short}. Review and commit them in Local changes.` };
+      return {
+        kind: "info",
+        text: revert
+          ? `Staged the changes that undo ${short}. Review and commit them in Local changes.`
+          : `Staged the changes of ${short}. Review and commit them in Local changes.`,
+      };
     case "conflicts":
       return {
         kind: "warning",
-        text: `Cherry-picking ${short} stopped with conflicts in ${files}. Resolve them in Local changes, then continue or abort.`,
+        text: `${revert ? "Reverting" : "Cherry-picking"} ${short} stopped with conflicts in ${files}. Resolve them in Local changes, then continue or abort.`,
       };
     case "conflicts-no-commit":
       return {

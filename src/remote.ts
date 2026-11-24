@@ -285,6 +285,8 @@ export const prefs = {
   saveAddRemote: (p: AddRemotePrefs) => savePrefs("addRemoteOptions", p),
   cherryPick: () => readPrefs<PickPrefs>("cherryPickOptions", { noCommit: false }),
   saveCherryPick: (p: PickPrefs) => savePrefs("cherryPickOptions", p),
+  revert: () => readPrefs<PickPrefs>("revertOptions", { noCommit: false }),
+  saveRevert: (p: PickPrefs) => savePrefs("revertOptions", p),
   createBranch: () => readPrefs<CreateBranchPrefs>("createBranchOptions", { checkout: true }),
   saveCreateBranch: (p: CreateBranchPrefs) => savePrefs("createBranchOptions", p),
 };

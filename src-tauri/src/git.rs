@@ -2131,12 +2131,14 @@ pub fn merge(repo: &Path, opts: &MergeOptions, on_progress: &mut dyn FnMut(&str)
 pub enum PickOutcome {
     /// A new commit was created.
     Committed,
-    /// The changes were applied and staged without committing (`no_commit`).
+    /// The changes were applied and staged without committing (`no_commit`). After a revert,
+    /// REVERT_HEAD stays until they are committed, so the revert also shows as in progress.
     Staged,
     /// Stopped on conflicts; `Status::operation` describes it, and it is continued or aborted from there.
     Conflicts,
-    /// `no_commit` applied the changes with conflicts. git keeps no state for it, so there is
-    /// nothing to continue or abort: the conflicts are resolved and committed like any change.
+    /// `no_commit` cherry-picked the changes with conflicts. git keeps no state for it, so there
+    /// is nothing to continue or abort: the conflicts are resolved and committed like any change.
+    /// (`revert --no-commit` keeps REVERT_HEAD, so a revert stops with `Conflicts` instead.)
     ConflictsNoCommit,
 }
 
@@ -2160,6 +2162,11 @@ pub struct PickOptions {
 /// Applies a commit onto HEAD.
 pub fn cherry_pick(repo: &Path, opts: &PickOptions) -> GitResult<PickResult> {
     apply_commit(repo, OperationKind::CherryPick, opts)
+}
+
+/// Creates a commit that undoes `opts.commit` (or, with `no_commit`, only stages that).
+pub fn revert(repo: &Path, opts: &PickOptions) -> GitResult<PickResult> {
+    apply_commit(repo, OperationKind::Revert, opts)
 }
 
 /// Cherry-picks or reverts `opts.commit`; conflicts are an outcome, not an error.
@@ -4789,6 +4796,80 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         };
         assert_eq!(cherry_pick(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
         assert_eq!(repo.read("feature.txt"), "feature\n");
+    }
+
+    #[test]
+    fn reverts_commits() {
+        let repo = TestRepo::new("revert");
+        repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        let added = repo.commit_all("add g");
+        repo.write("h.txt", "h\n");
+        repo.commit_all("add h");
+
+        let result = revert(&repo.dir, &pick_opts(&added, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Staged);
+        assert!(!repo.dir.join("g.txt").exists());
+        repo.git(&["reset", "-q", "--hard"]);
+
+        let result = revert(&repo.dir, &pick_opts(&added, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Committed);
+        assert!(!repo.dir.join("g.txt").exists());
+        assert!(repo.dir.join("h.txt").exists());
+        assert!(repo.git(&["log", "-1", "--format=%s"]).contains("Revert \"add g\""));
+
+        // Its changes are gone already: nothing to do, and nothing left in progress.
+        let err = revert(&repo.dir, &pick_opts(&added, false)).unwrap_err();
+        assert!(err.contains("changes nothing"), "{err}");
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn revert_conflicts_stop_for_the_banner() {
+        let repo = TestRepo::new("revert-conflict");
+        repo.write("f.txt", "one\n");
+        repo.commit_all("one");
+        repo.write("f.txt", "two\n");
+        let two = repo.commit_all("two");
+        repo.write("f.txt", "three\n");
+        repo.commit_all("three");
+
+        let result = revert(&repo.dir, &pick_opts(&two, false)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Revert
+        );
+        abort_operation(&repo.dir).unwrap();
+        assert_eq!(repo.read("f.txt"), "three\n");
+
+        // Unlike cherry-pick, `revert --no-commit` keeps REVERT_HEAD, so it shows in the banner too.
+        let result = revert(&repo.dir, &pick_opts(&two, true)).unwrap();
+        assert_eq!(result.outcome, PickOutcome::Conflicts);
+        assert_eq!(
+            status(&repo.dir).unwrap().operation.unwrap().kind,
+            OperationKind::Revert
+        );
+    }
+
+    #[test]
+    fn reverts_merge_commits_with_a_mainline() {
+        let repo = TestRepo::new("revert-merge");
+        repo.commit_all_initial();
+        repo.git(&["switch", "-q", "-c", "feature"]);
+        repo.write("feature.txt", "feature\n");
+        repo.commit_all("feature");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+        let merge = repo.head();
+
+        assert!(revert(&repo.dir, &pick_opts(&merge, false)).is_err());
+        let opts = PickOptions {
+            mainline: Some(1),
+            ..pick_opts(&merge, false)
+        };
+        assert_eq!(revert(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
+        assert!(!repo.dir.join("feature.txt").exists());
     }
 
     #[test]
