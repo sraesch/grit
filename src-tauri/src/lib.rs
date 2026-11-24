@@ -198,8 +198,8 @@ async fn checkout_commit(repo: String, sha: String) -> GitResult<()> {
 }
 
 #[tauri::command]
-async fn create_branch(repo: String, name: String) -> GitResult<()> {
-    blocking(move || git::create_branch(&PathBuf::from(repo), &name)).await
+async fn create_branch(repo: String, name: String, start: Option<String>, checkout: Option<bool>) -> GitResult<()> {
+    blocking(move || git::create_branch(&PathBuf::from(repo), &name, start.as_deref(), checkout.unwrap_or(true))).await
 }
 
 /// A progress line of a running fetch, pull, push, rebase or merge, e.g. "Receiving objects:  45% (450/1000)".

@@ -359,8 +359,12 @@ export const api = {
   checkoutRemote: (repo: string, branch: string) => invoke<void>("checkout_remote_branch", { repo, branch }),
   /** Checks out a commit without a branch (detached HEAD). */
   checkoutCommit: (repo: string, sha: string) => invoke<void>("checkout_commit", { repo, sha }),
-  /** Creates a branch at HEAD and switches to it. */
-  createBranch: (repo: string, name: string) => invoke<void>("create_branch", { repo, name }),
+  /**
+   * Creates a branch at `start` (a commit, branch or tag; HEAD when null) and, with `checkout`, switches
+   * to it. Starting at a remote branch makes the new branch track it.
+   */
+  createBranch: (repo: string, name: string, start: string | null = null, checkout = true) =>
+    invoke<void>("create_branch", { repo, name, start, checkout }),
   /**
    * Deletes a local branch and, with `deleteRemote`, the remote branch it tracks (first; progress
    * arrives as `git-progress` events). Without `force`, a branch with unmerged commits is kept

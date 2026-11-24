@@ -230,6 +230,11 @@ export function groupRemoteBranches<B extends { name: string }>(
   return [...groups.values()];
 }
 
+export interface CreateBranchPrefs {
+  /** Switch to the new branch. */
+  checkout: boolean;
+}
+
 export interface MergePrefs {
   mode: MergeMode;
   autostash: boolean;
@@ -273,4 +278,6 @@ export const prefs = {
   saveStash: (p: StashPrefs) => savePrefs("stashOptions", p),
   addRemote: () => readPrefs<AddRemotePrefs>("addRemoteOptions", { fetch: true }),
   saveAddRemote: (p: AddRemotePrefs) => savePrefs("addRemoteOptions", p),
+  createBranch: () => readPrefs<CreateBranchPrefs>("createBranchOptions", { checkout: true }),
+  saveCreateBranch: (p: CreateBranchPrefs) => savePrefs("createBranchOptions", p),
 };

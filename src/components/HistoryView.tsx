@@ -16,6 +16,8 @@ interface HistoryViewProps {
   onError: (message: string) => void;
   /** Double-click on a commit. */
   onCheckout: (entry: LogEntry) => void;
+  /** Right-click on a commit, or Shift+F10 / the menu key on the selected one; at viewport coordinates. */
+  onMenu?: (entry: LogEntry, x: number, y: number) => void;
 }
 
 function RefBadge({ r }: { r: RefLabel }) {
@@ -27,7 +29,7 @@ function RefBadge({ r }: { r: RefLabel }) {
   );
 }
 
-export function HistoryView({ repo, log, onError, onCheckout }: HistoryViewProps) {
+export function HistoryView({ repo, log, onError, onCheckout, onMenu }: HistoryViewProps) {
   const entries = log ?? [];
   const [selectedSha, setSelectedSha] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -52,7 +54,22 @@ export function HistoryView({ repo, log, onError, onCheckout }: HistoryViewProps
     else if (!selectedSha || !entries.some((e) => e.sha === selectedSha)) setSelectedSha(headSha ?? entries[0].sha);
   }, [entries, headSha, selectedSha]);
 
+  // The menu of the selected commit opens below its row, kept inside the visible part of the list.
+  function openMenuFromKeyboard() {
+    const el = scrollRef.current;
+    if (!onMenu || !el || selectedIndex < 0) return;
+    const rect = el.getBoundingClientRect();
+    const rowTop = rect.top + selectedIndex * ROW_HEIGHT - el.scrollTop;
+    const y = Math.min(Math.max(rowTop + ROW_HEIGHT, rect.top), rect.bottom);
+    onMenu(entries[selectedIndex], rect.left + 24, y);
+  }
+
   function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      e.preventDefault();
+      openMenuFromKeyboard();
+      return;
+    }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     const next = Math.min(Math.max(selectedIndex + (e.key === "ArrowDown" ? 1 : -1), 0), entries.length - 1);
@@ -84,6 +101,14 @@ export function HistoryView({ repo, log, onError, onCheckout }: HistoryViewProps
                   style={{ transform: `translateY(${item.start}px)`, height: ROW_HEIGHT }}
                   onClick={() => setSelectedSha(c.sha)}
                   onDoubleClick={() => onCheckout(c)}
+                  onContextMenu={
+                    onMenu &&
+                    ((e) => {
+                      e.preventDefault();
+                      setSelectedSha(c.sha);
+                      onMenu(c, e.clientX, e.clientY);
+                    })
+                  }
                   title={c.sha === headSha ? undefined : "Double-click to check out"}
                 >
                   <GraphCell row={c.graph} isMerge={c.parents.length > 1} isHead={c.sha === headSha} width={width} />

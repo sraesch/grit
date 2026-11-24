@@ -4,7 +4,7 @@ import { prefs } from "../remote";
 import { Dialog } from "./RemoteDialogs";
 
 /** Runs a dialog's save: busy meanwhile, and the error shown in the dialog if it fails. */
-function useSave() {
+export function useSave() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   async function save(action: () => Promise<void>) {
