@@ -669,7 +669,9 @@ pub fn branches(repo: &Path) -> GitResult<Branches> {
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname)%1f%(objectname:short)%1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)",
+            // Annotated tags list the commit they point at rather than the tag object.
+            "--format=%(refname)%1f%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)\
+             %1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)",
             "refs/heads",
             "refs/remotes",
             "refs/tags",
@@ -1078,6 +1080,74 @@ pub fn delete_remote_branch(
         return Err(format!("There is no remote branch '{remote}/{branch}'"));
     }
     delete_remote_ref(repo, remote, &format!("refs/heads/{branch}"), &tracking, on_progress)
+}
+
+/// Checks a tag name the way git does for `refs/tags/<name>`.
+fn tag_arg<'a>(repo: &Path, name: &'a str) -> GitResult<&'a str> {
+    let invalid = || format!("'{name}' is not a valid tag name.");
+    let name = plain_arg(name, "tag name").map_err(|_| invalid())?;
+    run(repo, &["check-ref-format", &format!("refs/tags/{name}")]).map_err(|_| invalid())?;
+    Ok(name)
+}
+
+/// Creates a tag at `commit`: annotated with `message` when given, lightweight otherwise.
+pub fn create_tag(repo: &Path, name: &str, commit: &str, message: Option<&str>) -> GitResult<()> {
+    let name = tag_arg(repo, name)?;
+    let sha = resolve_commit(repo, commit)?;
+    match message.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(message) => run_with(repo, &["tag", "-a", "-F", "-", name, &sha], Some(message), &[0]).map(drop),
+        None => run(repo, &["tag", name, &sha]).map(drop),
+    }
+}
+
+pub fn delete_tag(repo: &Path, name: &str) -> GitResult<()> {
+    run(repo, &["tag", "-d", plain_arg(name, "tag name")?]).map(drop)
+}
+
+/// Pushes one tag to `remote`. Refused when the remote has a different tag of that name.
+pub fn push_tag(repo: &Path, remote: &str, name: &str, on_progress: &mut dyn FnMut(&str)) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let name = plain_arg(name, "tag name")?;
+    let tag_ref = format!("refs/tags/{name}");
+    if rev(repo, &tag_ref).is_none() {
+        return Err(format!("There is no tag '{name}'."));
+    }
+    let refspec = format!("{tag_ref}:{tag_ref}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", remote, &refspec],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    match parse_push_porcelain(&out.stdout).iter().find(|r| r.dst == tag_ref) {
+        Some(r) if matches!(r.flag, '*' | '=' | ' ' | '+') => Ok(()),
+        Some(r) if r.flag == '!' => Err(format!(
+            "{remote} already has a different tag {name}, so it wasn't pushed ({}).",
+            r.summary.trim_matches(|c| c == '[' || c == ']')
+        )),
+        _ => Err(error_text(&out.stderr, &format!("Pushing {name} to {remote} failed"))),
+    }
+}
+
+/// Deletes tag `name` on `remote`; the local tag is kept.
+pub fn delete_remote_tag(repo: &Path, remote: &str, name: &str, on_progress: &mut dyn FnMut(&str)) -> GitResult<()> {
+    let remote = plain_arg(remote, "remote name")?;
+    let name = plain_arg(name, "tag name")?;
+    let tag_ref = format!("refs/tags/{name}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", remote, "--delete", &tag_ref],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    // Depending on the transport, git refuses or "deletes" a missing ref with a warning.
+    if out.stderr.contains("remote ref does not exist") || out.stderr.contains("non-existent ref") {
+        return Err(format!("{remote} has no tag {name}."));
+    }
+    match parse_push_porcelain(&out.stdout).iter().find(|r| r.dst == tag_ref) {
+        Some(r) if r.flag == '-' => Ok(()),
+        _ => Err(error_text(&out.stderr, &format!("Deleting {name} on {remote} failed"))),
+    }
 }
 
 /// Deletes a local branch and, with `delete_remote`, the remote branch it tracks.
@@ -5001,6 +5071,73 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         let preview = reset_preview(&ours.dir, &base).unwrap();
         assert_eq!(preview.dropped, 2);
         assert_eq!(preview.dropped_pushed, 1);
+    }
+
+    #[test]
+    fn creates_and_deletes_tags() {
+        let repo = TestRepo::new("tags");
+        let first = repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        repo.commit_all("second");
+
+        create_tag(&repo.dir, "v1", &first, None).unwrap();
+        create_tag(&repo.dir, "v1-annotated", &first, Some("Release 1\n\nNotes")).unwrap();
+        assert_eq!(repo.git(&["cat-file", "-t", "v1"]).trim(), "commit");
+        assert_eq!(repo.git(&["cat-file", "-t", "v1-annotated"]).trim(), "tag");
+        assert!(repo.git(&["tag", "-l", "-n9", "v1-annotated"]).contains("Release 1"));
+        // A blank message makes a lightweight tag.
+        create_tag(&repo.dir, "v1-blank", &first, Some("  ")).unwrap();
+        assert_eq!(repo.git(&["cat-file", "-t", "v1-blank"]).trim(), "commit");
+
+        // Both list the commit they point at.
+        let short = &first[..7];
+        for tag in branches(&repo.dir).unwrap().tags {
+            assert!(tag.sha.starts_with(short), "{} → {}", tag.name, tag.sha);
+        }
+
+        assert!(
+            create_tag(&repo.dir, "v1", &first, None)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        for bad in ["bad..name", "-d", "", "with space"] {
+            assert!(create_tag(&repo.dir, bad, &first, None).is_err(), "{bad}");
+        }
+
+        delete_tag(&repo.dir, "v1").unwrap();
+        assert!(rev(&repo.dir, "refs/tags/v1").is_none());
+        assert!(delete_tag(&repo.dir, "v1").is_err());
+    }
+
+    #[test]
+    fn pushes_and_deletes_tags_on_a_remote() {
+        let (origin, ours, theirs) = shared("push-tag");
+        let head = ours.head();
+        create_tag(&ours.dir, "v1", &head, Some("Release")).unwrap();
+        create_tag(&ours.dir, "other", &head, None).unwrap();
+
+        push_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/tags/v1").is_some());
+        // Only that tag.
+        assert!(rev(&origin.dir, "refs/tags/other").is_none());
+        // Again: up to date.
+        push_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+
+        // A different tag of the same name on the remote is never overwritten.
+        theirs.write("t.txt", "t\n");
+        let t = theirs.commit_all("theirs");
+        create_tag(&theirs.dir, "v1", &t, None).unwrap();
+        let err = push_tag(&theirs.dir, "origin", "v1", &mut no_progress).unwrap_err();
+        assert!(err.contains("already has a different tag v1"), "{err}");
+
+        delete_remote_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/tags/v1").is_none());
+        assert!(rev(&ours.dir, "refs/tags/v1").is_some());
+        let err = delete_remote_tag(&ours.dir, "origin", "v1", &mut no_progress).unwrap_err();
+        assert!(err.contains("has no tag v1"), "{err}");
+
+        assert!(push_tag(&ours.dir, "origin", "missing", &mut no_progress).is_err());
+        assert!(push_tag(&ours.dir, "--all", "v1", &mut no_progress).is_err());
     }
 
     #[test]

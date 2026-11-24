@@ -4,7 +4,7 @@ import { SwitchTarget, targetForRemote } from "../branches";
 import { BranchTreeNode, buildBranchTree } from "../branchTree";
 import { groupRemoteBranches } from "../remote";
 import { formatTrack, fullDate, relativeTime } from "../util";
-import { ContextMenu, MenuItem } from "./ContextMenu";
+import { ContextMenu, MenuEntry, MenuItem, SEPARATOR } from "./ContextMenu";
 import { Chevron } from "./Chevron";
 import { FolderIcon } from "./FolderIcon";
 
@@ -41,7 +41,15 @@ interface SidebarProps {
   onCopyName: (name: string) => void;
   /** Asks to delete a remote branch on its remote; the owner confirms. */
   onDeleteRemoteBranch: (branch: Branch) => void;
+  onPushTag: (tag: Branch, remote: string) => void;
+  /** Asks to delete a tag; the owner confirms. */
+  onDeleteTag: (tag: Branch) => void;
+  /** Asks to delete a tag on a remote; the owner confirms and asks which remote. */
+  onDeleteRemoteTag: (tag: Branch) => void;
 }
+
+/** Checking out a tag: its commit, without a branch. */
+const tagTarget = (tag: Branch): SwitchTarget => ({ kind: "commit", name: `refs/tags/${tag.name}` });
 
 /** Left padding of a tree row, in pixels: `base` for top-level rows, deeper rows indented further. */
 const indentOf = (base: number, depth: number) => base + depth * 14;
@@ -328,6 +336,9 @@ export function Sidebar({
   mergeBlocked,
   onCopyName,
   onDeleteRemoteBranch,
+  onPushTag,
+  onDeleteTag,
+  onDeleteRemoteTag,
 }: SidebarProps) {
   const [remoteBranchMenu, setRemoteBranchMenu] = useState<{ branch: Branch; x: number; y: number } | null>(null);
   const closeRemoteBranchMenu = useCallback(() => setRemoteBranchMenu(null), []);
@@ -336,6 +347,8 @@ export function Sidebar({
   const [remoteMenu, setRemoteMenu] = useState<{ remote: Remote | null; x: number; y: number } | null>(null);
   const closeRemoteMenu = useCallback(() => setRemoteMenu(null), []);
   const [stashMenu, setStashMenu] = useState<{ stash: Stash; x: number; y: number } | null>(null);
+  const [tagMenu, setTagMenu] = useState<{ tag: Branch; x: number; y: number } | null>(null);
+  const closeTagMenu = useCallback(() => setTagMenu(null), []);
   const closeMenu = useCallback(() => setMenu(null), []);
   const closeStashMenu = useCallback(() => setStashMenu(null), []);
 
@@ -364,6 +377,28 @@ export function Sidebar({
       },
       { label: "Copy Name", onSelect: () => onCopyName(b.name) },
       { label: "Delete Remote Branch…", danger: true, onSelect: () => onDeleteRemoteBranch(b) },
+    ];
+  }
+
+  function tagMenuItems(tag: Branch): MenuEntry[] {
+    const remotes = branches?.remotes ?? [];
+    const noRemotes = "This repository has no remotes";
+    return [
+      { label: "Check Out", onSelect: () => onSwitch(tagTarget(tag)) },
+      SEPARATOR,
+      ...(remotes.length > 0
+        ? remotes.map((r) => ({ label: `Push to ${r.name}`, onSelect: () => onPushTag(tag, r.name) }))
+        : [{ label: "Push", disabled: true, title: noRemotes, onSelect: () => {} }]),
+      { label: "Copy Name", onSelect: () => onCopyName(tag.name) },
+      SEPARATOR,
+      { label: "Delete Tag…", danger: true, onSelect: () => onDeleteTag(tag) },
+      {
+        label: "Delete on Remote…",
+        danger: true,
+        disabled: remotes.length === 0,
+        title: remotes.length === 0 ? noRemotes : undefined,
+        onSelect: () => onDeleteRemoteTag(tag),
+      },
     ];
   }
 
@@ -411,7 +446,17 @@ export function Sidebar({
             onGroupMenu={(e) => setRemoteMenu({ remote: null, x: e.clientX, y: e.clientY })}
             onRemoteMenu={(remote, e) => setRemoteMenu({ remote, x: e.clientX, y: e.clientY })}
           />
-          <BranchGroup title="Tags" items={branches.tags} defaultOpen={false} />
+          <BranchGroup
+            title="Tags"
+            items={branches.tags}
+            defaultOpen={false}
+            onActivate={(tag) => onSwitch(tagTarget(tag))}
+            activateHint="Double-click to check out this tag"
+            onMenu={(tag, e) => {
+              e.preventDefault();
+              setTagMenu({ tag, x: e.clientX, y: e.clientY });
+            }}
+          />
           {stashes && stashes.length > 0 && (
             <StashGroup
               stashes={stashes}
@@ -455,6 +500,15 @@ export function Sidebar({
           label={`Remote branch ${remoteBranchMenu.branch.name}`}
           items={remoteBranchMenuItems(remoteBranchMenu.branch)}
           onClose={closeRemoteBranchMenu}
+        />
+      )}
+      {tagMenu && (
+        <ContextMenu
+          x={tagMenu.x}
+          y={tagMenu.y}
+          label={`Tag ${tagMenu.tag.name}`}
+          items={tagMenuItems(tagMenu.tag)}
+          onClose={closeTagMenu}
         />
       )}
       {remoteMenu && (

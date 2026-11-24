@@ -56,7 +56,10 @@ export function Dialog({
   // Start on the first field (or the submit button of a plain confirmation), so the keyboard works right away.
   useLayoutEffect(() => {
     const form = formRef.current;
-    (form?.querySelector<HTMLElement>("select, input") ?? form?.querySelector<HTMLElement>("button[type=submit]"))?.focus();
+    (
+      form?.querySelector<HTMLElement>("select, input, textarea") ??
+      form?.querySelector<HTMLElement>("button[type=submit]")
+    )?.focus();
   }, []);
 
   // Escape closes; focus returns to whatever opened the dialog.
@@ -81,6 +84,8 @@ export function Dialog({
   // these dialogs have selects and checkboxes; focused buttons keep their own Enter.
   function onKeyDown(e: KeyboardEvent<HTMLFormElement>) {
     if (e.key !== "Enter" || e.target instanceof HTMLButtonElement) return;
+    // Text areas keep Enter for new lines; Ctrl/Cmd+Enter submits from them.
+    if (e.target instanceof HTMLTextAreaElement && !(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     if (ready) onSubmit();
   }

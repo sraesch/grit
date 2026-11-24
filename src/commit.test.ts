@@ -49,6 +49,7 @@ describe("commitMenu", () => {
     expect(item(items, "checkout").blocked).toBe("Wait");
     expect(item(items, "create-branch").blocked).toBe("Wait");
     expect(item(items, "cherry-pick").blocked).toBe("Wait");
+    expect(item(items, "create-tag").blocked).toBe("Wait");
     expect(item(items, "copy-sha").blocked).toBeNull();
     expect(item(items, "copy-message").blocked).toBeNull();
   });

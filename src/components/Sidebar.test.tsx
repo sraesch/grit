@@ -42,6 +42,9 @@ function setup(props: Partial<Parameters<typeof Sidebar>[0]> = {}) {
     onMerge: vi.fn(),
     onCopyName: vi.fn(),
     onDeleteRemoteBranch: vi.fn(),
+    onPushTag: vi.fn(),
+    onDeleteTag: vi.fn(),
+    onDeleteRemoteTag: vi.fn(),
   };
   render(
     <Sidebar
@@ -126,11 +129,36 @@ describe("Sidebar", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
-  it("has no context menu for tags", async () => {
-    setup();
+  it("checks out, pushes, copies and deletes a tag from its context menu", async () => {
+    const { onSwitch, onPushTag, onCopyName, onDeleteTag, onDeleteRemoteTag } = setup();
+    await userEvent.click(screen.getByRole("button", { name: /Tags/ }));
+    const tag = branches.tags[0];
+    const choose = async (item: string) => {
+      await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("v1.0") });
+      const menu = screen.getByRole("menu", { name: "Tag v1.0" });
+      await userEvent.click(within(menu).getByRole("menuitem", { name: item }));
+    };
+    await choose("Check Out");
+    expect(onSwitch).toHaveBeenLastCalledWith({ kind: "commit", name: "refs/tags/v1.0" });
+    await choose("Push to backup");
+    expect(onPushTag).toHaveBeenLastCalledWith(tag, "backup");
+    await choose("Copy Name");
+    expect(onCopyName).toHaveBeenLastCalledWith("v1.0");
+    await choose("Delete Tag…");
+    expect(onDeleteTag).toHaveBeenLastCalledWith(tag);
+    await choose("Delete on Remote…");
+    expect(onDeleteRemoteTag).toHaveBeenLastCalledWith(tag);
+
+    await userEvent.dblClick(screen.getByText("v1.0"));
+    expect(onSwitch).toHaveBeenCalledTimes(2);
+  });
+
+  it("can't push or delete tags on remotes without remotes", async () => {
+    setup({ branches: { ...branches, remotes: [] } });
     await userEvent.click(screen.getByRole("button", { name: /Tags/ }));
     await userEvent.pointer({ keys: "[MouseRight]", target: screen.getByText("v1.0") });
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Push" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Delete on Remote…" })).toBeDisabled();
   });
 
   it("checks out, merges, copies and deletes a remote branch from its context menu", async () => {

@@ -1569,6 +1569,17 @@ body.resizing-vertical {
   display: flex;
   gap: 8px;
 }
+.settings-row textarea {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  resize: vertical;
+}
 .settings-row input {
   flex: 1;
   min-width: 0;
@@ -1578,7 +1589,8 @@ body.resizing-vertical {
   border-radius: 5px;
   padding: 5px 8px;
 }
-.settings-row input:focus {
+.settings-row input:focus,
+.settings-row textarea:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
@@ -1608,6 +1620,11 @@ body.resizing-vertical {
 .dialog-options .checkbox {
   font-size: 13px;
   color: var(--text);
+}
+.inline-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .reset-mode {
   align-items: flex-start;

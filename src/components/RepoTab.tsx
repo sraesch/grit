@@ -45,6 +45,7 @@ import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { PickDialog } from "./CommitOpDialog";
 import { ResetDialog } from "./ResetDialog";
+import { CreateTagDialog, DeleteRemoteTagDialog, DeleteTagDialog } from "./TagDialogs";
 import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
@@ -138,6 +139,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [creatingBranch, setCreatingBranch] = useState<{ start: string; label: string; short: string } | null>(null);
   // The commit being cherry-picked or reverted.
   const [commitOp, setCommitOp] = useState<{ kind: PickKind; entry: LogEntry } | null>(null);
+  // A tag being created at a commit, as for creatingBranch.
+  const [creatingTag, setCreatingTag] = useState<{ start: string; label: string; short: string } | null>(null);
+  // The tag whose deletion is being confirmed, here or on a remote.
+  const [deletingTag, setDeletingTag] = useState<{ tag: Branch; onRemote: boolean } | null>(null);
   // The commit the current branch is being reset to.
   const [resetting, setResetting] = useState<LogEntry | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
@@ -432,6 +437,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setCreatingBranch(null);
       setCommitOp(null);
       setResetting(null);
+      setCreatingTag(null);
+      setDeletingTag(null);
     }
   }, [active]);
 
@@ -651,6 +658,9 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       case "create-branch":
         setCreatingBranch({ start: entry.sha, label: `${short} ${entry.subject}`, short });
         break;
+      case "create-tag":
+        setCreatingTag({ start: entry.sha, label: `${short} ${entry.subject}`, short });
+        break;
       case "cherry-pick":
       case "revert":
         setCommitOp({ kind: action, entry });
@@ -670,6 +680,68 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const closeCreateBranch = useCallback(() => setCreatingBranch(null), []);
   const closeCommitOp = useCallback(() => setCommitOp(null), []);
   const closeReset = useCallback(() => setResetting(null), []);
+  const closeCreateTag = useCallback(() => setCreatingTag(null), []);
+  const closeDeleteTag = useCallback(() => setDeletingTag(null), []);
+
+  /** Pushes a tag; `created` says it was just created, for the messages. */
+  const pushTag = useCallback(
+    async (name: string, remote: string, created?: string) => {
+      try {
+        const done = await runRemote({ label: `Pushing tag ${name} to ${remote}…`, background: false }, () =>
+          api.pushTag(root, remote, name).then(() => true),
+        );
+        if (!done || !mounted.current) return;
+        onClearError();
+        const text = created ? `${created} and pushed it to ${remote}.` : `Pushed tag ${name} to ${remote}.`;
+        setNotice({ kind: "info", text });
+      } catch (e) {
+        if (!mounted.current) return;
+        onError(created ? `${created}, but pushing it to ${remote} failed: ${errorMessage(e)}` : errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function createTag(name: string, message: string | null, pushTo: string | null) {
+    if (!creatingTag) return;
+    await api.createTag(root, name, creatingTag.start, message);
+    const created = `Created tag ${name} at ${creatingTag.short}`;
+    setCreatingTag(null);
+    onClearError();
+    refreshHistory();
+    if (pushTo) pushTag(name, pushTo, created);
+    else setNotice({ kind: "info", text: `${created}.` });
+  }
+
+  async function deleteTag(tag: Branch) {
+    setDeletingTag(null);
+    try {
+      await api.deleteTag(root, tag.name);
+      if (!mounted.current) return;
+      onClearError();
+      // The commit it pointed at brings it back if it was deleted by mistake.
+      setNotice({ kind: "info", text: `Deleted tag ${tag.name} (was ${tag.sha.slice(0, 7)}).` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshHistory();
+    }
+  }
+
+  async function deleteRemoteTag(tag: Branch, remote: string) {
+    setDeletingTag(null);
+    try {
+      const done = await runRemote({ label: `Deleting tag ${tag.name} on ${remote}…`, background: false }, () =>
+        api.deleteRemoteTag(root, remote, tag.name).then(() => true),
+      );
+      if (!done || !mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `Deleted tag ${tag.name} on ${remote}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    }
+  }
 
   const resetNow = useCallback(
     async (entry: LogEntry, mode: ResetMode) => {
@@ -978,6 +1050,25 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onClose={closeCommitOp}
         />
       )}
+      {creatingTag && (
+        <CreateTagDialog
+          startLabel={creatingTag.label}
+          remotes={branches?.remotes ?? []}
+          onCreate={createTag}
+          onClose={closeCreateTag}
+        />
+      )}
+      {deletingTag && !deletingTag.onRemote && (
+        <DeleteTagDialog tag={deletingTag.tag} onDelete={deleteTag} onClose={closeDeleteTag} />
+      )}
+      {deletingTag?.onRemote && branches && (
+        <DeleteRemoteTagDialog
+          tag={deletingTag.tag}
+          remotes={branches.remotes}
+          onDelete={deleteRemoteTag}
+          onClose={closeDeleteTag}
+        />
+      )}
       {resetting && status && (
         <ResetDialog
           key={resetting.sha}
@@ -1036,6 +1127,9 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           }
           onCopyName={(name) => copyText(name)}
           onDeleteRemoteBranch={askDeleteRemoteBranch}
+          onPushTag={(tag, remote) => pushTag(tag.name, remote)}
+          onDeleteTag={(tag) => setDeletingTag({ tag, onRemote: false })}
+          onDeleteRemoteTag={(tag) => setDeletingTag({ tag, onRemote: true })}
         />
         <main className="main">
           {view === "changes" ? (

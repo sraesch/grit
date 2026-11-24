@@ -6,6 +6,7 @@ import { NoticeKind, plural } from "./remote";
 export type CommitAction =
   | "checkout"
   | "create-branch"
+  | "create-tag"
   | "cherry-pick"
   | "revert"
   | "reset"
@@ -64,6 +65,7 @@ export function commitMenu(entry: LogEntry, ctx: CommitMenuContext): CommitMenuE
       title: checkoutTitle(target),
     },
     { action: "create-branch", label: "New Branch Here…", blocked: ctx.busy },
+    { action: "create-tag", label: "New Tag Here…", blocked: ctx.busy },
     "separator",
     {
       action: "cherry-pick",

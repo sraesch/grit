@@ -455,6 +455,15 @@ export const api = {
   resetPreview: (repo: string, target: string) => invoke<ResetPreview>("get_reset_preview", { repo, target }),
   /** Moves the current branch (or detached HEAD) to `target`; resolves to the commit it pointed at before. */
   reset: (repo: string, target: string, mode: ResetMode) => invoke<string>("reset", { repo, target, mode }),
+  /** Creates a tag at `commit`: annotated with `message`, or lightweight when it is null or blank. */
+  createTag: (repo: string, name: string, commit: string, message: string | null) =>
+    invoke<void>("create_tag", { repo, name, commit, message }),
+  deleteTag: (repo: string, name: string) => invoke<void>("delete_tag", { repo, name }),
+  /** Pushes one tag; rejects when the remote has a different tag of that name. Progress arrives as `git-progress`. */
+  pushTag: (repo: string, remote: string, name: string) => invoke<void>("push_tag", { repo, remote, name }),
+  /** Deletes a tag on a remote, keeping the local one. Progress arrives as `git-progress` events. */
+  deleteRemoteTag: (repo: string, remote: string, name: string) =>
+    invoke<void>("delete_remote_tag", { repo, remote, name }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */
