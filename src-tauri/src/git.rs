@@ -1082,6 +1082,70 @@ pub fn delete_remote_branch(
     delete_remote_ref(repo, remote, &format!("refs/heads/{branch}"), &tracking, on_progress)
 }
 
+/// Renames a local branch. With `rename_remote`, the remote branch it tracks is renamed too: the
+/// branch is pushed under its new name (and tracks that), then the old remote branch is deleted,
+/// but only if nobody pushed to it since the last fetch. A failure on the remote leaves the local
+/// rename in place and says what is left to do.
+pub fn rename_branch(
+    repo: &Path,
+    name: &str,
+    new_name: &str,
+    rename_remote: bool,
+    on_progress: &mut dyn FnMut(&str),
+) -> GitResult<()> {
+    let name = branch_arg(name)?;
+    let new_name = branch_arg(new_name)?;
+    let old_ref = format!("refs/heads/{name}");
+    if rev(repo, &old_ref).is_none() {
+        return Err(format!("There is no branch '{name}'."));
+    }
+    if run(repo, &["check-ref-format", "--branch", new_name]).is_err() {
+        return Err(format!("'{new_name}' is not a valid branch name."));
+    }
+    let upstream = if rename_remote {
+        Some(upstream_of(repo, &old_ref).ok_or_else(|| format!("{name} doesn't track a remote branch."))?)
+    } else {
+        None
+    };
+    run(repo, &["branch", "-m", name, new_name])?;
+    let Some((remote, remote_ref, tracking)) = upstream else {
+        return Ok(());
+    };
+
+    let new_ref = format!("refs/heads/{new_name}");
+    let refspec = format!("{new_ref}:{new_ref}");
+    let out = exec_streaming(
+        repo,
+        &["push", "--progress", "--porcelain", "--set-upstream", &remote, &refspec],
+        &[("LC_ALL", "C")],
+        on_progress,
+    )?;
+    let pushed = parse_push_porcelain(&out.stdout)
+        .iter()
+        .any(|r| r.dst == new_ref && matches!(r.flag, '*' | '=' | ' '));
+    if !pushed {
+        return Err(format!(
+            "Renamed {name} to {new_name}, but pushing it to {remote} failed: {}",
+            error_text(&out.stderr, "git push failed")
+        ));
+    }
+    let old_remote = tracking.strip_prefix("refs/remotes/").unwrap_or(&tracking).to_string();
+    delete_remote_ref(repo, &remote, &remote_ref, &tracking, on_progress)
+        .map_err(|e| format!("Renamed {name} to {new_name} and pushed it to {remote}, but {old_remote} was kept: {e}"))
+}
+
+/// Makes `branch` track `upstream` (a remote branch such as "origin/main"), or nothing when None.
+pub fn set_upstream(repo: &Path, branch: &str, upstream: Option<&str>) -> GitResult<()> {
+    let branch = branch_arg(branch)?;
+    match upstream {
+        Some(upstream) => {
+            let upstream = plain_arg(upstream, "remote branch")?;
+            run(repo, &["branch", &format!("--set-upstream-to={upstream}"), branch]).map(drop)
+        }
+        None => run(repo, &["branch", "--unset-upstream", branch]).map(drop),
+    }
+}
+
 /// Checks a tag name the way git does for `refs/tags/<name>`.
 fn tag_arg<'a>(repo: &Path, name: &'a str) -> GitResult<&'a str> {
     let invalid = || format!("'{name}' is not a valid tag name.");
@@ -5138,6 +5202,68 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
 
         assert!(push_tag(&ours.dir, "origin", "missing", &mut no_progress).is_err());
         assert!(push_tag(&ours.dir, "--all", "v1", &mut no_progress).is_err());
+    }
+
+    #[test]
+    fn renames_branches_locally() {
+        let repo = TestRepo::new("rename-branch");
+        repo.commit_all_initial();
+        repo.git(&["branch", "feature"]);
+        rename_branch(&repo.dir, "feature", "feature/renamed", false, &mut no_progress).unwrap();
+        let b = branches(&repo.dir).unwrap();
+        assert!(b.local.iter().any(|x| x.name == "feature/renamed"));
+        assert!(!b.local.iter().any(|x| x.name == "feature"));
+
+        // The current branch too.
+        rename_branch(&repo.dir, "main", "trunk", false, &mut no_progress).unwrap();
+        assert_eq!(status(&repo.dir).unwrap().branch.as_deref(), Some("trunk"));
+
+        assert!(rename_branch(&repo.dir, "trunk", "feature/renamed", false, &mut no_progress).is_err());
+        assert!(rename_branch(&repo.dir, "trunk", "bad..name", false, &mut no_progress).is_err());
+        assert!(rename_branch(&repo.dir, "missing", "x", false, &mut no_progress).is_err());
+        assert!(
+            rename_branch(&repo.dir, "trunk", "x", true, &mut no_progress)
+                .unwrap_err()
+                .contains("doesn't track")
+        );
+    }
+
+    #[test]
+    fn renames_the_remote_branch_too() {
+        let (origin, ours, _theirs) = shared("rename-remote");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        ours.write("f.txt", "f\n");
+        ours.commit_all("feature");
+        ours.git(&["push", "-q", "-u", "origin", "feature"]);
+
+        rename_branch(&ours.dir, "feature", "topic", true, &mut no_progress).unwrap();
+        assert!(rev(&origin.dir, "refs/heads/topic").is_some());
+        assert!(rev(&origin.dir, "refs/heads/feature").is_none());
+        let b = branches(&ours.dir).unwrap();
+        let topic = b.local.iter().find(|x| x.name == "topic").unwrap();
+        assert_eq!(topic.upstream.as_deref(), Some("origin/topic"));
+        assert!(!b.remote.iter().any(|x| x.name == "origin/feature"));
+    }
+
+    #[test]
+    fn sets_and_clears_upstreams() {
+        let (_origin, ours, _theirs) = shared("set-upstream");
+        ours.git(&["switch", "-q", "-c", "feature"]);
+        set_upstream(&ours.dir, "feature", Some("origin/main")).unwrap();
+        let upstream = |repo: &TestRepo| {
+            branches(&repo.dir)
+                .unwrap()
+                .local
+                .into_iter()
+                .find(|x| x.name == "feature")
+                .unwrap()
+                .upstream
+        };
+        assert_eq!(upstream(&ours).as_deref(), Some("origin/main"));
+        set_upstream(&ours.dir, "feature", None).unwrap();
+        assert_eq!(upstream(&ours), None);
+        assert!(set_upstream(&ours.dir, "feature", Some("origin/missing")).is_err());
+        assert!(set_upstream(&ours.dir, "feature", Some("--all")).is_err());
     }
 
     #[test]

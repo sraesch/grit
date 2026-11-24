@@ -40,7 +40,7 @@ import {
 } from "../remote";
 import { stashApplySummary, stashName } from "../stash";
 import { relativeTime } from "../util";
-import { CreateBranchDialog } from "./BranchDialogs";
+import { CreateBranchDialog, RenameBranchDialog, UpstreamDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { PickDialog } from "./CommitOpDialog";
@@ -143,6 +143,9 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [creatingTag, setCreatingTag] = useState<{ start: string; label: string; short: string } | null>(null);
   // The tag whose deletion is being confirmed, here or on a remote.
   const [deletingTag, setDeletingTag] = useState<{ tag: Branch; onRemote: boolean } | null>(null);
+  // The local branch being renamed, or whose upstream is being chosen.
+  const [renaming, setRenaming] = useState<Branch | null>(null);
+  const [settingUpstream, setSettingUpstream] = useState<Branch | null>(null);
   // The commit the current branch is being reset to.
   const [resetting, setResetting] = useState<LogEntry | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
@@ -439,6 +442,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setResetting(null);
       setCreatingTag(null);
       setDeletingTag(null);
+      setRenaming(null);
+      setSettingUpstream(null);
     }
   }, [active]);
 
@@ -681,6 +686,60 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const closeCommitOp = useCallback(() => setCommitOp(null), []);
   const closeReset = useCallback(() => setResetting(null), []);
   const closeCreateTag = useCallback(() => setCreatingTag(null), []);
+  const closeRename = useCallback(() => setRenaming(null), []);
+  const closeUpstream = useCallback(() => setSettingUpstream(null), []);
+
+  /** The remote branch a local branch tracks, if it still exists. */
+  function trackedRemoteBranch(branch: Branch): string | null {
+    return branch.upstream && branches?.remote.some((b) => b.name === branch.upstream) ? branch.upstream : null;
+  }
+
+  // Renaming only here is quick and the dialog shows its errors; renaming on the remote too runs
+  // like a push, with progress, and reports errors like one.
+  async function renameBranch(branch: Branch, newName: string, withRemote: boolean) {
+    if (!withRemote) {
+      await api.renameBranch(root, branch.name, newName, false);
+      setRenaming(null);
+      onClearError();
+      setNotice({ kind: "info", text: `Renamed ${branch.name} to ${newName}.` });
+      refreshAll();
+      return;
+    }
+    setRenaming(null);
+    const remote = splitRemoteBranch(branch.upstream ?? "", branches?.remotes ?? [])?.remote ?? "its remote";
+    try {
+      const done = await runRemote({ label: `Renaming ${branch.name} to ${newName} on ${remote}…`, background: false }, () =>
+        api.renameBranch(root, branch.name, newName, true).then(() => true),
+      );
+      if (!done || !mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `Renamed ${branch.name} to ${newName}, here and on ${remote}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    }
+  }
+
+  // The dialog shows errors itself, so this rejects instead of reporting them.
+  async function setUpstream(branch: Branch, upstream: string) {
+    await api.setUpstream(root, branch.name, upstream);
+    setSettingUpstream(null);
+    onClearError();
+    setNotice({ kind: "info", text: `${branch.name} now tracks ${upstream}.` });
+    refreshAll();
+  }
+
+  async function clearUpstream(branch: Branch) {
+    try {
+      await api.setUpstream(root, branch.name, null);
+      if (!mounted.current) return;
+      onClearError();
+      setNotice({ kind: "info", text: `${branch.name} no longer tracks ${branch.upstream}.` });
+    } catch (e) {
+      if (mounted.current) onError(errorMessage(e));
+    } finally {
+      if (mounted.current) refreshAll();
+    }
+  }
   const closeDeleteTag = useCallback(() => setDeletingTag(null), []);
 
   /** Pushes a tag; `created` says it was just created, for the messages. */
@@ -992,11 +1051,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       {deleting && (
         <DeleteBranchDialog
           branch={deleting.branch}
-          remoteBranch={
-            deleting.branch.upstream && branches?.remote.some((b) => b.name === deleting.branch.upstream)
-              ? deleting.branch.upstream
-              : null
-          }
+          remoteBranch={trackedRemoteBranch(deleting.branch)}
           withRemote={deleting.withRemote}
           unmerged={deleting.unmerged}
           onDelete={deleteBranch}
@@ -1048,6 +1103,24 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           branch={status?.branch ?? null}
           onPick={(options) => pickNow(commitOp.kind, options)}
           onClose={closeCommitOp}
+        />
+      )}
+      {renaming && (
+        <RenameBranchDialog
+          key={renaming.name}
+          branch={renaming}
+          remoteBranch={trackedRemoteBranch(renaming)}
+          onRename={renameBranch}
+          onClose={closeRename}
+        />
+      )}
+      {settingUpstream && (
+        <UpstreamDialog
+          key={settingUpstream.name}
+          branch={settingUpstream}
+          remoteBranches={(branches?.remote ?? []).map((b) => b.name)}
+          onSet={setUpstream}
+          onClose={closeUpstream}
         />
       )}
       {creatingTag && (
@@ -1128,6 +1201,10 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onCopyName={(name) => copyText(name)}
           onDeleteRemoteBranch={askDeleteRemoteBranch}
           onPushTag={(tag, remote) => pushTag(tag.name, remote)}
+          onCreateBranchFrom={(start) => setCreatingBranch({ start, label: start, short: start })}
+          onRenameBranch={setRenaming}
+          onSetUpstream={setSettingUpstream}
+          onClearUpstream={clearUpstream}
           onDeleteTag={(tag) => setDeletingTag({ tag, onRemote: false })}
           onDeleteRemoteTag={(tag) => setDeletingTag({ tag, onRemote: true })}
         />

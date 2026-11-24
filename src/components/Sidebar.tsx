@@ -42,6 +42,13 @@ interface SidebarProps {
   /** Asks to delete a remote branch on its remote; the owner confirms. */
   onDeleteRemoteBranch: (branch: Branch) => void;
   onPushTag: (tag: Branch, remote: string) => void;
+  /** Asks for the name of a new branch starting at `start`, a local or remote branch. */
+  onCreateBranchFrom: (start: string) => void;
+  /** Asks for a local branch's new name. */
+  onRenameBranch: (branch: Branch) => void;
+  /** Asks which remote branch a local branch tracks. */
+  onSetUpstream: (branch: Branch) => void;
+  onClearUpstream: (branch: Branch) => void;
   /** Asks to delete a tag; the owner confirms. */
   onDeleteTag: (tag: Branch) => void;
   /** Asks to delete a tag on a remote; the owner confirms and asks which remote. */
@@ -337,6 +344,10 @@ export function Sidebar({
   onCopyName,
   onDeleteRemoteBranch,
   onPushTag,
+  onCreateBranchFrom,
+  onRenameBranch,
+  onSetUpstream,
+  onClearUpstream,
   onDeleteTag,
   onDeleteRemoteTag,
 }: SidebarProps) {
@@ -369,6 +380,7 @@ export function Sidebar({
         title: isCurrent ? "The current branch tracks this one" : "Switch to a local branch tracking this one",
         onSelect: () => branches && onSwitch(targetForRemote(branches, b)),
       },
+      { label: "New Branch from Here…", onSelect: () => onCreateBranchFrom(b.name) },
       {
         label: current ? `Merge into ${current}…` : "Merge into Current Branch…",
         disabled: !!mergeBlocked,
@@ -532,6 +544,18 @@ export function Sidebar({
               title: menu.branch.current ? "This is the current branch" : undefined,
               onSelect: () => onSwitch({ kind: "local", name: menu.branch.name }),
             },
+            { label: "New Branch from Here…", onSelect: () => onCreateBranchFrom(menu.branch.name) },
+            { label: "Rename…", onSelect: () => onRenameBranch(menu.branch) },
+            SEPARATOR,
+            {
+              label: "Set Upstream…",
+              title: menu.branch.upstream ? `Tracks ${menu.branch.upstream}` : "Tracks no remote branch",
+              onSelect: () => onSetUpstream(menu.branch),
+            },
+            ...(menu.branch.upstream
+              ? [{ label: "Clear Upstream", onSelect: () => onClearUpstream(menu.branch) }]
+              : []),
+            SEPARATOR,
             {
               label: "Delete Branch…",
               danger: true,
