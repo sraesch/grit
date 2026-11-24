@@ -284,6 +284,19 @@ export interface PickResult {
   conflicts: number;
 }
 
+/** soft keeps the changes staged, mixed keeps them unstaged, hard discards them. */
+export type ResetMode = "soft" | "mixed" | "hard";
+
+/** What resetting to a commit does to the current branch. */
+export interface ResetPreview {
+  /** Commits the branch contains now and no longer will. */
+  dropped: number;
+  /** Of those, the commits that are on a remote branch, i.e. were pushed. */
+  droppedPushed: number;
+  /** Commits the branch will contain that it doesn't now. */
+  added: number;
+}
+
 /** How far HEAD and another branch or commit have diverged. */
 export interface Divergence {
   /** Commits only on HEAD. */
@@ -439,6 +452,9 @@ export const api = {
    * rejecting. With `noCommit`, the revert stays in progress until its staged changes are committed.
    */
   revert: (repo: string, options: PickOptions) => invoke<PickResult>("revert", { repo, ...options }),
+  resetPreview: (repo: string, target: string) => invoke<ResetPreview>("get_reset_preview", { repo, target }),
+  /** Moves the current branch (or detached HEAD) to `target`; resolves to the commit it pointed at before. */
+  reset: (repo: string, target: string, mode: ResetMode) => invoke<string>("reset", { repo, target, mode }),
   /** Aborts the merge, squash merge, rebase, cherry-pick or revert in progress. */
   abortOperation: (repo: string) => invoke<void>("abort_operation", { repo }),
   /** Continues the operation in progress once its conflicts are resolved; a merge is committed. */

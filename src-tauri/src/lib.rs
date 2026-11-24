@@ -14,7 +14,8 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 use git::{
     Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
     MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult, PushOptions,
-    PushResult, RebaseOptions, RebaseResult, RepoInfo, Stash, StashApplyResult, StashOptions, Status,
+    PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult, StashOptions,
+    Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -404,6 +405,16 @@ async fn revert(repo: String, commit: String, no_commit: bool, mainline: Option<
 }
 
 #[tauri::command]
+async fn get_reset_preview(repo: String, target: String) -> GitResult<ResetPreview> {
+    blocking(move || git::reset_preview(&PathBuf::from(repo), &target)).await
+}
+
+#[tauri::command]
+async fn reset(repo: String, target: String, mode: ResetMode) -> GitResult<String> {
+    blocking(move || git::reset(&PathBuf::from(repo), &target, mode)).await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -487,6 +498,8 @@ pub fn run() {
             merge,
             cherry_pick,
             revert,
+            get_reset_preview,
+            reset,
             abort_operation,
             continue_operation,
             skip_operation,
