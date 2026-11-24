@@ -17,6 +17,7 @@ import {
   Remote,
   RepoChanged,
   RepoInfo,
+  ResetMode,
   Stash,
   StashOptions,
   Status,
@@ -43,6 +44,7 @@ import { CreateBranchDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
 import { PickDialog } from "./CommitOpDialog";
+import { ResetDialog } from "./ResetDialog";
 import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DeleteBranchDialog, DeleteRemoteBranchDialog } from "./DeleteBranchDialog";
 import { AddRemoteDialog, EditRemoteDialog, RemoveRemoteDialog } from "./RemoteManageDialogs";
@@ -136,6 +138,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [creatingBranch, setCreatingBranch] = useState<{ start: string; label: string; short: string } | null>(null);
   // The commit being cherry-picked or reverted.
   const [commitOp, setCommitOp] = useState<{ kind: PickKind; entry: LogEntry } | null>(null);
+  // The commit the current branch is being reset to.
+  const [resetting, setResetting] = useState<LogEntry | null>(null);
   const [remoteOp, setRemoteOp] = useState<RemoteOp | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -427,6 +431,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setCommitMenuAt(null);
       setCreatingBranch(null);
       setCommitOp(null);
+      setResetting(null);
     }
   }, [active]);
 
@@ -621,7 +626,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         : status.conflicted.length > 0
           ? "Resolve the conflicts first"
           : null;
-    return commitMenu(entry, { branches, headSha, operationBlocked, busy }).map((item) =>
+    const branch = status?.branch ?? null;
+    return commitMenu(entry, { branches, branch, headSha, operationBlocked, busy }).map((item) =>
       item === "separator"
         ? SEPARATOR
         : {
@@ -649,6 +655,9 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       case "revert":
         setCommitOp({ kind: action, entry });
         break;
+      case "reset":
+        setResetting(entry);
+        break;
       case "copy-sha":
         copyText(entry.sha);
         break;
@@ -660,6 +669,27 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
 
   const closeCreateBranch = useCallback(() => setCreatingBranch(null), []);
   const closeCommitOp = useCallback(() => setCommitOp(null), []);
+  const closeReset = useCallback(() => setResetting(null), []);
+
+  const resetNow = useCallback(
+    async (entry: LogEntry, mode: ResetMode) => {
+      setResetting(null);
+      const branch = latest.current.status?.branch ?? "HEAD";
+      const short = entry.sha.slice(0, 7);
+      try {
+        const old = await runRemote({ label: `Resetting ${branch} to ${short}…`, background: false }, () =>
+          api.reset(root, entry.sha, mode),
+        );
+        if (!old || !mounted.current) return;
+        onClearError();
+        // The commit it pointed at brings it back if the reset was a mistake.
+        setNotice({ kind: "info", text: `Reset ${branch} to ${short} (was ${old.slice(0, 7)}).` });
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
 
   const pickNow = useCallback(
     async (kind: PickKind, options: PickOptions) => {
@@ -946,6 +976,17 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           branch={status?.branch ?? null}
           onPick={(options) => pickNow(commitOp.kind, options)}
           onClose={closeCommitOp}
+        />
+      )}
+      {resetting && status && (
+        <ResetDialog
+          key={resetting.sha}
+          repo={root}
+          entry={resetting}
+          branch={status.branch}
+          status={status}
+          onReset={(mode) => resetNow(resetting, mode)}
+          onClose={closeReset}
         />
       )}
       {commitMenuAt && (

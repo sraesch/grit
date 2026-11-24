@@ -235,6 +235,11 @@ export interface PickPrefs {
   noCommit: boolean;
 }
 
+export interface ResetPrefs {
+  /** Never "hard": discarding changes is chosen each time. */
+  mode: "soft" | "mixed";
+}
+
 export interface CreateBranchPrefs {
   /** Switch to the new branch. */
   checkout: boolean;
@@ -287,6 +292,11 @@ export const prefs = {
   saveCherryPick: (p: PickPrefs) => savePrefs("cherryPickOptions", p),
   revert: () => readPrefs<PickPrefs>("revertOptions", { noCommit: false }),
   saveRevert: (p: PickPrefs) => savePrefs("revertOptions", p),
+  reset: (): ResetPrefs => {
+    const stored = readPrefs<ResetPrefs>("resetOptions", { mode: "mixed" });
+    return { mode: stored.mode === "soft" ? "soft" : "mixed" };
+  },
+  saveReset: (p: ResetPrefs) => savePrefs("resetOptions", p),
   createBranch: () => readPrefs<CreateBranchPrefs>("createBranchOptions", { checkout: true }),
   saveCreateBranch: (p: CreateBranchPrefs) => savePrefs("createBranchOptions", p),
 };

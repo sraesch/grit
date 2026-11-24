@@ -2242,6 +2242,73 @@ fn apply_commit(repo: &Path, kind: OperationKind, opts: &PickOptions) -> GitResu
 }
 
 // ---------------------------------------------------------------------------
+// Reset
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResetMode {
+    /// Keep the changes of the dropped commits and the local changes staged.
+    Soft,
+    /// Keep them as unstaged changes.
+    Mixed,
+    /// Discard them: the working tree matches the commit.
+    Hard,
+}
+
+/// What resetting HEAD to a commit does to the current branch.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetPreview {
+    /// Commits the branch contains now and no longer will.
+    pub dropped: u32,
+    /// Of those, the commits that are on a remote branch, i.e. were pushed.
+    pub dropped_pushed: u32,
+    /// Commits the branch will contain that it doesn't now (when the commit isn't an ancestor of HEAD).
+    pub added: u32,
+}
+
+fn resolve_commit(repo: &Path, commit: &str) -> GitResult<String> {
+    let commit = plain_arg(commit, "commit")?;
+    rev(repo, &format!("{commit}^{{commit}}")).ok_or_else(|| format!("'{commit}' is not a commit."))
+}
+
+/// What `reset` to `target` would drop from (and add to) the current branch.
+pub fn reset_preview(repo: &Path, target: &str) -> GitResult<ResetPreview> {
+    let sha = resolve_commit(repo, target)?;
+    let dropped = count(repo, &format!("{sha}..HEAD"));
+    let unpushed = run(repo, &["rev-list", "--count", "HEAD", "--not", &sha, "--remotes"])
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(dropped);
+    Ok(ResetPreview {
+        dropped,
+        dropped_pushed: dropped.saturating_sub(unpushed),
+        added: count(repo, &format!("HEAD..{sha}")),
+    })
+}
+
+/// Moves the current branch (or the detached HEAD) to `target`. Returns the commit it pointed at
+/// before, which brings it back if the reset was a mistake.
+pub fn reset(repo: &Path, target: &str, mode: ResetMode) -> GitResult<String> {
+    let sha = resolve_commit(repo, target)?;
+    if let Some(op) = operation(&git_dir(repo)?) {
+        return Err(format!(
+            "A {} is in progress. Finish or abort it before resetting.",
+            op.kind.label()
+        ));
+    }
+    let old = rev(repo, "HEAD").ok_or("There are no commits to reset yet.")?;
+    let flag = match mode {
+        ResetMode::Soft => "--soft",
+        ResetMode::Mixed => "--mixed",
+        ResetMode::Hard => "--hard",
+    };
+    run(repo, &["reset", "-q", flag, &sha])?;
+    Ok(old)
+}
+
+// ---------------------------------------------------------------------------
 // Merge, rebase, cherry-pick and revert in progress
 // ---------------------------------------------------------------------------
 
@@ -4870,6 +4937,70 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         };
         assert_eq!(revert(&repo.dir, &opts).unwrap().outcome, PickOutcome::Committed);
         assert!(!repo.dir.join("feature.txt").exists());
+    }
+
+    #[test]
+    fn resets_in_each_mode() {
+        let repo = TestRepo::new("reset");
+        let first = repo.commit_all_initial();
+        repo.write("g.txt", "g\n");
+        let second = repo.commit_all("add g");
+        repo.write("local.txt", "local\n");
+        repo.git(&["add", "local.txt"]);
+
+        let preview = reset_preview(&repo.dir, &first).unwrap();
+        assert_eq!(
+            preview,
+            ResetPreview {
+                dropped: 1,
+                dropped_pushed: 0,
+                added: 0
+            }
+        );
+
+        // Soft: the dropped commit's changes join the staged local changes.
+        assert_eq!(reset(&repo.dir, &first, ResetMode::Soft).unwrap(), second);
+        assert_eq!(repo.head(), first);
+        let st = status(&repo.dir).unwrap();
+        assert_eq!(st.staged.len(), 2);
+        assert!(st.unstaged.is_empty());
+
+        // Mixed: everything becomes unstaged.
+        reset(&repo.dir, &second, ResetMode::Soft).unwrap();
+        reset(&repo.dir, &first, ResetMode::Mixed).unwrap();
+        let st = status(&repo.dir).unwrap();
+        assert!(st.staged.is_empty());
+        assert_eq!(st.unstaged.len(), 2);
+
+        // Hard: tracked changes are gone; the reset can be undone with the returned sha.
+        repo.git(&["add", "-A"]);
+        assert_eq!(reset(&repo.dir, &first, ResetMode::Hard).unwrap(), first);
+        assert!(!repo.dir.join("g.txt").exists());
+        assert!(!repo.dir.join("local.txt").exists());
+        reset(&repo.dir, &second, ResetMode::Hard).unwrap();
+        assert_eq!(repo.read("g.txt"), "g\n");
+
+        // Moving to a commit HEAD doesn't contain adds it.
+        assert_eq!(reset_preview(&repo.dir, &second).unwrap().dropped, 0);
+        repo.git(&["reset", "-q", "--hard", &first]);
+        assert_eq!(reset_preview(&repo.dir, &second).unwrap().added, 1);
+
+        assert!(reset(&repo.dir, "--hard", ResetMode::Hard).is_err());
+        assert!(reset(&repo.dir, "no-such-commit", ResetMode::Hard).is_err());
+    }
+
+    #[test]
+    fn reset_preview_counts_pushed_commits() {
+        let (_origin, ours, _theirs) = shared("reset-pushed");
+        let base = ours.head();
+        ours.write("a.txt", "a\n");
+        ours.commit_all("pushed");
+        ours.git(&["push", "-q", "origin", "main"]);
+        ours.write("b.txt", "b\n");
+        ours.commit_all("local only");
+        let preview = reset_preview(&ours.dir, &base).unwrap();
+        assert_eq!(preview.dropped, 2);
+        assert_eq!(preview.dropped_pushed, 1);
     }
 
     #[test]

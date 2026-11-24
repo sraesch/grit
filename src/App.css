@@ -1609,6 +1609,17 @@ body.resizing-vertical {
   font-size: 13px;
   color: var(--text);
 }
+.reset-mode {
+  align-items: flex-start;
+}
+.reset-mode input {
+  margin-top: 2px;
+}
+.reset-mode-description {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .ignore-pattern {
   margin-left: auto;
   padding-left: 12px;

@@ -1,9 +1,16 @@
-import { Branches, LogEntry, PickResult } from "./api";
+import { Branches, LogEntry, PickResult, ResetMode, ResetPreview } from "./api";
 import { SwitchTarget, targetForCommit } from "./branches";
 import { NoticeKind, plural } from "./remote";
 
 /** What an item of a commit's context menu does. */
-export type CommitAction = "checkout" | "create-branch" | "cherry-pick" | "revert" | "copy-sha" | "copy-message";
+export type CommitAction =
+  | "checkout"
+  | "create-branch"
+  | "cherry-pick"
+  | "revert"
+  | "reset"
+  | "copy-sha"
+  | "copy-message";
 
 /** Applying a commit's changes, or undoing them. */
 export type PickKind = "cherry-pick" | "revert";
@@ -22,6 +29,8 @@ export type CommitMenuEntry = CommitMenuItem | "separator";
 
 export interface CommitMenuContext {
   branches: Branches | null;
+  /** The current branch; null for a detached HEAD. */
+  branch: string | null;
   /** The checked-out commit; null before the first commit. */
   headSha: string | null;
   /** Why commits can't be cherry-picked, reverted or reset onto right now, e.g. a merge in progress; null when they can. */
@@ -68,6 +77,12 @@ export function commitMenu(entry: LogEntry, ctx: CommitMenuContext): CommitMenuE
       blocked: changeBlocked,
       title: "Create a commit that undoes the changes of this commit",
     },
+    {
+      action: "reset",
+      label: `Reset ${ctx.branch ?? "HEAD"} to Here…`,
+      blocked: isHead ? "This commit is checked out" : changeBlocked,
+      title: `Move ${ctx.branch ?? "the detached HEAD"} to this commit`,
+    },
     "separator",
     { action: "copy-sha", label: "Copy SHA", blocked: null },
     { action: "copy-message", label: "Copy Message", blocked: null },
@@ -104,4 +119,38 @@ export function pickSummary(
         text: `Applied the changes of ${short} with conflicts in ${files}. Resolve them in Local changes, then commit.`,
       };
   }
+}
+
+export const RESET_MODES: { mode: ResetMode; label: string; description: string }[] = [
+  {
+    mode: "soft",
+    label: "Soft",
+    description: "Keep the changes of the dropped commits and your local changes staged.",
+  },
+  {
+    mode: "mixed",
+    label: "Mixed",
+    description: "Keep the changes of the dropped commits and your local changes, unstaged.",
+  },
+  {
+    mode: "hard",
+    label: "Hard",
+    description: "Discard the changes of the dropped commits and all local changes to tracked files.",
+  },
+];
+
+/** What resetting `branch` does to its commits, e.g. "2 commits will no longer be on main." */
+export function resetPreviewText(preview: ResetPreview, branch: string): string {
+  const { dropped, added } = preview;
+  if (dropped === 0 && added === 0) return `${branch} already points at this commit.`;
+  if (dropped === 0) return `${branch} moves forward by ${plural(added, "commit")}.`;
+  const gone = `${plural(dropped, "commit")} will no longer be on ${branch}`;
+  return added > 0 ? `${gone}, and ${plural(added, "commit")} it doesn't contain yet will be.` : `${gone}.`;
+}
+
+/** Warns before dropping commits that were pushed; null when none are. */
+export function resetPushedWarning(preview: ResetPreview, branch: string): string | null {
+  const n = preview.droppedPushed;
+  if (n === 0) return null;
+  return `${plural(n, "commit")} that ${n === 1 ? "was" : "were"} already pushed will be dropped from ${branch}. Pushing ${branch} afterwards needs a force push, and others may still build on ${n === 1 ? "it" : "them"}.`;
 }

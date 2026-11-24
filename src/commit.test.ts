@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Branches } from "./api";
-import { CommitMenuItem, commitMenu, pickSummary } from "./commit";
+import { CommitMenuItem, commitMenu, pickSummary, resetPreviewText, resetPushedWarning } from "./commit";
 import { makeCommit } from "./test/tauri";
 
 const branches: Branches = {
@@ -13,7 +13,7 @@ const branches: Branches = {
   remotes: [{ name: "origin", url: "https://example.com/repo.git" }],
 };
 
-const base = { branches, headSha: "c2", operationBlocked: null };
+const base = { branches, branch: "main", headSha: "c2", operationBlocked: null };
 
 function item(items: ReturnType<typeof commitMenu>, action: string): CommitMenuItem {
   const found = items.find((i): i is CommitMenuItem => i !== "separator" && i.action === action);
@@ -55,7 +55,7 @@ describe("commitMenu", () => {
 });
 
 describe("cherry-pick", () => {
-  const ctx = { branches, headSha: "c2", operationBlocked: null, busy: null };
+  const ctx = { ...base, busy: null };
 
   it("is offered for other commits unless an operation is in progress", () => {
     const head = makeCommit("c2", "Head", { refs: [{ name: "main", kind: "local", current: true }] });
@@ -82,7 +82,7 @@ describe("cherry-pick", () => {
 });
 
 describe("revert", () => {
-  const ctx = { branches, headSha: "c2", operationBlocked: null, busy: null };
+  const ctx = { ...base, busy: null };
 
   it("is offered for any commit, HEAD too", () => {
     const head = makeCommit("c2", "Head", { refs: [{ name: "main", kind: "local", current: true }] });
@@ -96,6 +96,36 @@ describe("revert", () => {
     );
     expect(pickSummary("revert", { outcome: "conflicts", conflicts: 1 }, "abc1234", "main").text).toMatch(
       /^Reverting abc1234 stopped with conflicts in 1 file\./,
+    );
+  });
+});
+
+describe("reset", () => {
+  const ctx = { ...base, busy: null };
+
+  it("names the branch it moves", () => {
+    expect(item(commitMenu(makeCommit("c0", "Old"), ctx), "reset")).toMatchObject({
+      label: "Reset main to Here…",
+      blocked: null,
+    });
+    expect(item(commitMenu(makeCommit("c0", "Old"), { ...ctx, branch: null }), "reset").label).toBe(
+      "Reset HEAD to Here…",
+    );
+    const head = makeCommit("c2", "Head", { refs: [{ name: "main", kind: "local", current: true }] });
+    expect(item(commitMenu(head, ctx), "reset").blocked).toBe("This commit is checked out");
+  });
+
+  it("describes what the branch loses and gains", () => {
+    expect(resetPreviewText({ dropped: 2, droppedPushed: 0, added: 0 }, "main")).toBe(
+      "2 commits will no longer be on main.",
+    );
+    expect(resetPreviewText({ dropped: 0, droppedPushed: 0, added: 1 }, "main")).toBe("main moves forward by 1 commit.");
+    expect(resetPreviewText({ dropped: 1, droppedPushed: 0, added: 3 }, "main")).toBe(
+      "1 commit will no longer be on main, and 3 commits it doesn't contain yet will be.",
+    );
+    expect(resetPushedWarning({ dropped: 2, droppedPushed: 0, added: 0 }, "main")).toBeNull();
+    expect(resetPushedWarning({ dropped: 2, droppedPushed: 2, added: 0 }, "main")).toMatch(
+      /^2 commits that were already pushed/,
     );
   });
 });
