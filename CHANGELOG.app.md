@@ -8,6 +8,14 @@ changes (CI, tests, tooling, refactors).
 
 # What's new
 
+## 0.6.0 — 2026-11-24
+
+- Right-click a commit in the history to check it out, create a branch or tag at it, or copy its SHA or message
+- Cherry-pick or revert commits from the history, with conflicts handled in the banner
+- Reset the current branch to any commit (soft, mixed or hard), with a warning before you drop pushed commits or lose uncommitted changes
+- Create, push and delete tags, and see which commit an annotated tag points at
+- Rename branches, set or clear their upstream, and start a new branch from any local or remote branch
+
 ## 0.5.0 — 2026-11-22
 
 - Stage, unstage or discard single hunks or selected lines of a diff, and discard whole files or folders after a confirmation

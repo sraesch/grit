@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
 ### Added
 
 - Right-clicking a commit in the history opens a menu to check it out (as double-clicking does), create a branch at it, or copy its SHA or message. Shift+F10 or the menu key opens the menu for the selected commit. A new branch can be checked out right away or just created; the choice is remembered
@@ -115,7 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App icon and logo: a lowercase "r" drawn as a branch forking from a commit, shown in the toolbar and on the welcome screen and adapting to light and dark themes
 - About dialog with the app version, logo and a short changelog of what's new in each release
 
-[Unreleased]: https://github.com/sraesch/grit/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sraesch/grit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sraesch/grit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/sraesch/grit/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/sraesch/grit/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/sraesch/grit/compare/v0.4.0...v0.4.1
