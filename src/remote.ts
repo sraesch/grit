@@ -240,6 +240,13 @@ export interface ResetPrefs {
   mode: "soft" | "mixed";
 }
 
+export interface CreateTagPrefs {
+  /** Push the new tag right away. */
+  push: boolean;
+  /** The remote it was pushed to last. */
+  remote: string;
+}
+
 export interface CreateBranchPrefs {
   /** Switch to the new branch. */
   checkout: boolean;
@@ -297,6 +304,8 @@ export const prefs = {
     return { mode: stored.mode === "soft" ? "soft" : "mixed" };
   },
   saveReset: (p: ResetPrefs) => savePrefs("resetOptions", p),
+  createTag: () => readPrefs<CreateTagPrefs>("createTagOptions", { push: false, remote: "" }),
+  saveCreateTag: (p: CreateTagPrefs) => savePrefs("createTagOptions", p),
   createBranch: () => readPrefs<CreateBranchPrefs>("createBranchOptions", { checkout: true }),
   saveCreateBranch: (p: CreateBranchPrefs) => savePrefs("createBranchOptions", p),
 };

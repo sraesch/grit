@@ -415,6 +415,42 @@ async fn reset(repo: String, target: String, mode: ResetMode) -> GitResult<Strin
 }
 
 #[tauri::command]
+async fn create_tag(repo: String, name: String, commit: String, message: Option<String>) -> GitResult<()> {
+    blocking(move || git::create_tag(&PathBuf::from(repo), &name, &commit, message.as_deref())).await
+}
+
+#[tauri::command]
+async fn delete_tag(repo: String, name: String) -> GitResult<()> {
+    blocking(move || git::delete_tag(&PathBuf::from(repo), &name)).await
+}
+
+#[tauri::command]
+async fn push_tag(app: AppHandle, repo: String, remote: String, name: String) -> GitResult<()> {
+    blocking(move || {
+        git::push_tag(
+            &PathBuf::from(&repo),
+            &remote,
+            &name,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_remote_tag(app: AppHandle, repo: String, remote: String, name: String) -> GitResult<()> {
+    blocking(move || {
+        git::delete_remote_tag(
+            &PathBuf::from(&repo),
+            &remote,
+            &name,
+            &mut progress_emitter(app, repo.clone()),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 async fn abort_operation(repo: String) -> GitResult<()> {
     blocking(move || git::abort_operation(&PathBuf::from(repo))).await
 }
@@ -500,6 +536,10 @@ pub fn run() {
             revert,
             get_reset_preview,
             reset,
+            create_tag,
+            delete_tag,
+            push_tag,
+            delete_remote_tag,
             abort_operation,
             continue_operation,
             skip_operation,
