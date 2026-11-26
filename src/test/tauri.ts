@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { FileChange, LogEntry, Stash, Status } from "../api";
+import type { ConflictKind, FileChange, LogEntry, Operation, OperationKind, Stash, Status } from "../api";
 
 type Handler = (args: Record<string, unknown>) => unknown;
 
@@ -23,6 +23,15 @@ export function mockBackend(invoke: ReturnType<typeof vi.fn>, handlers: Record<s
 
 export function file(path: string, status = "M", origPath: string | null = null): FileChange {
   return { path, status, origPath };
+}
+
+/** A conflicted file, by default one that both sides changed. */
+export function conflictFile(path: string, conflict: ConflictKind = "both-modified"): FileChange {
+  return { path, status: "U", origPath: null, conflict };
+}
+
+export function makeOperation(kind: OperationKind, partial: Partial<Operation> = {}): Operation {
+  return { kind, head: null, step: null, total: null, message: null, commit: null, onto: null, ...partial };
 }
 
 export function makeStatus(partial: Partial<Status> = {}): Status {

@@ -12,10 +12,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult, LogEntry,
-    MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult, PushOptions,
-    PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult, StashOptions,
-    Status,
+    Branches, CommitDetails, ConflictSide, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult,
+    LogEntry, MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult,
+    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult,
+    StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -139,6 +139,12 @@ async fn unstage_all(repo: String) -> GitResult<()> {
 #[tauri::command]
 async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> GitResult<()> {
     blocking(move || git::discard(&PathBuf::from(repo), &tracked, &untracked)).await
+}
+
+/// Resolves conflicted files by taking one side completely, and stages them.
+#[tauri::command]
+async fn resolve_conflicts(repo: String, paths: Vec<String>, side: ConflictSide) -> GitResult<()> {
+    blocking(move || git::resolve_conflicts(&PathBuf::from(repo), &paths, side)).await
 }
 
 #[tauri::command]
@@ -534,6 +540,7 @@ pub fn run() {
             unstage,
             unstage_all,
             discard,
+            resolve_conflicts,
             add_to_gitignore,
             apply_selection,
             commit,

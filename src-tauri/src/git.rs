@@ -178,6 +178,37 @@ pub struct FileChange {
     pub orig_path: Option<String>,
     /// Single letter: M, T, A, D, R, C, U (conflict) or ? (untracked).
     pub status: String,
+    /// What the two sides did to a conflicted file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictKind>,
+}
+
+/// How the two sides of a conflict changed the file, from the XY code of `git status`.
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictKind {
+    BothModified,
+    BothAdded,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+    DeletedByUs,
+    DeletedByThem,
+}
+
+impl ConflictKind {
+    fn from_xy(xy: &str) -> Option<Self> {
+        Some(match xy {
+            "UU" => Self::BothModified,
+            "AA" => Self::BothAdded,
+            "DD" => Self::BothDeleted,
+            "AU" => Self::AddedByUs,
+            "UA" => Self::AddedByThem,
+            "DU" => Self::DeletedByUs,
+            "UD" => Self::DeletedByThem,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Serialize, Default)]
@@ -269,6 +300,7 @@ fn parse_status(out: &str) -> Status {
                         path: path.to_string(),
                         orig_path: None,
                         status: "U".into(),
+                        conflict: ConflictKind::from_xy(fields[1]),
                     });
                 }
             }
@@ -276,6 +308,7 @@ fn parse_status(out: &str) -> Status {
                 path: entry[2..].to_string(),
                 orig_path: None,
                 status: "?".into(),
+                conflict: None,
             }),
             _ => {}
         }
@@ -294,6 +327,7 @@ fn push_xy(st: &mut Status, xy: &[u8], path: String, orig_path: Option<String>) 
                 None
             },
             status: (x as char).to_string(),
+            conflict: None,
         });
     }
     if y != b'.' {
@@ -301,6 +335,7 @@ fn push_xy(st: &mut Status, xy: &[u8], path: String, orig_path: Option<String>) 
             path,
             orig_path: if matches!(y, b'R' | b'C') { orig_path } else { None },
             status: (y as char).to_string(),
+            conflict: None,
         });
     }
 }
@@ -504,12 +539,14 @@ fn parse_name_status(out: &str) -> Vec<FileChange> {
                 path: new.into(),
                 orig_path: Some(old.into()),
                 status: status.to_string(),
+                conflict: None,
             });
         } else if let Some(path) = tokens.next() {
             files.push(FileChange {
                 path: path.into(),
                 orig_path: None,
                 status: status.to_string(),
+                conflict: None,
             });
         }
     }
@@ -803,6 +840,141 @@ pub fn discard(repo: &Path, tracked: &[String], untracked: &[String]) -> GitResu
     }
     Ok(())
 }
+
+/// One version of a conflicted file in the index.
+#[derive(Debug, PartialEq, Clone)]
+struct StageEntry {
+    mode: String,
+    sha: String,
+}
+
+/// The versions of a conflicted file: the common base (stage 1), ours (2) and theirs (3).
+/// A side that deleted the file, or never had it, has none.
+#[derive(Debug, PartialEq, Default)]
+struct Unmerged {
+    path: String,
+    base: Option<StageEntry>,
+    ours: Option<StageEntry>,
+    theirs: Option<StageEntry>,
+}
+
+/// Parses `ls-files -u -z`: `<mode> <sha> <stage>\t<path>\0`, the stages of a path in a row.
+fn parse_unmerged(out: &str) -> Vec<Unmerged> {
+    let mut files: Vec<Unmerged> = Vec::new();
+    for record in out.split('\0').filter(|r| !r.is_empty()) {
+        let Some((info, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let mut fields = info.split(' ');
+        let (Some(mode), Some(sha), Some(stage)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if files.last().is_none_or(|f| f.path != path) {
+            files.push(Unmerged {
+                path: path.to_string(),
+                ..Unmerged::default()
+            });
+        }
+        let file = files.last_mut().expect("just pushed");
+        let entry = Some(StageEntry {
+            mode: mode.to_string(),
+            sha: sha.to_string(),
+        });
+        match stage {
+            "1" => file.base = entry,
+            "2" => file.ours = entry,
+            "3" => file.theirs = entry,
+            _ => {}
+        }
+    }
+    files
+}
+
+/// The conflicted files among `paths` (all of them without paths), with their versions in the index.
+fn unmerged(repo: &Path, paths: &[String]) -> GitResult<Vec<Unmerged>> {
+    let mut args = vec!["--literal-pathspecs", "ls-files", "-u", "-z", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(parse_unmerged(&run(repo, &args)?))
+}
+
+/// Which version of a conflicted file to keep. During a rebase, ours is the branch being rebased
+/// onto and theirs the commit being replayed.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictSide {
+    Ours,
+    Theirs,
+}
+
+/// Resolves conflicted files by taking one side completely, and stages the result. Where that
+/// side deleted the file (or never had it), the file is removed. Paths are taken literally, and
+/// nothing changes unless every one of them is conflicted.
+pub fn resolve_conflicts(repo: &Path, paths: &[String], side: ConflictSide) -> GitResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let entries = unmerged(repo, paths)?;
+    if let Some(path) = paths.iter().find(|p| !entries.iter().any(|e| e.path == **p)) {
+        return Err(format!("{path} has no conflicts to resolve."));
+    }
+    let (mut keep, mut remove) = (Vec::new(), Vec::new());
+    // A literal pathspec still matches everything inside a folder of that name: only take what was asked for.
+    for entry in entries.iter().filter(|e| paths.contains(&e.path)) {
+        let version = match side {
+            ConflictSide::Ours => &entry.ours,
+            ConflictSide::Theirs => &entry.theirs,
+        };
+        match version {
+            Some(version) => keep.push((entry.path.as_str(), version)),
+            None => remove.push(entry.path.as_str()),
+        }
+    }
+    stage_resolved(repo, &keep)?;
+    if !remove.is_empty() {
+        // Forced: the working file holds the other side's version, or conflict markers.
+        let mut args = vec!["--literal-pathspecs", "rm", "-f", "-q", "--"];
+        args.extend(remove);
+        run(repo, &args)?;
+    }
+    Ok(())
+}
+
+/// Stages one version of each conflicted path in place of its stages and checks it out. Unlike
+/// `git checkout --ours` followed by `git add`, this takes the version's exact mode and content:
+/// nothing is read back from the working tree, where the mode may not be recorded (Windows) and
+/// line endings would be converted again.
+fn stage_resolved(repo: &Path, entries: &[(&str, &StageEntry)]) -> GitResult<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let (mut index_info, mut checkout) = (String::new(), String::new());
+    for (path, version) in entries {
+        index_info.push_str(&format!("{} {}\t{path}\0", version.mode, version.sha));
+        // Of a submodule only the commit is staged: its working tree is not touched.
+        if version.mode != GITLINK_MODE {
+            checkout.push_str(path);
+            checkout.push('\0');
+        }
+    }
+    run_with(
+        repo,
+        &["update-index", "--add", "-z", "--index-info"],
+        Some(&index_info),
+        &[0],
+    )?;
+    if !checkout.is_empty() {
+        run_with(
+            repo,
+            &["checkout-index", "-f", "-u", "-z", "--stdin"],
+            Some(&checkout),
+            &[0],
+        )?;
+    }
+    Ok(())
+}
+
+/// The file mode of a submodule's commit in the index.
+const GITLINK_MODE: &str = "160000";
 
 /// What to do with the selected parts of a diff.
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -2480,6 +2652,11 @@ pub struct Operation {
     pub total: Option<u32>,
     /// The prepared commit message (`MERGE_MSG` or `SQUASH_MSG` without comments), for merges.
     pub message: Option<String>,
+    /// The commit the other side of a conflict comes from: the one being merged, replayed by a
+    /// rebase, cherry-picked or reverted. Unknown for a squash merge and a merge of several branches.
+    pub commit: Option<String>,
+    /// The commit a rebase replays the branch onto.
+    pub onto: Option<String>,
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
@@ -2497,7 +2674,11 @@ fn operation(git_dir: &Path) -> Option<Operation> {
         step: None,
         total: None,
         message: None,
+        commit: None,
+        onto: None,
     };
+    // The commit a state file names; a merge of several branches lists more than one.
+    let commit = |file: &str| read_trimmed(&git_dir.join(file)).filter(|sha| !sha.contains(char::is_whitespace));
     // A rebase that stops on a picked commit also leaves CHERRY_PICK_HEAD behind, so check it first.
     for (dir, step_file, total_file) in [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")] {
         let dir = git_dir.join(dir);
@@ -2509,6 +2690,10 @@ fn operation(git_dir: &Path) -> Option<Operation> {
                     .map(|h| h.strip_prefix("refs/heads/").unwrap_or(&h).to_string()),
                 step: number(step_file),
                 total: number(total_file),
+                commit: commit("REBASE_HEAD")
+                    .or_else(|| read_trimmed(&dir.join("stopped-sha")))
+                    .or_else(|| read_trimmed(&dir.join("original-commit"))),
+                onto: read_trimmed(&dir.join("onto")),
                 ..blank(OperationKind::Rebase)
             });
         }
@@ -2521,14 +2706,21 @@ fn operation(git_dir: &Path) -> Option<Operation> {
     if git_dir.join("MERGE_HEAD").exists() {
         return Some(Operation {
             message: message("MERGE_MSG"),
+            commit: commit("MERGE_HEAD"),
             ..blank(OperationKind::Merge)
         });
     }
     if git_dir.join("CHERRY_PICK_HEAD").exists() {
-        return Some(blank(OperationKind::CherryPick));
+        return Some(Operation {
+            commit: commit("CHERRY_PICK_HEAD"),
+            ..blank(OperationKind::CherryPick)
+        });
     }
     if git_dir.join("REVERT_HEAD").exists() {
-        return Some(blank(OperationKind::Revert));
+        return Some(Operation {
+            commit: commit("REVERT_HEAD"),
+            ..blank(OperationKind::Revert)
+        });
     }
     // `merge --squash` leaves only SQUASH_MSG behind; committing or resetting removes it.
     if git_dir.join("SQUASH_MSG").exists() {
@@ -3248,6 +3440,263 @@ mod tests {
         assert_eq!(st.staged.len(), 1);
     }
 
+    /// A merge of `other` into main that stopped on four conflicts: both.txt changed on both
+    /// sides, added.txt added by both, ours-gone.txt deleted on main and changed on `other`,
+    /// theirs-gone.txt the other way round.
+    fn conflicting_merge(name: &str) -> TestRepo {
+        let repo = TestRepo::new(name);
+        for file in ["both.txt", "ours-gone.txt", "theirs-gone.txt"] {
+            repo.write(file, "base\n");
+        }
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        for file in ["both.txt", "added.txt", "ours-gone.txt"] {
+            repo.write(file, "theirs\n");
+        }
+        std::fs::remove_file(repo.dir.join("theirs-gone.txt")).unwrap();
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        for file in ["both.txt", "added.txt", "theirs-gone.txt"] {
+            repo.write(file, "ours\n");
+        }
+        std::fs::remove_file(repo.dir.join("ours-gone.txt")).unwrap();
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+        repo
+    }
+
+    fn conflicted_paths(repo: &TestRepo) -> Vec<String> {
+        let st = status(&repo.dir).unwrap();
+        st.conflicted.into_iter().map(|f| f.path).collect()
+    }
+
+    #[test]
+    fn reports_the_kind_of_each_conflict() {
+        let repo = conflicting_merge("conflict-kinds");
+        let st = status(&repo.dir).unwrap();
+        let kinds: Vec<_> = st
+            .conflicted
+            .iter()
+            .map(|f| (f.path.as_str(), f.conflict.unwrap()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("added.txt", ConflictKind::BothAdded),
+                ("both.txt", ConflictKind::BothModified),
+                ("ours-gone.txt", ConflictKind::DeletedByUs),
+                ("theirs-gone.txt", ConflictKind::DeletedByThem),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_unmerged_entries() {
+        let records = [
+            "100644 aaa 1\tboth.txt",
+            "100644 bbb 2\tboth.txt",
+            "100755 ccc 3\tboth.txt",
+            "100644 ddd 3\tdir/their file.txt",
+            "",
+        ];
+        let files = parse_unmerged(&records.join("\0"));
+        let entry = |mode: &str, sha: &str| {
+            Some(StageEntry {
+                mode: mode.into(),
+                sha: sha.into(),
+            })
+        };
+        assert_eq!(
+            files,
+            vec![
+                Unmerged {
+                    path: "both.txt".into(),
+                    base: entry("100644", "aaa"),
+                    ours: entry("100644", "bbb"),
+                    theirs: entry("100755", "ccc"),
+                },
+                Unmerged {
+                    path: "dir/their file.txt".into(),
+                    base: None,
+                    ours: None,
+                    theirs: entry("100644", "ddd"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_conflicts_with_our_side() {
+        let repo = conflicting_merge("resolve-ours");
+        resolve_conflicts(&repo.dir, &conflicted_paths(&repo), ConflictSide::Ours).unwrap();
+
+        let st = status(&repo.dir).unwrap();
+        assert!(st.conflicted.is_empty());
+        for file in ["both.txt", "added.txt", "theirs-gone.txt"] {
+            assert_eq!(repo.read(file), "ours\n", "{file}");
+        }
+        // The side that deleted the file wins by removing it.
+        assert!(!repo.dir.join("ours-gone.txt").exists());
+        // Our side of every file is what main has already: only the merge itself is left to commit.
+        assert!(st.staged.is_empty() && st.unstaged.is_empty());
+        assert_eq!(st.operation.unwrap().kind, OperationKind::Merge);
+    }
+
+    #[test]
+    fn resolves_conflicts_with_their_side() {
+        let repo = conflicting_merge("resolve-theirs");
+        resolve_conflicts(&repo.dir, &conflicted_paths(&repo), ConflictSide::Theirs).unwrap();
+
+        let st = status(&repo.dir).unwrap();
+        assert!(st.conflicted.is_empty() && st.unstaged.is_empty());
+        for file in ["both.txt", "added.txt", "ours-gone.txt"] {
+            assert_eq!(repo.read(file), "theirs\n", "{file}");
+        }
+        assert!(!repo.dir.join("theirs-gone.txt").exists());
+        // What is staged is exactly the other branch.
+        assert_eq!(repo.git(&["diff", "--cached", "--name-only", "other"]), "");
+    }
+
+    #[test]
+    fn resolves_a_file_renamed_differently_on_each_side() {
+        let repo = TestRepo::new("resolve-renames");
+        repo.write("old.txt", "one\ntwo\nthree\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.git(&["mv", "old.txt", "theirs.txt"]);
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["mv", "old.txt", "ours.txt"]);
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        let st = status(&repo.dir).unwrap();
+        let kinds: Vec<_> = st
+            .conflicted
+            .iter()
+            .map(|f| (f.path.as_str(), f.conflict.unwrap()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("old.txt", ConflictKind::BothDeleted),
+                ("ours.txt", ConflictKind::AddedByUs),
+                ("theirs.txt", ConflictKind::AddedByThem),
+            ]
+        );
+
+        // Each path follows the chosen side on its own, which adds up to that side's rename.
+        resolve_conflicts(&repo.dir, &conflicted_paths(&repo), ConflictSide::Ours).unwrap();
+        assert!(status(&repo.dir).unwrap().conflicted.is_empty());
+        assert_eq!(repo.git(&["ls-files"]), "ours.txt\n");
+        assert!(!repo.dir.join("theirs.txt").exists());
+    }
+
+    #[test]
+    fn their_side_is_the_replayed_commit_during_a_rebase() {
+        let repo = feature_branch("resolve-rebase", true);
+        let main = repo.git(&["rev-parse", "main"]).trim().to_string();
+        let replayed = repo.head();
+        rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap();
+
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.onto.as_deref(), Some(main.as_str()));
+        assert_eq!(op.commit.as_deref(), Some(replayed.as_str()));
+
+        resolve_conflicts(&repo.dir, &["shared.txt".into()], ConflictSide::Ours).unwrap();
+        assert_eq!(repo.read("shared.txt"), "main\n");
+        abort_operation(&repo.dir).unwrap();
+
+        rebase(&repo.dir, &rebase_opts("main", false), &mut no_progress).unwrap();
+        resolve_conflicts(&repo.dir, &["shared.txt".into()], ConflictSide::Theirs).unwrap();
+        assert_eq!(repo.read("shared.txt"), "feature\n");
+        continue_operation(&repo.dir).unwrap();
+        assert!(status(&repo.dir).unwrap().operation.is_none());
+        assert_eq!(repo.git(&["show", "HEAD:shared.txt"]), "feature\n");
+    }
+
+    #[test]
+    fn names_the_commit_being_merged() {
+        let repo = conflicting_merge("merge-commit");
+        let other = repo.git(&["rev-parse", "other"]).trim().to_string();
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.commit.as_deref(), Some(other.as_str()));
+        assert_eq!(op.onto, None);
+    }
+
+    #[test]
+    fn names_the_commit_being_cherry_picked_or_reverted() {
+        let (repo, pick) = diverged_line("pick-commit");
+        assert!(run(&repo.dir, &["cherry-pick", &pick]).is_err());
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.commit.as_deref(), Some(pick.as_str()));
+        abort_operation(&repo.dir).unwrap();
+
+        repo.write("f.txt", "two\n");
+        let two = repo.commit_all("two");
+        repo.write("f.txt", "three\n");
+        repo.commit_all("three");
+        assert!(run(&repo.dir, &["revert", "--no-edit", &two]).is_err());
+        let op = status(&repo.dir).unwrap().operation.unwrap();
+        assert_eq!(op.commit.as_deref(), Some(two.as_str()));
+    }
+
+    #[test]
+    fn resolving_takes_paths_literally() {
+        let repo = TestRepo::new("resolve-literal");
+        let files = ["f[1].txt", "f1.txt"];
+        let write_all = |content: &str| files.iter().for_each(|f| repo.write(f, content));
+        write_all("base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        write_all("theirs\n");
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        write_all("ours\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        // As a pattern, "f[1].txt" would name f1.txt instead.
+        resolve_conflicts(&repo.dir, &["f[1].txt".into()], ConflictSide::Theirs).unwrap();
+        assert_eq!(conflicted_paths(&repo), vec!["f1.txt"]);
+        assert_eq!(repo.read("f[1].txt"), "theirs\n");
+    }
+
+    #[test]
+    fn keeps_the_mode_and_line_endings_of_the_chosen_side() {
+        let repo = TestRepo::new("resolve-exact");
+        // The mode comes from the index alone, as on Windows.
+        repo.git(&["config", "core.fileMode", "false"]);
+        repo.write("run.sh", "echo base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("run.sh", "echo theirs\r\n");
+        repo.git(&["add", "run.sh"]);
+        repo.git(&["update-index", "--chmod=+x", "run.sh"]);
+        commit(&repo.dir, "theirs", false).unwrap();
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("run.sh", "echo ours\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        resolve_conflicts(&repo.dir, &["run.sh".into()], ConflictSide::Theirs).unwrap();
+        assert!(repo.git(&["ls-files", "-s", "run.sh"]).starts_with("100755 "));
+        assert_eq!(repo.git(&["show", ":run.sh"]), "echo theirs\r\n");
+        assert_eq!(repo.read("run.sh"), "echo theirs\r\n");
+    }
+
+    #[test]
+    fn refuses_to_resolve_a_file_without_conflicts() {
+        let repo = conflicting_merge("resolve-refuse");
+        repo.write("plain.txt", "untouched\n");
+        let paths = ["both.txt".to_string(), "plain.txt".to_string()];
+        let err = resolve_conflicts(&repo.dir, &paths, ConflictSide::Theirs).unwrap_err();
+        assert!(err.contains("plain.txt has no conflicts"), "{err}");
+        // Nothing was resolved, not even the file that is conflicted.
+        assert_eq!(conflicted_paths(&repo).len(), 4);
+        assert_eq!(repo.read("plain.txt"), "untouched\n");
+    }
+
     #[test]
     fn shows_detached_head() {
         let repo = TestRepo::new("detached");
@@ -3836,6 +4285,8 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\0\
         assert_eq!(st.unstaged[0].path, "src/b file.rs");
         assert_eq!(st.unstaged[1].status, "?");
         assert_eq!(st.conflicted[0].path, "conflict.txt");
+        assert_eq!(st.conflicted[0].conflict, Some(ConflictKind::BothModified));
+        assert_eq!(st.unstaged[0].conflict, None);
     }
 
     #[test]
