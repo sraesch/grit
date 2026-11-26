@@ -1,5 +1,5 @@
-import { Branch, Branches, ConflictKind, ConflictSide, FileChange, Status } from "./api";
-import { plural } from "./remote";
+import { Branch, Branches, ConflictKind, ConflictSide, FileChange, MergeToolResult, Status } from "./api";
+import { NoticeKind, plural } from "./remote";
 
 /** One side of a conflict, named after what it is in the operation in progress. */
 export interface SideLabel {
@@ -152,8 +152,38 @@ export function removedBy(files: FileChange[], side: ConflictSide): FileChange[]
   return files.filter((f) => !sideKeeps(f.conflict, side));
 }
 
+/** Why a conflicted file can't be opened in a merge tool; null when it can. */
+export function mergeToolBlocked(kind: ConflictKind | null | undefined): string | null {
+  return kind == null || kind === "both-modified" || kind === "both-added"
+    ? null
+    : "A merge tool needs a version from both sides: use one of the sides instead";
+}
+
+/** A tool that returns this quickly most likely didn't wait for its window to be closed. */
+const DID_NOT_WAIT_MS = 2000;
+
+/** What to tell the user after the merge tool was closed. */
+export function mergeToolSummary(
+  result: MergeToolResult,
+  path: string,
+  elapsedMs: number,
+): { text: string; kind: NoticeKind } {
+  if (result.outcome === "resolved") {
+    const backup = result.backup ? `. git kept the conflicted file as ${result.backup}` : "";
+    return { kind: "info", text: `Resolved ${path} in ${result.tool}${backup}` };
+  }
+  const hint =
+    elapsedMs < DID_NOT_WAIT_MS
+      ? ` If its window is still open, ${result.tool} didn't wait for it: set it up to wait until the file is closed.`
+      : "";
+  return {
+    kind: "warning",
+    text: `${path} is still conflicted: ${result.tool} was closed without saving a result.${hint}`,
+  };
+}
+
 /** What an item of a conflicted file's context menu does. */
-export type ConflictAction = "use-ours" | "use-theirs" | "mark-resolved";
+export type ConflictAction = "use-ours" | "use-theirs" | "merge-tool" | "mark-resolved";
 
 export interface ConflictMenuItem {
   action: ConflictAction;
@@ -171,6 +201,8 @@ export type ConflictTarget = { kind: "file"; file: FileChange } | { kind: "folde
 
 export interface ConflictMenuContext {
   sides: ConflictSides;
+  /** Why no merge tool can be opened right now, e.g. one is open already; null when one can. */
+  toolBusy: string | null;
 }
 
 /** The context menu of a conflicted file, or of a folder of conflicted files. */
@@ -198,6 +230,12 @@ export function conflictMenu(target: ConflictTarget, ctx: ConflictMenuContext): 
       label: `Use ${sideName(theirs)}`,
       blocked: null,
       title: resolveTitle(file, "theirs", ctx.sides),
+    },
+    {
+      action: "merge-tool",
+      label: "Open in Merge Tool",
+      blocked: mergeToolBlocked(file.conflict) ?? ctx.toolBusy,
+      title: "Open the file in the merge tool configured in git and wait until it is closed",
     },
     "separator",
     { action: "mark-resolved", label: "Mark Resolved", blocked: null, title: "Stage the file as it is now" },

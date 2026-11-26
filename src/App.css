@@ -1686,6 +1686,18 @@ body.resizing-vertical {
   overflow-wrap: anywhere;
   user-select: text;
 }
+/* A command to copy, in a dialog that explains a setup step. */
+.dialog-code {
+  margin: 8px 0 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-alt);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .discard-list .more {
   color: var(--text-muted);
 }

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Resolve a conflicted file with one side: "Use ours" and "Use theirs" on its row in Local changes, in its context menu and above its diff take that side's version and stage the file. The sides are named after what they are in the operation in progress: the current branch and the branch being merged or the commit being cherry-picked, or, for a rebase, the new base and the commit being replayed. A file that the chosen side deleted is removed. On a folder, all its conflicted files are resolved after a confirmation. Once a conflict is resolved, the next one is selected
+- Open a conflicted file in the merge tool configured in git (`merge.guitool`, else `merge.tool`) from its context menu or with "Open in merge tool" above its diff. grit waits until the tool is closed, with the merge, rebase or cherry-pick on hold meanwhile, and then says whether the file was resolved and where git kept the conflicted copy. Without a configured tool, a dialog explains how to set one up; files that one side deleted are resolved by taking a side instead
 
 ## [0.6.0] - 2026-11-24
 

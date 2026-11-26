@@ -13,9 +13,9 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, ConflictSide, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult,
-    LogEntry, MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult,
-    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult,
-    StashOptions, Status,
+    LogEntry, MergeMode, MergeOptions, MergeResult, MergeToolResult, PatchAction, PickOptions, PickResult, PullOptions,
+    PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash,
+    StashApplyResult, StashOptions, Status,
 };
 use settings::{Settings, SettingsStore};
 use watcher::WatchState;
@@ -145,6 +145,18 @@ async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> 
 #[tauri::command]
 async fn resolve_conflicts(repo: String, paths: Vec<String>, side: ConflictSide) -> GitResult<()> {
     blocking(move || git::resolve_conflicts(&PathBuf::from(repo), &paths, side)).await
+}
+
+/// The merge tool configured in git (`merge.guitool`, else `merge.tool`), if any.
+#[tauri::command]
+async fn get_merge_tool(repo: String) -> GitResult<Option<String>> {
+    blocking(move || git::merge_tool(&PathBuf::from(repo))).await
+}
+
+/// Opens a conflicted file in the configured merge tool and waits until the tool is closed.
+#[tauri::command]
+async fn open_merge_tool(repo: String, path: String) -> GitResult<MergeToolResult> {
+    blocking(move || git::open_merge_tool(&PathBuf::from(repo), &path)).await
 }
 
 #[tauri::command]
@@ -541,6 +553,8 @@ pub fn run() {
             unstage_all,
             discard,
             resolve_conflicts,
+            get_merge_tool,
+            open_merge_tool,
             add_to_gitignore,
             apply_selection,
             commit,

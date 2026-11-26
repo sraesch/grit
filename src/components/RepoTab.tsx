@@ -7,6 +7,7 @@ import {
   Branches,
   errorMessage,
   FetchOptions,
+  FileChange,
   GitProgress,
   LogEntry,
   MergeOptions,
@@ -24,7 +25,7 @@ import {
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
 import { CommitAction, commitMenu, PickKind, pickSummary } from "../commit";
-import { conflictSides } from "../conflict";
+import { conflictSides, mergeToolSummary } from "../conflict";
 import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
@@ -44,6 +45,7 @@ import { relativeTime } from "../util";
 import { CreateBranchDialog, RenameBranchDialog, UpstreamDialog } from "./BranchDialogs";
 import { BranchSwitcher } from "./BranchSwitcher";
 import { ChangesView } from "./ChangesView";
+import { MergeToolDialog } from "./ConflictDialogs";
 import { PickDialog } from "./CommitOpDialog";
 import { ResetDialog } from "./ResetDialog";
 import { CreateTagDialog, DeleteRemoteTagDialog, DeleteTagDialog } from "./TagDialogs";
@@ -154,6 +156,8 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [autoFetchError, setAutoFetchError] = useState<string | null>(null);
   const [operationBusy, setOperationBusy] = useState(false);
+  // The explanation of how to set up a merge tool, shown when one is asked for and none is configured.
+  const [mergeToolSetup, setMergeToolSetup] = useState(false);
   const branchButtonRef = useRef<HTMLButtonElement>(null);
   // Read from timers and event handlers, which would otherwise see stale state.
   const remoteOpRef = useRef<RemoteOp | null>(null);
@@ -351,6 +355,32 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     [root, runRemote, onError, onClearError],
   );
 
+  /** Opens a conflicted file in the merge tool configured in git and waits until the tool is closed. */
+  const openMergeTool = useCallback(
+    async (file: FileChange) => {
+      try {
+        const tool = await api.mergeTool(root);
+        if (!mounted.current) return;
+        if (!tool) {
+          setMergeToolSetup(true);
+          return;
+        }
+        const started = Date.now();
+        // Like a network operation, it runs alone: continuing or aborting must wait for the tool.
+        const result = await runRemote({ label: `Waiting for ${tool} to close…`, background: false }, () =>
+          api.openMergeTool(root, file.path),
+        );
+        if (!result || !mounted.current) return;
+        setNotice(mergeToolSummary(result, file.path, Date.now() - started));
+        onClearError();
+      } catch (e) {
+        if (mounted.current) onError(errorMessage(e));
+      }
+    },
+    [root, runRemote, onError, onClearError],
+  );
+  const closeMergeToolSetup = useCallback(() => setMergeToolSetup(false), []);
+
   const mergeNow = useCallback(
     async (options: MergeOptions) => {
       setDialog(null);
@@ -448,6 +478,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
       setDeletingTag(null);
       setRenaming(null);
       setSettingUpstream(null);
+      setMergeToolSetup(false);
     }
   }, [active]);
 
@@ -1002,6 +1033,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onSkip={() => runOperation(api.skipOperation)}
         />
       )}
+      {mergeToolSetup && <MergeToolDialog onClose={closeMergeToolSetup} />}
       {dialog === "fetch" && branches && (
         <FetchDialog
           remotes={branches.remotes}
@@ -1214,7 +1246,15 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         />
         <main className="main">
           {view === "changes" ? (
-            <ChangesView repo={root} status={status} sides={sides} onChanged={refreshAll} onError={onError} />
+            <ChangesView
+              repo={root}
+              status={status}
+              sides={sides}
+              onOpenMergeTool={openMergeTool}
+              toolBusy={remoteOp ? "Wait until the running operation is done" : null}
+              onChanged={refreshAll}
+              onError={onError}
+            />
           ) : view === "stash" ? (
             shownStash && (
               <StashView

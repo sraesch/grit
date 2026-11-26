@@ -57,6 +57,16 @@ export interface Operation {
   onto?: string | null;
 }
 
+/** How a run of the merge tool ended. */
+export interface MergeToolResult {
+  /** "resolved": the tool saved a result, which git staged. "unresolved": it was closed without one. */
+  outcome: "resolved" | "unresolved";
+  /** The tool that ran. */
+  tool: string;
+  /** The copy of the conflicted file that git kept next to it (`<path>.orig`), if it did. */
+  backup: string | null;
+}
+
 export interface Status {
   branch: string | null;
   upstream: string | null;
@@ -402,6 +412,13 @@ export const api = {
    */
   resolveConflicts: (repo: string, paths: string[], side: ConflictSide) =>
     invoke<void>("resolve_conflicts", { repo, paths, side }),
+  /** The merge tool configured in git (`merge.guitool`, else `merge.tool`); null when there is none. */
+  mergeTool: (repo: string) => invoke<string | null>("get_merge_tool", { repo }),
+  /**
+   * Opens a conflicted file in the configured merge tool and resolves once the tool is closed.
+   * Rejects when the tool can't be started, and for conflicts a tool can't merge (a deleted side).
+   */
+  openMergeTool: (repo: string, path: string) => invoke<MergeToolResult>("open_merge_tool", { repo, path }),
   /**
    * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
    * longer matches the selection.
