@@ -1,3 +1,4 @@
+mod conflict;
 mod git;
 mod graph;
 #[cfg(target_os = "macos")]
@@ -12,10 +13,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
-    Branches, CommitDetails, ConflictSide, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult,
-    LogEntry, MergeMode, MergeOptions, MergeResult, MergeToolChoice, MergeToolResult, PatchAction, PickOptions,
-    PickResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode,
-    ResetPreview, Stash, StashApplyResult, StashOptions, Status,
+    Branches, CommitDetails, ConflictFile, ConflictSide, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult,
+    GitResult, LogEntry, MergeMode, MergeOptions, MergeResult, MergeToolChoice, MergeToolResult, PatchAction,
+    PickOptions, PickResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo,
+    ResetMode, ResetPreview, Stash, StashApplyResult, StashOptions, Status,
 };
 use settings::{CUSTOM_MERGE_TOOL, Settings, SettingsStore};
 use watcher::WatchState;
@@ -171,6 +172,19 @@ fn merge_tool_choice(settings: &Settings) -> MergeToolChoice {
             path: settings.merge_tool_path.clone(),
         },
     }
+}
+
+/// A conflicted text file split into what needs no decision and its conflicts, for the conflict editor.
+#[tauri::command]
+async fn get_conflict_file(repo: String, path: String) -> GitResult<ConflictFile> {
+    blocking(move || git::conflict_file(&PathBuf::from(repo), &path)).await
+}
+
+/// Saves the resolved text of a conflicted file and stages it. Refused when the conflict
+/// changed since `token` was handed out with it.
+#[tauri::command]
+async fn save_conflict_file(repo: String, path: String, token: String, content: String) -> GitResult<()> {
+    blocking(move || git::save_conflict_file(&PathBuf::from(repo), &path, &token, &content)).await
 }
 
 #[tauri::command]
@@ -569,6 +583,8 @@ pub fn run() {
             resolve_conflicts,
             get_merge_tool,
             open_merge_tool,
+            get_conflict_file,
+            save_conflict_file,
             add_to_gitignore,
             apply_selection,
             commit,

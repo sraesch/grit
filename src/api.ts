@@ -67,6 +67,22 @@ export interface MergeToolResult {
   backup: string | null;
 }
 
+/** A part of a conflicted file: text that needs no decision, or a place both sides changed differently. */
+export type ConflictSegment =
+  | { kind: "common"; text: string }
+  /** `base` is the text of the common ancestor; null when the sides have none (both added the file). */
+  | { kind: "conflict"; ours: string; base: string | null; theirs: string };
+
+/** A conflicted text file as the conflict editor shows it. */
+export interface ConflictFile {
+  /** Stands for what was loaded: saving is refused once the conflict or the working file changed. */
+  token: string;
+  /** The file from top to bottom, with plain line breaks. */
+  segments: ConflictSegment[];
+  /** Whether the working file still has conflict markers; without them it was already edited by hand. */
+  markers: boolean;
+}
+
 export interface Status {
   branch: string | null;
   upstream: string | null;
@@ -431,6 +447,18 @@ export const api = {
    * Rejects when the tool can't be started, and for conflicts a tool can't merge (a deleted side).
    */
   openMergeTool: (repo: string, path: string) => invoke<MergeToolResult>("open_merge_tool", { repo, path }),
+  /**
+   * A conflicted text file split into what needs no decision and its conflicts. Rejects, with the
+   * reason, for files the conflict editor can't merge: a side without a version, binary files,
+   * files in Git LFS and very large ones.
+   */
+  conflictFile: (repo: string, path: string) => invoke<ConflictFile>("get_conflict_file", { repo, path }),
+  /**
+   * Saves `content` as the resolution of a conflicted file and stages it. Rejects when the conflict
+   * or the working file changed since it was loaded with `token`.
+   */
+  saveConflictFile: (repo: string, path: string, token: string, content: string) =>
+    invoke<void>("save_conflict_file", { repo, path, token, content }),
   /**
    * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
    * longer matches the selection.

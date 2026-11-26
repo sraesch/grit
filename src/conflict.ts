@@ -1,4 +1,13 @@
-import { Branch, Branches, ConflictKind, ConflictSide, FileChange, MergeToolResult, Status } from "./api";
+import {
+  Branch,
+  Branches,
+  ConflictKind,
+  ConflictSegment,
+  ConflictSide,
+  FileChange,
+  MergeToolResult,
+  Status,
+} from "./api";
 import { NoticeKind, plural } from "./remote";
 
 /** One side of a conflict, named after what it is in the operation in progress. */
@@ -240,4 +249,100 @@ export function conflictMenu(target: ConflictTarget, ctx: ConflictMenuContext): 
     "separator",
     { action: "mark-resolved", label: "Mark Resolved", blocked: null, title: "Stage the file as it is now" },
   ];
+}
+
+/** Why a conflicted file can't be shown in the conflict editor; null when it can be tried. */
+export function editorBlocked(kind: ConflictKind | null | undefined): string | null {
+  return kind == null || kind === "both-modified" || kind === "both-added"
+    ? null
+    : "One side has no version of this file, so there is nothing to merge line by line. Take one of the sides.";
+}
+
+/** How the backend's refusal to save starts when the conflict changed since it was loaded. */
+export const STALE_CONFLICT = "The conflict changed since it was opened.";
+
+/** How a conflict is resolved with the text of the sides: one of them, or both in either order. */
+export type ConflictChoice = "ours" | "theirs" | "ours-theirs" | "theirs-ours";
+
+/** The text a choice puts in the place of a conflict. */
+export function takeText(conflict: { ours: string; theirs: string }, choice: ConflictChoice): string {
+  // The last line of a file may lack its line break, which the lines put after it need.
+  const both = (first: string, second: string) =>
+    first && second && !first.endsWith("\n") ? `${first}\n${second}` : first + second;
+  switch (choice) {
+    case "ours":
+      return conflict.ours;
+    case "theirs":
+      return conflict.theirs;
+    case "ours-theirs":
+      return both(conflict.ours, conflict.theirs);
+    case "theirs-ours":
+      return both(conflict.theirs, conflict.ours);
+  }
+}
+
+/** A stretch of a document, as character offsets. */
+export interface TextRange {
+  from: number;
+  to: number;
+}
+
+/** One conflict of a file: its text on each side and where it is in the editor's three documents. */
+export interface ConflictPlace {
+  ours: TextRange;
+  theirs: TextRange;
+  result: TextRange;
+  oursText: string;
+  theirsText: string;
+  /** The text of the common ancestor; null when there is none. */
+  base: string | null;
+}
+
+/** The three documents of the conflict editor and the conflicts in them. */
+export interface ConflictLayout {
+  ours: string;
+  theirs: string;
+  /** The merged file, with the common ancestor's text in the place of each conflict until it is resolved. */
+  result: string;
+  conflicts: ConflictPlace[];
+}
+
+/** Lays a conflicted file out as the documents the editor shows side by side. */
+export function layoutConflict(segments: ConflictSegment[]): ConflictLayout {
+  let [ours, theirs, result] = ["", "", ""];
+  const conflicts: ConflictPlace[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "common") {
+      ours += segment.text;
+      theirs += segment.text;
+      result += segment.text;
+      continue;
+    }
+    const start = segment.base ?? "";
+    conflicts.push({
+      ours: { from: ours.length, to: ours.length + segment.ours.length },
+      theirs: { from: theirs.length, to: theirs.length + segment.theirs.length },
+      result: { from: result.length, to: result.length + start.length },
+      oursText: segment.ours,
+      theirsText: segment.theirs,
+      base: segment.base,
+    });
+    ours += segment.ours;
+    theirs += segment.theirs;
+    result += start;
+  }
+  return { ours, theirs, result, conflicts };
+}
+
+/**
+ * The line of one pane that shows the same place as `line` of another, for scrolling them together.
+ * `from` and `to` list, for the two panes, the lines at which each conflict starts and ends, framed
+ * by 0 and the number of lines: between two of these fixed points, lines are spread evenly.
+ */
+export function mapLine(from: number[], to: number[], line: number): number {
+  let i = 1;
+  while (i < from.length - 1 && from[i] <= line) i++;
+  const span = from[i] - from[i - 1];
+  const within = span > 0 ? Math.min(1, Math.max(0, (line - from[i - 1]) / span)) : 0;
+  return to[i - 1] + within * (to[i] - to[i - 1]);
 }

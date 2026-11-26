@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { Branch, Branches, ConflictKind } from "./api";
+import { Branch, Branches, ConflictKind, ConflictSegment } from "./api";
 import {
   conflictKindLabel,
   conflictMenu,
   ConflictMenuItem,
   conflictSides,
   ConflictSides,
+  editorBlocked,
   GENERIC_SIDES,
+  layoutConflict,
+  mapLine,
   mergeToolBlocked,
   mergeToolSummary,
   removedBy,
   resolveTitle,
   sideKeeps,
+  takeText,
 } from "./conflict";
 import { conflictFile, makeOperation, makeStatus } from "./test/tauri";
 
@@ -251,5 +255,76 @@ describe("merge tool", () => {
     });
     // A tool that is back at once most likely didn't wait for its window.
     expect(mergeToolSummary(unresolved, "src/app.ts", 300).text).toMatch(/meld didn't wait for it/);
+  });
+});
+
+describe("conflict editor", () => {
+  const segments: ConflictSegment[] = [
+    { kind: "common", text: "one\n" },
+    { kind: "conflict", ours: "TWO\nand more\n", base: "two\n", theirs: "2\n" },
+    { kind: "common", text: "three\nfour\n" },
+    { kind: "conflict", ours: "", base: null, theirs: "five\n" },
+    { kind: "common", text: "six\n" },
+  ];
+
+  it("is tried for files that both sides have", () => {
+    expect(editorBlocked("both-modified")).toBeNull();
+    expect(editorBlocked("both-added")).toBeNull();
+    expect(editorBlocked(undefined)).toBeNull();
+    expect(editorBlocked("deleted-by-them")).toMatch(/Take one of the sides/);
+  });
+
+  it("lays the file out as three documents", () => {
+    const layout = layoutConflict(segments);
+    expect(layout.ours).toBe("one\nTWO\nand more\nthree\nfour\nsix\n");
+    expect(layout.theirs).toBe("one\n2\nthree\nfour\nfive\nsix\n");
+    // Until it is resolved, a conflict shows what both sides started from.
+    expect(layout.result).toBe("one\ntwo\nthree\nfour\nsix\n");
+
+    const [first, second] = layout.conflicts;
+    expect(layout.ours.slice(first.ours.from, first.ours.to)).toBe("TWO\nand more\n");
+    expect(layout.theirs.slice(first.theirs.from, first.theirs.to)).toBe("2\n");
+    expect(layout.result.slice(first.result.from, first.result.to)).toBe("two\n");
+    expect(first).toMatchObject({ oursText: "TWO\nand more\n", theirsText: "2\n", base: "two\n" });
+
+    // An empty side, and no common ancestor: the places are empty but known.
+    expect(second.ours).toEqual({ from: 28, to: 28 });
+    expect(layout.theirs.slice(second.theirs.from, second.theirs.to)).toBe("five\n");
+    expect(second.result).toEqual({ from: 19, to: 19 });
+    expect(second.base).toBeNull();
+
+    expect(layoutConflict([])).toEqual({ ours: "", theirs: "", result: "", conflicts: [] });
+  });
+
+  it("takes one side or both", () => {
+    const conflict = { ours: "a\n", theirs: "b\n" };
+    expect(takeText(conflict, "ours")).toBe("a\n");
+    expect(takeText(conflict, "theirs")).toBe("b\n");
+    expect(takeText(conflict, "ours-theirs")).toBe("a\nb\n");
+    expect(takeText(conflict, "theirs-ours")).toBe("b\na\n");
+    // At the end of a file without a final line break, the first half gets one.
+    expect(takeText({ ours: "a", theirs: "b" }, "ours-theirs")).toBe("a\nb");
+    expect(takeText({ ours: "", theirs: "b" }, "ours-theirs")).toBe("b");
+    expect(takeText({ ours: "a", theirs: "" }, "theirs-ours")).toBe("a");
+  });
+
+  it("maps lines between panes around the conflicts", () => {
+    // One conflict: lines 1-3 in the first pane, line 1 only in the second.
+    const first = [0, 1, 3, 6];
+    const second = [0, 1, 2, 5];
+    expect(mapLine(first, second, 0)).toBe(0);
+    expect(mapLine(first, second, 0.5)).toBe(0.5);
+    expect(mapLine(first, second, 1)).toBe(1);
+    // Halfway through the two conflict lines is halfway through the one.
+    expect(mapLine(first, second, 2)).toBe(1.5);
+    expect(mapLine(first, second, 3)).toBe(2);
+    expect(mapLine(first, second, 5)).toBe(4);
+    expect(mapLine(first, second, 6)).toBe(5);
+    expect(mapLine(second, first, 1.5)).toBe(2);
+    // A conflict that is empty in the source pane maps to the start of its place.
+    expect(mapLine([0, 2, 2, 4], [0, 2, 5, 7], 2)).toBe(5);
+    expect(mapLine([0, 2, 5, 7], [0, 2, 2, 4], 3.5)).toBe(2);
+    // Without conflicts the panes are the same.
+    expect(mapLine([0, 4], [0, 4], 2.5)).toBe(2.5);
   });
 });

@@ -37,6 +37,11 @@ describe("ChangesView", () => {
       commit: () => undefined,
       discard: () => undefined,
       resolve_conflicts: () => undefined,
+      // Unless a test is about the conflict editor, conflicts are shown as their diff.
+      get_conflict_file: () => {
+        throw "This file isn't UTF-8 text, so it can't be resolved here.";
+      },
+      save_conflict_file: () => undefined,
       add_to_gitignore: () => undefined,
       apply_selection: () => undefined,
     });
@@ -612,6 +617,100 @@ describe("ChangesView", () => {
     rerender(<ChangesView {...props} status={makeStatus({ staged: [file("a.txt"), file("b.txt")] })} />);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Use feature" })).toBeNull());
     expect(screen.queryByText("new b.txt")).toBeNull();
+  });
+
+  describe("conflict editor", () => {
+    const editable = {
+      token: "t1",
+      markers: true,
+      segments: [
+        { kind: "common", text: "one\n" },
+        { kind: "conflict", ours: "TWO\n", base: "two\n", theirs: "2\n" },
+        { kind: "common", text: "three\n" },
+      ],
+    };
+    const backend = () =>
+      mockBackend(invokeMock, {
+        get_working_diff: ({ path }) => `@@ -1 +1 @@\n-old ${path}\n+new ${path}\n`,
+        get_conflict_file: () => editable,
+        save_conflict_file: () => undefined,
+        resolve_conflicts: () => undefined,
+      });
+
+    it("resolves the selected conflict line by line and saves it", async () => {
+      backend();
+      const { onChanged } = setup({ sides, status: makeStatus({ conflicted: [conflictFile("a.txt")] }) });
+      await userEvent.click(screen.getByText("a.txt"));
+
+      const toolbar = within(await screen.findByRole("toolbar", { name: "Conflict" }));
+      expect(screen.getByText("Conflict 1 of 1")).toBeInTheDocument();
+      // The editor is shown in place of the diff, which isn't loaded.
+      expect(invokeMock).not.toHaveBeenCalledWith("get_working_diff", expect.anything());
+      // Taking a side for the whole file is still at hand, in the header.
+      expect(screen.getByRole("button", { name: "Use feature" })).toBeInTheDocument();
+
+      await userEvent.click(toolbar.getByRole("button", { name: "Take feature" }));
+      await userEvent.click(screen.getByRole("button", { name: "Save and mark resolved" }));
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith("save_conflict_file", {
+          repo: "/repo",
+          path: "a.txt",
+          token: "t1",
+          content: "one\n2\nthree\n",
+        }),
+      );
+      await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    });
+
+    it("shows the diff of a conflict on request", async () => {
+      backend();
+      setup({ sides, status: makeStatus({ conflicted: [conflictFile("a.txt")] }) });
+      await userEvent.click(screen.getByText("a.txt"));
+      await screen.findByRole("toolbar", { name: "Conflict" });
+
+      const toggle = screen.getByRole("button", { name: "Show diff" });
+      expect(toggle).toHaveAttribute("aria-pressed", "false");
+      await userEvent.click(toggle);
+      expect(await screen.findByText("new a.txt")).toBeInTheDocument();
+      expect(screen.queryByRole("toolbar", { name: "Conflict" })).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", { name: "Show editor" }));
+      expect(await screen.findByRole("toolbar", { name: "Conflict" })).toBeInTheDocument();
+      expect(screen.queryByText("new a.txt")).toBeNull();
+    });
+
+    it("keeps what was resolved while another file is looked at", async () => {
+      backend();
+      setup({ sides, status: makeStatus({ conflicted: [conflictFile("a.txt")], unstaged: [file("b.txt")] }) });
+      await userEvent.click(screen.getByText("a.txt"));
+      const toolbar = within(await screen.findByRole("toolbar", { name: "Conflict" }));
+      await userEvent.click(toolbar.getByRole("button", { name: "Take main" }));
+      expect(screen.getByRole("status")).toHaveTextContent("All conflicts resolved");
+
+      await userEvent.click(screen.getByText("b.txt"));
+      expect(await screen.findByText("new b.txt")).toBeInTheDocument();
+      await userEvent.click(screen.getByText("a.txt"));
+      await screen.findByRole("toolbar", { name: "Conflict" });
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("All conflicts resolved"));
+      expect(screen.getByRole("textbox", { name: "Result" })).toHaveTextContent("Conflict 1 · main");
+    });
+
+    it("shows the diff with the reason when the editor can't show a file", async () => {
+      // The default backend of these tests refuses the file as binary.
+      setup({ sides, status: makeStatus({ conflicted: [conflictFile("a.bin"), conflictFile("gone.txt", "deleted-by-them")] }) });
+      await userEvent.click(screen.getByText("a.bin"));
+      expect(await screen.findByRole("note")).toHaveTextContent("This file isn't UTF-8 text");
+      expect(await screen.findByText("new a.bin")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Use main" })).toBeInTheDocument();
+
+      // A file one side deleted has nothing to merge line by line: the editor isn't even asked.
+      invokeMock.mockClear();
+      await userEvent.click(screen.getByText("gone.txt"));
+      expect(await screen.findByText("new gone.txt")).toBeInTheDocument();
+      expect(screen.getByRole("note")).toHaveTextContent("One side has no version of this file");
+      expect(invokeMock).not.toHaveBeenCalledWith("get_conflict_file", expect.anything());
+    });
   });
 
   it("reports a failed hunk action and refreshes", async () => {
