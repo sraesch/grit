@@ -5,8 +5,17 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { FetchResult, GitProgress, RepoChanged, Settings, Stash, StashOptions, Status } from "./api";
-import { file, makeCommit, makeStash, makeStatus, mockBackend } from "./test/tauri";
+import {
+  FetchResult,
+  GitProgress,
+  MergeToolResult,
+  RepoChanged,
+  Settings,
+  Stash,
+  StashOptions,
+  Status,
+} from "./api";
+import { conflictFile, file, makeCommit, makeOperation, makeStash, makeStatus, mockBackend, NO_MERGE_TOOL } from "./test/tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -997,7 +1006,7 @@ describe("App", () => {
     });
 
     it("fetches in the background when the last fetch is older than the interval", async () => {
-      settings = { reposDir: null, autoFetchMinutes: 10 };
+      settings = { reposDir: null, autoFetchMinutes: 10, ...NO_MERGE_TOOL };
       status = makeStatus({ upstream: "origin/main", lastFetch: now() - 3600 });
       mockBackend(invokeMock, {
         ...handlers,
@@ -1024,18 +1033,104 @@ describe("App", () => {
     });
 
     it("doesn't fetch in the background when the last fetch is recent or it is turned off", async () => {
-      settings = { reposDir: null, autoFetchMinutes: 10 };
+      settings = { reposDir: null, autoFetchMinutes: 10, ...NO_MERGE_TOOL };
       const { unmount } = render(<App />);
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));
       await screen.findByRole("button", { name: "Fetch" });
       unmount();
 
-      settings = { reposDir: null, autoFetchMinutes: 0 };
+      settings = { reposDir: null, autoFetchMinutes: 0, ...NO_MERGE_TOOL };
       status = makeStatus({ lastFetch: null });
       render(<App />);
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));
       await screen.findByRole("button", { name: "Fetch" });
       expect(invokeMock).not.toHaveBeenCalledWith("fetch", expect.anything());
+    });
+  });
+
+  describe("merge tool", () => {
+    const merging = () =>
+      makeStatus({ operation: makeOperation("merge"), conflicted: [conflictFile("src/app.ts")] });
+
+    async function openInMergeTool() {
+      localStorage.setItem("lastRepo", "/work/demo");
+      render(<App />);
+      await userEvent.click(await screen.findByText("app.ts"));
+      await userEvent.click(await screen.findByRole("button", { name: "Open in merge tool" }));
+    }
+
+    it("waits for the tool and reports the resolved file", async () => {
+      let closeTool: (result: MergeToolResult) => void = () => {};
+      let status = merging();
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: () => status,
+        get_log: () => [],
+        get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+        get_working_diff: () => "",
+        get_merge_tool: () => "meld",
+        open_merge_tool: () => new Promise<MergeToolResult>((resolve) => (closeTool = resolve)),
+      });
+      await openInMergeTool();
+
+      expect(await screen.findByText("Waiting for meld to close…")).toBeInTheDocument();
+      expect(invokeMock).toHaveBeenCalledWith("open_merge_tool", { repo: "/work/demo", path: "src/app.ts" });
+      // The merge must not be finished or aborted under the tool.
+      expect(screen.getByRole("button", { name: "Abort merge" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Open in merge tool" })).toBeDisabled();
+
+      status = makeStatus({ operation: makeOperation("merge"), staged: [file("src/app.ts")] });
+      await act(async () => closeTool({ outcome: "resolved", tool: "meld", backup: "src/app.ts.orig" }));
+      expect(
+        await screen.findByText("Resolved src/app.ts in meld. git kept the conflicted file as src/app.ts.orig"),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("button", { name: "Abort merge" })).toBeEnabled());
+    });
+
+    it("tells when the tool was closed without a result", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: merging,
+        get_log: () => [],
+        get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+        get_working_diff: () => "",
+        get_merge_tool: () => "meld",
+        open_merge_tool: () => ({ outcome: "unresolved", tool: "meld", backup: null }),
+      });
+      await openInMergeTool();
+      expect(await screen.findByText(/src\/app.ts is still conflicted: meld was closed without saving/)).toBeInTheDocument();
+    });
+
+    it("explains how to set up a tool when none is configured", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: merging,
+        get_log: () => [],
+        get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+        get_working_diff: () => "",
+        get_merge_tool: () => null,
+      });
+      await openInMergeTool();
+      const dialog = await screen.findByRole("dialog", { name: "No Merge Tool Configured" });
+      expect(invokeMock).not.toHaveBeenCalledWith("open_merge_tool", expect.anything());
+      await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("shows why a tool could not be started", async () => {
+      mockBackend(invokeMock, {
+        open_repo: ({ path }) => ({ root: path, gitDir: `${path}/.git`, name: "demo" }),
+        get_status: merging,
+        get_log: () => [],
+        get_branches: () => ({ local: [], remote: [], tags: [], remotes: [] }),
+        get_working_diff: () => "",
+        get_merge_tool: () => "kdiff3",
+        open_merge_tool: () => {
+          throw "The merge tool kdiff3 is not available as 'kdiff3'";
+        },
+      });
+      await openInMergeTool();
+      expect(await screen.findByRole("alert")).toHaveTextContent("The merge tool kdiff3 is not available as 'kdiff3'");
     });
   });
 

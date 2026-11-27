@@ -550,6 +550,47 @@ describe("ChangesView", () => {
     expect(within(dialog).getByRole("button", { name: "Use feature" })).toBeInTheDocument();
   });
 
+  it("opens a conflict in the merge tool from its menu and from the header", async () => {
+    const onOpenMergeTool = vi.fn();
+    const gone = conflictFile("gone.txt", "deleted-by-them");
+    const both = conflictFile("both.txt");
+    setup({ sides, onOpenMergeTool, status: makeStatus({ conflicted: [both, gone] }) });
+
+    fireEvent.contextMenu(screen.getByText("both.txt"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Open in Merge Tool" }));
+    expect(onOpenMergeTool).toHaveBeenCalledWith(both);
+
+    await userEvent.click(screen.getByText("both.txt"));
+    await userEvent.click(await screen.findByRole("button", { name: "Open in merge tool" }));
+    expect(onOpenMergeTool).toHaveBeenCalledTimes(2);
+
+    // A merge tool can't do anything for a file one side deleted.
+    fireEvent.contextMenu(screen.getByText("gone.txt"));
+    const blocked = screen.getByRole("menuitem", { name: "Open in Merge Tool" });
+    expect(blocked).toBeDisabled();
+    expect(blocked).toHaveAttribute("title", expect.stringMatching(/use one of the sides/));
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByText("gone.txt"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open in merge tool" })).toBeDisabled());
+    expect(onOpenMergeTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens no second merge tool while one is running", async () => {
+    const onOpenMergeTool = vi.fn();
+    setup({
+      sides,
+      onOpenMergeTool,
+      toolBusy: "Wait until the running operation is done",
+      status: makeStatus({ conflicted: [conflictFile("both.txt")] }),
+    });
+    await userEvent.click(screen.getByText("both.txt"));
+    const button = await screen.findByRole("button", { name: "Open in merge tool" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Wait until the running operation is done");
+    // Taking a side is still possible.
+    expect(screen.getByRole("button", { name: "Use feature" })).toBeEnabled();
+  });
+
   it("takes a side of the selected conflict from the header, then shows the next conflict", async () => {
     const props = { repo: "/repo", sides, onChanged: () => {}, onError: () => {} };
     const { rerender } = render(

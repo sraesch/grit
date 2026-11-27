@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { ConflictSide, FileChange } from "../api";
 import { ConflictSides, removedBy, sideName } from "../conflict";
 import { plural } from "../remote";
@@ -48,5 +49,79 @@ export function ResolveSideDialog({ files, side, sides, onResolve, onClose }: Re
         {removed.size > 0 && ` ${plural(removed.size, "file")} that ${chosen.name} doesn't have will be deleted.`}
       </p>
     </Dialog>
+  );
+}
+
+interface MergeToolDialogProps {
+  /** Opens the settings, where a merge tool can be chosen. Without it, the button isn't offered. */
+  onOpenSettings?: () => void;
+  onClose: () => void;
+}
+
+/** Explains how to choose a merge tool, shown when a file should be opened in one and none is set. */
+export function MergeToolDialog({ onOpenSettings, onClose }: MergeToolDialogProps) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Escape closes; focus returns to whatever opened the dialog.
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previous?.focus?.();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="merge-tool-title">
+        <header className="modal-header">
+          <h2 id="merge-tool-title">No Merge Tool Configured</h2>
+        </header>
+        <div className="settings-body">
+          <p className="settings-hint">
+            grit opens conflicted files in the merge tool chosen in Settings or, without one, in the merge tool that
+            git is set up with, and none is set yet. Choose one in Settings, or for git in a terminal, for example
+            Meld:
+          </p>
+          <pre className="dialog-code selectable">git config --global merge.tool meld</pre>
+          <p className="settings-hint">
+            <code>git mergetool --tool-help</code> lists the tools git knows. If the tool isn't found when it is
+            opened, also say where it is installed:
+          </p>
+          <pre className="dialog-code selectable">git config --global mergetool.meld.path /path/to/meld</pre>
+          <p className="settings-hint">
+            A tool set as <code>merge.guitool</code> is used first. Tools that run in a terminal, such as vimdiff,
+            can't be opened from grit.
+          </p>
+        </div>
+        <footer className="modal-footer">
+          {onOpenSettings ? (
+            <>
+              <button ref={closeRef} onClick={onClose}>
+                Close
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  onClose();
+                  onOpenSettings();
+                }}
+              >
+                Open Settings
+              </button>
+            </>
+          ) : (
+            <button ref={closeRef} className="primary" onClick={onClose}>
+              Close
+            </button>
+          )}
+        </footer>
+      </div>
+    </div>
   );
 }

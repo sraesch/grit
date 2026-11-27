@@ -4,7 +4,7 @@
 //! helpers, SSH config, signing and `.gitconfig` behave exactly as on the command line.
 //! Read-heavy paths can later move to an in-process library (gix) where it pays off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -975,6 +975,295 @@ fn stage_resolved(repo: &Path, entries: &[(&str, &StageEntry)]) -> GitResult<()>
 
 /// The file mode of a submodule's commit in the index.
 const GITLINK_MODE: &str = "160000";
+
+// ---------------------------------------------------------------------------
+// Merge tool
+// ---------------------------------------------------------------------------
+
+/// The merge tool chosen in grit's settings, which takes precedence over git's configuration.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum MergeToolChoice {
+    /// The tool configured in git.
+    #[default]
+    Git,
+    /// One of git's tools by name, e.g. "meld", optionally installed at `path`.
+    Named { name: String, path: Option<String> },
+    /// A shell command, run as git runs a tool's `mergetool.<tool>.cmd`.
+    Command(String),
+}
+
+/// The name git's mergetool knows a custom command by.
+const CUSTOM_TOOL: &str = "grit-custom";
+
+/// A merge tool ready to run.
+struct MergeTool {
+    /// What `--tool` names.
+    name: String,
+    /// What to call it when talking to the user.
+    label: String,
+    /// `-c` settings that set the tool up for this run only.
+    config: Vec<String>,
+    /// Chosen in grit's settings rather than configured in git, which is where it is fixed.
+    from_settings: bool,
+}
+
+/// The merge tool configured in git: `merge.guitool` when set, as grit has no terminal to offer,
+/// else `merge.tool`. Without either, git would guess a tool, which grit never lets it do.
+fn git_merge_tool(repo: &Path) -> GitResult<Option<String>> {
+    for key in ["merge.guitool", "merge.tool"] {
+        let value = run_with(repo, &["config", "--get", key], None, &[0, 1])?;
+        if !value.trim().is_empty() {
+            return Ok(Some(value.trim().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_merge_tool(repo: &Path, choice: &MergeToolChoice) -> GitResult<Option<MergeTool>> {
+    Ok(match choice {
+        MergeToolChoice::Git => git_merge_tool(repo)?.map(|name| MergeTool {
+            label: name.clone(),
+            name,
+            config: Vec::new(),
+            from_settings: false,
+        }),
+        MergeToolChoice::Named { name, path } => Some(MergeTool {
+            name: name.clone(),
+            label: name.clone(),
+            config: path.iter().map(|p| format!("mergetool.{name}.path={p}")).collect(),
+            from_settings: true,
+        }),
+        MergeToolChoice::Command(cmd) => Some(MergeTool {
+            name: CUSTOM_TOOL.to_string(),
+            label: command_program(cmd),
+            config: vec![
+                format!("mergetool.{CUSTOM_TOOL}.cmd={cmd}"),
+                // An unchanged file then counts as not merged, whatever the command returns.
+                format!("mergetool.{CUSTOM_TOOL}.trustExitCode=false"),
+            ],
+            from_settings: true,
+        }),
+    })
+}
+
+/// The name of the program a shell command starts, e.g. "meld" for `/usr/bin/meld "$MERGED"`.
+fn command_program(cmd: &str) -> String {
+    let cmd = cmd.trim_start();
+    let first = match cmd.chars().next() {
+        Some(quote @ ('"' | '\'')) => cmd[1..].split(quote).next().unwrap_or_default(),
+        _ => cmd.split_whitespace().next().unwrap_or_default(),
+    };
+    Path::new(first)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("the merge command")
+        .to_string()
+}
+
+/// The merge tool that grit opens: the one chosen in the settings, else the one configured in git.
+pub fn merge_tool(repo: &Path, choice: &MergeToolChoice) -> GitResult<Option<String>> {
+    Ok(resolve_merge_tool(repo, choice)?.map(|tool| tool.label))
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeToolOutcome {
+    /// The tool saved a result, which git staged.
+    Resolved,
+    /// The tool was closed without a result: the file is conflicted as before.
+    Unresolved,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeToolResult {
+    pub outcome: MergeToolOutcome,
+    pub tool: String,
+    /// The copy of the conflicted file that git kept next to it (`<path>.orig`), unless
+    /// `mergetool.keepBackup` is turned off.
+    pub backup: Option<String>,
+}
+
+/// Opens a conflicted file in the configured merge tool and waits until the tool is closed.
+/// The file counts as resolved when git staged the tool's result.
+///
+/// Refused up front where git would ask a question with nobody to answer it: without a
+/// configured tool (git would guess one), and for conflicts where a side has no regular file.
+pub fn open_merge_tool(repo: &Path, path: &str, choice: &MergeToolChoice) -> GitResult<MergeToolResult> {
+    let tool = resolve_merge_tool(repo, choice)?.ok_or("No merge tool is configured in git.")?;
+    if tool.name != CUSTOM_TOOL && needs_terminal(repo, &tool.name) {
+        let fix = if tool.from_settings {
+            "Choose a graphical merge tool in Settings."
+        } else {
+            "Set merge.guitool to a graphical merge tool."
+        };
+        return Err(format!(
+            "{} runs in a terminal, which grit can't offer. {fix}",
+            tool.label
+        ));
+    }
+    let paths = [path.to_string()];
+    let entries = unmerged(repo, &paths)?;
+    let Some(entry) = entries.iter().find(|e| e.path == path) else {
+        return Err(format!("{path} has no conflicts to resolve."));
+    };
+    let regular_file = |version: &Option<StageEntry>| version.as_ref().is_some_and(|v| v.mode.starts_with("100"));
+    if !regular_file(&entry.ours) || !regular_file(&entry.theirs) {
+        return Err("A merge tool needs a version of the file from both sides. Use one of the sides instead.".into());
+    }
+    // git's script expands these as shell patterns, which could open another file.
+    if path.contains(['*', '?', '\n']) {
+        return Err(format!(
+            "{path} can't be opened in a merge tool because of the special characters in its name."
+        ));
+    }
+
+    let file = repo.join(path);
+    let backup = repo.join(format!("{path}.orig"));
+    let had_backup = backup.exists();
+    let temporaries = merge_temporaries(&file);
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let log = std::env::temp_dir().join(format!("grit-mergetool-{}-{unique}.log", std::process::id()));
+    let stderr = std::fs::File::create(&log).map_err(|e| format!("Could not create {}: {e}", log.display()))?;
+    let tool_arg = format!("--tool={}", tool.name);
+    let mut cmd = git_command(repo);
+    for setting in &tool.config {
+        cmd.args(["-c", setting]);
+    }
+    cmd.args(["--literal-pathspecs", "mergetool", "--no-prompt", &tool_arg, "--", path])
+        // Closed, so that the questions git asks after some tools fail instead of waiting forever.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr);
+    add_tool_dirs(&mut cmd);
+    // Waiting for the process, not for its output: a tool that leaves a helper running would keep a pipe open.
+    let run = cmd.status().map_err(|e| format!("Failed to start git: {e}"));
+    let output = std::fs::read(&log).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let _ = std::fs::remove_file(&log);
+    run?;
+
+    let resolved = unmerged(repo, &paths)?.iter().all(|e| e.path != path);
+    if !resolved {
+        // git removes the files it wrote for the tool, unless it gives up early, e.g. when the tool is missing.
+        let keep = run_with(
+            repo,
+            &["config", "--type=bool", "--get", "mergetool.keepTemporaries"],
+            None,
+            &[0, 1],
+        )
+        .is_ok_and(|v| v.trim() == "true");
+        if !keep {
+            for left in merge_temporaries(&file).difference(&temporaries) {
+                let _ = std::fs::remove_file(left);
+            }
+        }
+        if let Some(problem) = merge_tool_problem(&output.unwrap_or_default(), &tool) {
+            return Err(problem);
+        }
+    }
+    Ok(MergeToolResult {
+        outcome: if resolved {
+            MergeToolOutcome::Resolved
+        } else {
+            MergeToolOutcome::Unresolved
+        },
+        tool: tool.label,
+        backup: (!had_backup && backup.exists()).then(|| format!("{path}.orig")),
+    })
+}
+
+/// Whether the tool is one of git's built-in vim modes, which draw in the terminal git runs in.
+fn needs_terminal(repo: &Path, tool: &str) -> bool {
+    let custom = run_with(
+        repo,
+        &["config", "--get", &format!("mergetool.{tool}.cmd")],
+        None,
+        &[0, 1],
+    )
+    .is_ok_and(|cmd| !cmd.trim().is_empty());
+    !custom && (tool.starts_with("vimdiff") || tool.starts_with("nvimdiff"))
+}
+
+/// The files git's mergetool writes next to `file` for the tool to read, e.g. `app_LOCAL_1234.ts`.
+fn merge_temporaries(file: &Path) -> HashSet<PathBuf> {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return HashSet::new();
+    };
+    // As git splits the name: the extension is what follows the last dot.
+    let (stem, ext) = name.rfind('.').map_or((name, ""), |dot| name.split_at(dot));
+    let is_temporary = |candidate: &str| {
+        let Some(middle) = candidate.strip_prefix(stem).and_then(|rest| rest.strip_suffix(ext)) else {
+            return false;
+        };
+        const KINDS: [&str; 6] = [
+            "_BACKUP_",
+            "_BASE_",
+            "_LOCAL_",
+            "_REMOTE_",
+            "_LOCAL_LCONFL_",
+            "_REMOTE_RCONFL_",
+        ];
+        KINDS.iter().any(|kind| {
+            middle
+                .strip_prefix(kind)
+                .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return HashSet::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_temporary))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// git's own explanation of why the tool didn't run, as opposed to anything the tool printed.
+fn merge_tool_problem(stderr: &str, tool: &MergeTool) -> Option<String> {
+    let missing = stderr.lines().find(|l| l.contains("is not available as"));
+    if let Some(line) = missing {
+        let fix = if tool.from_settings {
+            "choose where it is in Settings".to_string()
+        } else {
+            format!("set mergetool.{}.path to where it is", tool.name)
+        };
+        return Some(format!(
+            "{}. If it is installed, {fix}.",
+            line.trim().trim_end_matches('.')
+        ));
+    }
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains("Unknown merge tool") || l.contains("cmd not set for tool") || l.starts_with("fatal: "))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Adds the folders merge tools are usually installed in: an app started from Finder doesn't get
+/// the shell's PATH.
+#[cfg(target_os = "macos")]
+fn add_tool_dirs(cmd: &mut Command) {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if !dirs.iter().any(|d| d == Path::new(dir)) {
+            dirs.push(dir.into());
+        }
+    }
+    if let Ok(path) = std::env::join_paths(dirs) {
+        cmd.env("PATH", path);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_tool_dirs(_cmd: &mut Command) {}
 
 /// What to do with the selected parts of a diff.
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -3695,6 +3984,284 @@ mod tests {
         // Nothing was resolved, not even the file that is conflicted.
         assert_eq!(conflicted_paths(&repo).len(), 4);
         assert_eq!(repo.read("plain.txt"), "untouched\n");
+    }
+
+    /// Makes "fake" the merge tool: `cmd` runs in git's own shell, with `$MERGED`, `$LOCAL`,
+    /// `$REMOTE` and `$BASE` naming the files a real tool would open.
+    fn fake_merge_tool(repo: &TestRepo, cmd: &str, trust_exit_code: bool) {
+        for (key, value) in [
+            ("merge.tool", "fake"),
+            // Empty, so that a GUI tool in the developer's own config can't take over.
+            ("merge.guitool", ""),
+            ("mergetool.fake.cmd", cmd),
+            (
+                "mergetool.fake.trustExitCode",
+                if trust_exit_code { "true" } else { "false" },
+            ),
+            ("mergetool.keepBackup", "true"),
+            ("mergetool.keepTemporaries", "false"),
+            ("mergetool.writeToTemp", "false"),
+        ] {
+            repo.git(&["config", key, value]);
+        }
+    }
+
+    /// A merge of `other` into main that conflicts in `file`: "ours" on main, "theirs" on `other`.
+    fn conflict_in(name: &str, file: &str) -> TestRepo {
+        let repo = TestRepo::new(name);
+        repo.write(file, "base\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write(file, "theirs\n");
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write(file, "ours\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+        repo
+    }
+
+    /// The untracked files in the repository, e.g. what a merge tool left behind.
+    fn untracked(repo: &TestRepo) -> Vec<String> {
+        let st = status(&repo.dir).unwrap();
+        st.unstaged
+            .into_iter()
+            .filter(|f| f.status == "?")
+            .map(|f| f.path)
+            .collect()
+    }
+
+    #[test]
+    fn uses_the_gui_merge_tool_before_the_plain_one() {
+        let repo = TestRepo::new("mergetool-config");
+        repo.git(&["config", "merge.tool", "plain"]);
+        repo.git(&["config", "merge.guitool", "graphical"]);
+        assert_eq!(
+            merge_tool(&repo.dir, &MergeToolChoice::Git).unwrap().as_deref(),
+            Some("graphical")
+        );
+        repo.git(&["config", "merge.guitool", ""]);
+        assert_eq!(
+            merge_tool(&repo.dir, &MergeToolChoice::Git).unwrap().as_deref(),
+            Some("plain")
+        );
+    }
+
+    #[test]
+    fn reports_no_merge_tool_when_none_is_configured() {
+        let repo = conflict_in("mergetool-none", "f.txt");
+        repo.git(&["config", "merge.tool", ""]);
+        repo.git(&["config", "merge.guitool", ""]);
+        assert_eq!(merge_tool(&repo.dir, &MergeToolChoice::Git).unwrap(), None);
+        let err = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap_err();
+        assert!(err.contains("No merge tool is configured"), "{err}");
+        // git was not left to pick a tool: nothing was started or written.
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+        assert!(untracked(&repo).is_empty());
+    }
+
+    #[test]
+    fn resolves_a_file_the_merge_tool_saved() {
+        let repo = conflict_in("mergetool-saved", "f.txt");
+        fake_merge_tool(&repo, r#"cat "$REMOTE" "$LOCAL" > "$MERGED""#, true);
+
+        let result = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Resolved);
+        assert_eq!(result.tool, "fake");
+        assert_eq!(repo.read("f.txt"), "theirs\nours\n");
+        assert_eq!(repo.git(&["show", ":f.txt"]), "theirs\nours\n");
+        assert!(conflicted_paths(&repo).is_empty());
+        // git keeps the conflicted file; nothing else is left over.
+        assert_eq!(result.backup.as_deref(), Some("f.txt.orig"));
+        assert!(repo.read("f.txt.orig").contains("<<<<<<<"));
+        assert_eq!(untracked(&repo), vec!["f.txt.orig"]);
+    }
+
+    #[test]
+    fn leaves_the_conflict_when_the_tool_fails() {
+        let repo = conflict_in("mergetool-fails", "f.txt");
+        let conflicted = repo.read("f.txt");
+        fake_merge_tool(&repo, r#"echo garbage > "$MERGED"; false"#, true);
+
+        let result = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Unresolved);
+        assert_eq!(result.backup, None);
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+        assert_eq!(repo.read("f.txt"), conflicted);
+        assert!(untracked(&repo).is_empty());
+    }
+
+    #[test]
+    fn leaves_the_conflict_when_the_tool_saves_nothing() {
+        let repo = conflict_in("mergetool-unsaved", "f.txt");
+        // Without a trusted exit code, git asks whether an unchanged file was merged: with nobody
+        // to answer, that counts as a no instead of waiting forever.
+        fake_merge_tool(&repo, "true", false);
+
+        let result = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Unresolved);
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+        assert!(untracked(&repo).is_empty());
+    }
+
+    #[test]
+    fn opens_a_path_with_spaces_in_the_merge_tool() {
+        let repo = conflict_in("mergetool-spaces", "my docs/read me.txt");
+        fake_merge_tool(&repo, r#"cp "$REMOTE" "$MERGED""#, true);
+        repo.git(&["config", "mergetool.keepBackup", "false"]);
+
+        let result = open_merge_tool(&repo.dir, "my docs/read me.txt", &MergeToolChoice::Git).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Resolved);
+        assert_eq!(result.backup, None);
+        assert_eq!(repo.read("my docs/read me.txt"), "theirs\n");
+        assert!(untracked(&repo).is_empty());
+    }
+
+    #[test]
+    fn refuses_the_merge_tool_where_one_side_deleted_the_file() {
+        let repo = conflicting_merge("mergetool-deleted");
+        fake_merge_tool(&repo, r#"cp "$REMOTE" "$MERGED""#, true);
+        for file in ["ours-gone.txt", "theirs-gone.txt"] {
+            let err = open_merge_tool(&repo.dir, file, &MergeToolChoice::Git).unwrap_err();
+            assert!(err.contains("from both sides"), "{err}");
+        }
+        assert_eq!(conflicted_paths(&repo).len(), 4);
+        assert!(untracked(&repo).is_empty());
+
+        let err = open_merge_tool(&repo.dir, "missing.txt", &MergeToolChoice::Git).unwrap_err();
+        assert!(err.contains("has no conflicts"), "{err}");
+    }
+
+    #[test]
+    fn refuses_merge_tools_that_need_a_terminal() {
+        let repo = conflict_in("mergetool-terminal", "f.txt");
+        repo.git(&["config", "merge.guitool", ""]);
+        for tool in ["vimdiff", "nvimdiff2"] {
+            repo.git(&["config", "merge.tool", tool]);
+            let err = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap_err();
+            assert!(err.contains("runs in a terminal"), "{err}");
+        }
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+
+        // A tool the user defined under that name is theirs to get right.
+        repo.git(&["config", "mergetool.vimdiff.cmd", r#"cp "$REMOTE" "$MERGED""#]);
+        repo.git(&["config", "mergetool.vimdiff.trustExitCode", "true"]);
+        repo.git(&["config", "merge.tool", "vimdiff"]);
+        let result = open_merge_tool(&repo.dir, "f.txt", &MergeToolChoice::Git).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Resolved);
+    }
+
+    #[test]
+    fn removes_what_a_missing_merge_tool_leaves_behind() {
+        let repo = conflict_in("mergetool-missing", "src/f.txt");
+        let conflicted = repo.read("src/f.txt");
+        fake_merge_tool(&repo, "true", true);
+        repo.git(&["config", "merge.tool", "kdiff3"]);
+        repo.git(&["config", "mergetool.kdiff3.path", "/nowhere/kdiff3"]);
+
+        let err = open_merge_tool(&repo.dir, "src/f.txt", &MergeToolChoice::Git).unwrap_err();
+        assert!(err.contains("kdiff3 is not available as '/nowhere/kdiff3'"), "{err}");
+        assert!(err.contains("mergetool.kdiff3.path"), "{err}");
+        assert_eq!(conflicted_paths(&repo), vec!["src/f.txt"]);
+        assert_eq!(repo.read("src/f.txt"), conflicted);
+        assert!(untracked(&repo).is_empty(), "{:?}", untracked(&repo));
+    }
+
+    #[test]
+    fn opens_the_merge_tool_chosen_in_the_settings() {
+        let repo = conflict_in("mergetool-settings", "f.txt");
+        // git's own tool would fail; the settings take precedence over it.
+        fake_merge_tool(&repo, "false", true);
+
+        // git sees that the file changed by its modification time, so the "tool" takes a moment, as a person would.
+        let command = MergeToolChoice::Command(r#"sleep 1; cp "$REMOTE" "$MERGED""#.into());
+        assert_eq!(merge_tool(&repo.dir, &command).unwrap().as_deref(), Some("sleep"));
+        let result = open_merge_tool(&repo.dir, "f.txt", &command).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Resolved);
+        assert_eq!(result.tool, "sleep");
+        assert_eq!(repo.read("f.txt"), "theirs\n");
+        // Nothing of the command was written to the repository's config.
+        assert!(run(&repo.dir, &["config", "--get", "mergetool.grit-custom.cmd"]).is_err());
+    }
+
+    #[test]
+    fn leaves_the_conflict_when_the_custom_command_saves_nothing() {
+        let repo = conflict_in("mergetool-settings-unsaved", "f.txt");
+        let command = MergeToolChoice::Command("true".into());
+        let result = open_merge_tool(&repo.dir, "f.txt", &command).unwrap();
+        assert_eq!(result.outcome, MergeToolOutcome::Unresolved);
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+        assert!(untracked(&repo).is_empty());
+    }
+
+    #[test]
+    fn opens_a_named_tool_from_the_settings_at_its_path() {
+        let repo = conflict_in("mergetool-settings-named", "f.txt");
+        repo.git(&["config", "merge.tool", ""]);
+        repo.git(&["config", "merge.guitool", ""]);
+        let kdiff3 = |path: &str| MergeToolChoice::Named {
+            name: "kdiff3".into(),
+            path: Some(path.into()),
+        };
+        assert_eq!(merge_tool(&repo.dir, &kdiff3("/x")).unwrap().as_deref(), Some("kdiff3"));
+
+        let err = open_merge_tool(&repo.dir, "f.txt", &kdiff3("/nowhere/kdiff3")).unwrap_err();
+        assert!(err.contains("kdiff3 is not available as '/nowhere/kdiff3'"), "{err}");
+        assert!(err.contains("in Settings"), "{err}");
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+        assert!(untracked(&repo).is_empty(), "{:?}", untracked(&repo));
+
+        let vimdiff = MergeToolChoice::Named {
+            name: "vimdiff".into(),
+            path: None,
+        };
+        let err = open_merge_tool(&repo.dir, "f.txt", &vimdiff).unwrap_err();
+        assert!(err.contains("Choose a graphical merge tool in Settings"), "{err}");
+    }
+
+    #[test]
+    fn names_the_program_of_a_merge_command() {
+        assert_eq!(command_program(r#"meld "$LOCAL" "$MERGED""#), "meld");
+        assert_eq!(command_program(r#"  /usr/local/bin/bcomp "$MERGED""#), "bcomp");
+        assert_eq!(
+            command_program(r#""/Applications/My Tool.app/Contents/MacOS/tool" -m"#),
+            "tool"
+        );
+        assert_eq!(command_program("'/opt/x y/merge'"), "merge");
+        assert_eq!(command_program(r#""""#), "the merge command");
+    }
+
+    #[test]
+    fn recognizes_the_files_a_merge_tool_reads() {
+        let repo = TestRepo::new("mergetool-temporaries");
+        for name in [
+            "app.ts",
+            "app_LOCAL_123.ts",
+            "app_REMOTE_123.ts",
+            "app_BASE_123.ts",
+            "app_BACKUP_123.ts",
+            "app_LOCAL_LCONFL_123.ts",
+            "app_LOCAL_notes.ts",
+            "app_LOCAL_123.js",
+            "other_LOCAL_123.ts",
+        ] {
+            repo.write(&format!("src/{name}"), "x\n");
+        }
+        let mut found: Vec<String> = merge_temporaries(&repo.dir.join("src/app.ts"))
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                "app_BACKUP_123.ts",
+                "app_BASE_123.ts",
+                "app_LOCAL_123.ts",
+                "app_LOCAL_LCONFL_123.ts",
+                "app_REMOTE_123.ts"
+            ]
+        );
     }
 
     #[test]

@@ -7,6 +7,8 @@ import {
   conflictSides,
   ConflictSides,
   GENERIC_SIDES,
+  mergeToolBlocked,
+  mergeToolSummary,
   removedBy,
   resolveTitle,
   sideKeeps,
@@ -180,19 +182,74 @@ describe("conflictMenu", () => {
   const labels = (entries: ReturnType<typeof conflictMenu>) =>
     entries.map((e) => (e === "separator" ? "-" : e.label));
 
+  const ctx = { sides, toolBusy: null };
+  const item = (entries: ReturnType<typeof conflictMenu>, action: string): ConflictMenuItem => {
+    const found = entries.find((e): e is ConflictMenuItem => e !== "separator" && e.action === action);
+    if (!found) throw new Error(`no ${action} item`);
+    return found;
+  };
+
   it("names the sides for a file", () => {
-    const entries = conflictMenu({ kind: "file", file: conflictFile("a.txt", "deleted-by-us") }, { sides });
-    expect(labels(entries)).toEqual(["Use main (current branch)", "Use feature (being merged)", "-", "Mark Resolved"]);
+    const entries = conflictMenu({ kind: "file", file: conflictFile("a.txt") }, ctx);
+    expect(labels(entries)).toEqual([
+      "Use main (current branch)",
+      "Use feature (being merged)",
+      "Open in Merge Tool",
+      "-",
+      "Mark Resolved",
+    ]);
     const items = entries.filter((e): e is ConflictMenuItem => e !== "separator");
-    expect(items.map((i) => i.action)).toEqual(["use-ours", "use-theirs", "mark-resolved"]);
-    expect(items[0].title).toBe("main (current branch) has no such file: resolving deletes it");
+    expect(items.map((i) => i.action)).toEqual(["use-ours", "use-theirs", "merge-tool", "mark-resolved"]);
     expect(items.every((i) => i.blocked === null)).toBe(true);
+
+    const deleted = conflictMenu({ kind: "file", file: conflictFile("a.txt", "deleted-by-us") }, ctx);
+    expect(item(deleted, "use-ours").title).toBe("main (current branch) has no such file: resolving deletes it");
+  });
+
+  it("offers the merge tool only where it can merge, and one at a time", () => {
+    const deleted = conflictMenu({ kind: "file", file: conflictFile("a.txt", "deleted-by-them") }, ctx);
+    expect(item(deleted, "merge-tool").blocked).toMatch(/needs a version from both sides/);
+    expect(item(deleted, "use-theirs").blocked).toBeNull();
+
+    const busy = conflictMenu({ kind: "file", file: conflictFile("a.txt") }, { sides, toolBusy: "Wait" });
+    expect(item(busy, "merge-tool").blocked).toBe("Wait");
+    expect(item(busy, "use-ours").blocked).toBeNull();
   });
 
   it("asks before taking a side for a folder", () => {
     const files = [conflictFile("src/a.txt"), conflictFile("src/b.txt")];
-    const entries = conflictMenu({ kind: "folder", path: "src", files }, { sides });
+    const entries = conflictMenu({ kind: "folder", path: "src", files }, ctx);
     expect(labels(entries)).toEqual(["Use main for Folder…", "Use feature for Folder…", "-", "Mark Folder Resolved"]);
     expect(entries[0]).toMatchObject({ title: "2 files" });
+  });
+});
+
+describe("merge tool", () => {
+  it("can merge files that both sides have", () => {
+    expect(mergeToolBlocked("both-modified")).toBeNull();
+    expect(mergeToolBlocked("both-added")).toBeNull();
+    expect(mergeToolBlocked(undefined)).toBeNull();
+    for (const kind of ["deleted-by-us", "deleted-by-them", "added-by-us", "added-by-them", "both-deleted"] as const) {
+      expect(mergeToolBlocked(kind)).toMatch(/use one of the sides/);
+    }
+  });
+
+  it("sums up how the tool was closed", () => {
+    const resolved = { outcome: "resolved", tool: "meld", backup: null } as const;
+    expect(mergeToolSummary(resolved, "src/app.ts", 60_000)).toEqual({
+      kind: "info",
+      text: "Resolved src/app.ts in meld",
+    });
+    expect(mergeToolSummary({ ...resolved, backup: "src/app.ts.orig" }, "src/app.ts", 60_000).text).toBe(
+      "Resolved src/app.ts in meld. git kept the conflicted file as src/app.ts.orig",
+    );
+
+    const unresolved = { outcome: "unresolved", tool: "meld", backup: null } as const;
+    expect(mergeToolSummary(unresolved, "src/app.ts", 60_000)).toEqual({
+      kind: "warning",
+      text: "src/app.ts is still conflicted: meld was closed without saving a result.",
+    });
+    // A tool that is back at once most likely didn't wait for its window.
+    expect(mergeToolSummary(unresolved, "src/app.ts", 300).text).toMatch(/meld didn't wait for it/);
   });
 });

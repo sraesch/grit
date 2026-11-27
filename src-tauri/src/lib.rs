@@ -13,11 +13,11 @@ use tauri::{AppHandle, Emitter, Manager, State, ipc::Response};
 
 use git::{
     Branches, CommitDetails, ConflictSide, DeleteBranchOutcome, Divergence, FetchOptions, FetchResult, GitResult,
-    LogEntry, MergeMode, MergeOptions, MergeResult, PatchAction, PickOptions, PickResult, PullOptions, PullResult,
-    PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode, ResetPreview, Stash, StashApplyResult,
-    StashOptions, Status,
+    LogEntry, MergeMode, MergeOptions, MergeResult, MergeToolChoice, MergeToolResult, PatchAction, PickOptions,
+    PickResult, PullOptions, PullResult, PushOptions, PushResult, RebaseOptions, RebaseResult, RepoInfo, ResetMode,
+    ResetPreview, Stash, StashApplyResult, StashOptions, Status,
 };
-use settings::{Settings, SettingsStore};
+use settings::{CUSTOM_MERGE_TOOL, Settings, SettingsStore};
 use watcher::WatchState;
 
 /// Runs blocking git work off the async runtime so the UI never stalls.
@@ -145,6 +145,32 @@ async fn discard(repo: String, tracked: Vec<String>, untracked: Vec<String>) -> 
 #[tauri::command]
 async fn resolve_conflicts(repo: String, paths: Vec<String>, side: ConflictSide) -> GitResult<()> {
     blocking(move || git::resolve_conflicts(&PathBuf::from(repo), &paths, side)).await
+}
+
+/// The merge tool configured in git (`merge.guitool`, else `merge.tool`), if any.
+#[tauri::command]
+async fn get_merge_tool(repo: String, store: State<'_, SettingsStore>) -> GitResult<Option<String>> {
+    let choice = merge_tool_choice(&store.get());
+    blocking(move || git::merge_tool(&PathBuf::from(repo), &choice)).await
+}
+
+/// Opens a conflicted file in the configured merge tool and waits until the tool is closed.
+#[tauri::command]
+async fn open_merge_tool(repo: String, path: String, store: State<'_, SettingsStore>) -> GitResult<MergeToolResult> {
+    let choice = merge_tool_choice(&store.get());
+    blocking(move || git::open_merge_tool(&PathBuf::from(repo), &path, &choice)).await
+}
+
+/// The merge tool chosen in the settings; without one, the tool configured in git.
+fn merge_tool_choice(settings: &Settings) -> MergeToolChoice {
+    match (settings.merge_tool.as_deref(), settings.merge_tool_command.as_deref()) {
+        (Some(CUSTOM_MERGE_TOOL), Some(cmd)) => MergeToolChoice::Command(cmd.to_string()),
+        (Some(CUSTOM_MERGE_TOOL), None) | (None, _) => MergeToolChoice::Git,
+        (Some(name), _) => MergeToolChoice::Named {
+            name: name.to_string(),
+            path: settings.merge_tool_path.clone(),
+        },
+    }
 }
 
 #[tauri::command]
@@ -541,6 +567,8 @@ pub fn run() {
             unstage_all,
             discard,
             resolve_conflicts,
+            get_merge_tool,
+            open_merge_tool,
             add_to_gitignore,
             apply_selection,
             commit,

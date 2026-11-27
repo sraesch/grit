@@ -6,6 +6,7 @@ import {
   conflictMenu,
   ConflictSides,
   GENERIC_SIDES,
+  mergeToolBlocked,
   resolveTitle,
   sideName,
 } from "../conflict";
@@ -36,11 +37,23 @@ interface ChangesViewProps {
   status: Status | null;
   /** Who the two sides of the current conflicts are, for naming them. */
   sides?: ConflictSides;
+  /** Opens a conflicted file in the merge tool. Without it, the tool isn't offered. */
+  onOpenMergeTool?: (file: FileChange) => void;
+  /** Why no merge tool can be opened right now, e.g. one is open already; null when one can. */
+  toolBusy?: string | null;
   onChanged: () => void;
   onError: (message: string) => void;
 }
 
-export function ChangesView({ repo, status, sides = GENERIC_SIDES, onChanged, onError }: ChangesViewProps) {
+export function ChangesView({
+  repo,
+  status,
+  sides = GENERIC_SIDES,
+  onOpenMergeTool,
+  toolBusy = null,
+  onChanged,
+  onError,
+}: ChangesViewProps) {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -240,17 +253,23 @@ export function ChangesView({ repo, status, sides = GENERIC_SIDES, onChanged, on
     const actions: Record<ConflictAction, () => void> = {
       "use-ours": takeSide("ours"),
       "use-theirs": takeSide("theirs"),
+      "merge-tool": () => onOpenMergeTool?.(files[0]),
       "mark-resolved": () => stageFiles(files),
     };
-    return conflictMenu(target, { sides }).map((item) =>
-      item === "separator"
-        ? SEPARATOR
-        : {
-            label: item.label,
-            disabled: item.blocked !== null,
-            title: item.blocked ?? item.title,
-            onSelect: actions[item.action],
-          },
+    return (
+      conflictMenu(target, { sides, toolBusy })
+        // Without a way to open one, the merge tool isn't offered at all.
+        .filter((item) => item === "separator" || item.action !== "merge-tool" || !!onOpenMergeTool)
+        .map((item) =>
+          item === "separator"
+            ? SEPARATOR
+            : {
+                label: item.label,
+                disabled: item.blocked !== null,
+                title: item.blocked ?? item.title,
+                onSelect: actions[item.action],
+              },
+        )
     );
   }
 
@@ -287,7 +306,8 @@ export function ChangesView({ repo, status, sides = GENERIC_SIDES, onChanged, on
 
   const openMenu = (list: ChangeList) => (target: RowTarget, x: number, y: number) => setMenu({ target, list, x, y });
 
-  // Taking one side of the selected conflict, from the header of its diff.
+  // Resolving the selected conflict, from the header of its diff.
+  const toolBlocked = mergeToolBlocked(conflictFile?.conflict) ?? toolBusy;
   const conflictActions = conflictFile && (
     <>
       {(["ours", "theirs"] as const).map((side) => (
@@ -301,6 +321,16 @@ export function ChangesView({ repo, status, sides = GENERIC_SIDES, onChanged, on
           Use {sides[side].name}
         </button>
       ))}
+      {onOpenMergeTool && (
+        <button
+          className="small"
+          disabled={toolBlocked !== null}
+          title={toolBlocked ?? "Open the file in your merge tool and wait until it is closed"}
+          onClick={() => onOpenMergeTool(conflictFile)}
+        >
+          Open in merge tool
+        </button>
+      )}
     </>
   );
 

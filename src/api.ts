@@ -57,6 +57,16 @@ export interface Operation {
   onto?: string | null;
 }
 
+/** How a run of the merge tool ended. */
+export interface MergeToolResult {
+  /** "resolved": the tool saved a result, which git staged. "unresolved": it was closed without one. */
+  outcome: "resolved" | "unresolved";
+  /** The tool that ran. */
+  tool: string;
+  /** The copy of the conflicted file that git kept next to it (`<path>.orig`), if it did. */
+  backup: string | null;
+}
+
 export interface Status {
   branch: string | null;
   upstream: string | null;
@@ -353,6 +363,15 @@ export interface Settings {
   reposDir: string | null;
   /** Open repositories are fetched in the background this often; 0 turns it off. */
   autoFetchMinutes: number;
+  /**
+   * The merge tool for conflicted files: one of git's tool names (e.g. "meld"), or "custom" for
+   * `mergeToolCommand`. Null uses the tool configured in git.
+   */
+  mergeTool: string | null;
+  /** Where the named merge tool is installed; null finds it on the PATH. */
+  mergeToolPath: string | null;
+  /** The shell command of the "custom" merge tool, with $BASE, $LOCAL, $REMOTE and $MERGED. */
+  mergeToolCommand: string | null;
 }
 
 export interface RepoChanged {
@@ -402,6 +421,16 @@ export const api = {
    */
   resolveConflicts: (repo: string, paths: string[], side: ConflictSide) =>
     invoke<void>("resolve_conflicts", { repo, paths, side }),
+  /**
+   * The merge tool chosen in the settings, else the one configured in git (`merge.guitool`, else
+   * `merge.tool`); null when there is none.
+   */
+  mergeTool: (repo: string) => invoke<string | null>("get_merge_tool", { repo }),
+  /**
+   * Opens a conflicted file in the merge tool (see `mergeTool`) and resolves once the tool is closed.
+   * Rejects when the tool can't be started, and for conflicts a tool can't merge (a deleted side).
+   */
+  openMergeTool: (repo: string, path: string) => invoke<MergeToolResult>("open_merge_tool", { repo, path }),
   /**
    * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
    * longer matches the selection.
