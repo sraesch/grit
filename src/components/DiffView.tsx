@@ -25,6 +25,8 @@ interface DiffViewProps {
   title?: string;
   /** Controls shown at the right of the header. */
   actions?: ReactNode;
+  /** A remark shown between the header and the diff, e.g. why a conflict is shown as a diff. */
+  note?: string | null;
   /**
    * Buttons for each hunk. Left out of truncated diffs and renames, whose hunks can't be patched
    * on their own.
@@ -47,6 +49,7 @@ export function DiffView({
   error,
   title,
   actions,
+  note,
   hunkActions,
   lineActions,
   hunkActionsDisabled,
@@ -210,6 +213,11 @@ export function DiffView({
           ) : undefined
         }
       />
+      {note && title && (
+        <p className="conflict-note" role="note">
+          {note}
+        </p>
+      )}
       <div className="diff-scroll">{body}</div>
     </div>
   );

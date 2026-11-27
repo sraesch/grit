@@ -25,6 +25,16 @@ describe("DiffView", () => {
     expect(container.querySelectorAll(".diff-line")).toHaveLength(4);
   });
 
+  it("shows a remark above the diff of the titled file", () => {
+    const { rerender } = render(<DiffView diff={"@@ -1 +1 @@\n-a\n+b\n"} title="a.bin" note="Shown as a diff" />);
+    expect(screen.getByRole("note")).toHaveTextContent("Shown as a diff");
+    rerender(<DiffView diff={"@@ -1 +1 @@\n-a\n+b\n"} title="a.bin" note={null} />);
+    expect(screen.queryByRole("note")).toBeNull();
+    // Without a file there is nothing to remark on.
+    rerender(<DiffView diff={null} note="Shown as a diff" />);
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
   it("labels binary files", () => {
     render(<DiffView diff={"diff --git a/x b/x\nBinary files a/x and b/x differ\n"} />);
     expect(screen.getByText("Binary file")).toBeInTheDocument();

@@ -1186,6 +1186,206 @@ button.primary.danger:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
+/* Conflict editor: our version, the result and their version side by side */
+
+.conflict-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  background: var(--bg);
+}
+.conflict-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.conflict-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.conflict-position {
+  font-weight: 600;
+}
+.conflict-resolution {
+  color: var(--text-muted);
+}
+.conflict-toolbar button[aria-pressed="true"] {
+  background: var(--bg-selected);
+  border-color: var(--accent);
+}
+.conflict-columns {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.conflict-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.conflict-column + .conflict-column {
+  border-left: 1px solid var(--border);
+}
+.conflict-column > header,
+.conflict-base > header {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conflict-column > header strong,
+.conflict-base > header strong {
+  color: var(--text);
+}
+.conflict-pane {
+  flex: 1;
+  min-height: 0;
+}
+.conflict-base {
+  border-top: 1px solid var(--border);
+}
+.conflict-base pre {
+  margin: 0;
+  padding: 4px 10px;
+  max-height: 126px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+.conflict-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* The lines of a conflict and the line above it: waiting for a decision, decided, or one side's version. */
+.cm-conflict-header {
+  padding: 0 8px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.cm-conflict-line.cm-conflict-side {
+  background: var(--hunk-bg);
+}
+.cm-conflict-line.cm-conflict-unresolved {
+  background: var(--warn-bg);
+}
+.cm-conflict-line.cm-conflict-resolved {
+  background: var(--add-bg);
+}
+.cm-conflict-header.cm-conflict-unresolved {
+  color: var(--warn-text);
+}
+.cm-conflict-header.cm-conflict-current {
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 3px 0 var(--accent);
+}
+.cm-conflict-line.cm-conflict-current {
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+/* Syntax colors of the conflict editor, for both themes. */
+:root {
+  --code-keyword: #a626a4;
+  --code-string: #2f7d32;
+  --code-number: #986801;
+  --code-comment: #8b919a;
+  --code-name: #2f5fc0;
+  --code-type: #b5540d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --code-keyword: #c792ea;
+    --code-string: #a5d6a7;
+    --code-number: #f0b86c;
+    --code-comment: #7d838c;
+    --code-name: #82aaff;
+    --code-type: #ffb38a;
+  }
+}
+.tok-keyword,
+.tok-operatorKeyword,
+.tok-modifier {
+  color: var(--code-keyword);
+}
+.tok-string,
+.tok-string2,
+.tok-inserted {
+  color: var(--code-string);
+}
+.tok-number,
+.tok-bool,
+.tok-atom,
+.tok-literal {
+  color: var(--code-number);
+}
+.tok-comment,
+.tok-meta {
+  color: var(--code-comment);
+  font-style: italic;
+}
+.tok-variableName.tok-definition,
+.tok-propertyName,
+.tok-labelName,
+.tok-macroName,
+.tok-url {
+  color: var(--code-name);
+}
+.tok-typeName,
+.tok-className,
+.tok-namespace,
+.tok-heading {
+  color: var(--code-type);
+}
+.tok-heading,
+.tok-strong {
+  font-weight: 600;
+}
+.tok-emphasis {
+  font-style: italic;
+}
+.tok-link {
+  text-decoration: underline;
+}
+.tok-invalid {
+  color: var(--danger);
+}
+
 /* Image preview */
 
 .image-compare {

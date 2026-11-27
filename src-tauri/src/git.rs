@@ -12,6 +12,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
+use crate::conflict;
 use crate::graph::{self, GraphRow};
 use crate::patch::{self, HunkSelection};
 
@@ -1264,6 +1265,219 @@ fn add_tool_dirs(cmd: &mut Command) {
 
 #[cfg(not(target_os = "macos"))]
 fn add_tool_dirs(_cmd: &mut Command) {}
+
+// ---------------------------------------------------------------------------
+// Conflict editor
+// ---------------------------------------------------------------------------
+
+/// Versions of a file larger than this are not loaded into the conflict editor.
+const MAX_CONFLICT_BYTES: u64 = 1024 * 1024;
+
+/// A conflicted text file as the conflict editor shows it.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictFile {
+    /// Stands for what was loaded: saving is refused once the conflict or the working file changed.
+    pub token: String,
+    /// The file from top to bottom, with line breaks as `\n`.
+    pub segments: Vec<conflict::Segment>,
+    /// Whether the working file still has conflict markers. Without them it was already
+    /// resolved by hand (or by rerere), which saving from the editor would replace.
+    pub markers: bool,
+}
+
+/// The index entry of the conflicted file at `path`.
+fn unmerged_file(repo: &Path, path: &str) -> GitResult<Unmerged> {
+    unmerged(repo, &[path.to_string()])?
+        .into_iter()
+        .find(|e| e.path == path)
+        .ok_or_else(|| format!("{path} has no conflicts to resolve."))
+}
+
+/// The text of one version of a conflicted file, or why the editor can't show it.
+fn conflict_text(repo: &Path, version: &StageEntry) -> GitResult<String> {
+    let size: u64 = run(repo, &["cat-file", "-s", &version.sha])?
+        .trim()
+        .parse()
+        .map_err(|_| format!("Unexpected size for {}", version.sha))?;
+    if size > MAX_CONFLICT_BYTES {
+        return Err(format!(
+            "This file is too large to resolve here ({:.1} MB, limit {:.0} MB). Use the merge tool or one of the sides.",
+            size as f64 / 1_048_576.0,
+            MAX_CONFLICT_BYTES as f64 / 1_048_576.0
+        ));
+    }
+    let blob = run_bytes(repo, &["cat-file", "blob", &version.sha])?;
+    if lfs_pointer_size(&blob).is_some() {
+        return Err("This file is stored in Git LFS, so it can't be merged as text. Use one of the sides.".into());
+    }
+    match String::from_utf8(blob) {
+        Ok(text) if !text.contains('\0') => Ok(text),
+        _ => Err(
+            "This file isn't UTF-8 text, so it can't be resolved here. Use the merge tool or one of the sides.".into(),
+        ),
+    }
+}
+
+/// Merges the versions of a conflicted file again, the way git did, and splits the result.
+fn merged_segments(repo: &Path, entry: &Unmerged) -> GitResult<Vec<conflict::Segment>> {
+    let (Some(ours), Some(theirs)) = (&entry.ours, &entry.theirs) else {
+        return Err("One side has no version of this file. Resolve it by taking one of the sides.".into());
+    };
+    if [ours, theirs].iter().any(|v| !v.mode.starts_with("100")) {
+        return Err("Only regular files can be resolved here. Use one of the sides.".into());
+    }
+    let ours = conflict_text(repo, ours)?;
+    let theirs = conflict_text(repo, theirs)?;
+    let base = entry
+        .base
+        .as_ref()
+        .filter(|v| v.mode.starts_with("100"))
+        .map(|v| conflict_text(repo, v))
+        .transpose()?;
+    // The editor works on plain line breaks; a file stored with CRLF gets them back when saved.
+    let plain = |text: String| text.replace("\r\n", "\n");
+    let (ours, theirs, base) = (plain(ours), plain(theirs), base.map(plain));
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = TempDir(std::env::temp_dir().join(format!("grit-merge-{}-{unique}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).map_err(|e| format!("Could not create {}: {e}", dir.0.display()))?;
+    let write = |name: &str, text: &str| -> GitResult<String> {
+        let file = dir.0.join(name);
+        std::fs::write(&file, text).map_err(|e| format!("Could not write {}: {e}", file.display()))?;
+        Ok(file.to_string_lossy().into_owned())
+    };
+    let ours_file = write("ours", &ours)?;
+    let base_file = write("base", base.as_deref().unwrap_or(""))?;
+    let theirs_file = write("theirs", &theirs)?;
+
+    let size = conflict::marker_size(&[&ours, base.as_deref().unwrap_or(""), &theirs]);
+    let marker_size = format!("--marker-size={size}");
+    let [ours_label, base_label, theirs_label] = conflict::LABELS;
+    let files = [
+        "-L",
+        ours_label,
+        "-L",
+        base_label,
+        "-L",
+        theirs_label,
+        &ours_file,
+        &base_file,
+        &theirs_file,
+    ];
+    // What git's merge uses: the histogram diff and, with a base to show, conflicts trimmed of
+    // what both sides agree on. Without a base, the plain style keeps the conflicts as small.
+    let style: &[&str] = if base.is_some() {
+        &["--zdiff3", "--diff-algorithm=histogram"]
+    } else {
+        &["--diff-algorithm=histogram"]
+    };
+    let merge = |style: &[&str]| -> GitResult<std::process::Output> {
+        git_command(repo)
+            .args([
+                "-c",
+                "merge.conflictStyle=merge",
+                "merge-file",
+                "-p",
+                "-q",
+                &marker_size,
+            ])
+            .args(style)
+            .args(files)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("Failed to start git: {e}"))
+    };
+    let mut out = merge(style)?;
+    // An older git doesn't know these options: the classic ones give the same conflicts, less trimmed.
+    if out.status.code() == Some(129) {
+        out = merge(if base.is_some() { &["--diff3"] } else { &[] })?;
+    }
+    // The exit code is the number of conflicts, capped at 127; anything else is an error.
+    if !matches!(out.status.code(), Some(0..=127)) {
+        return Err(error_text(
+            &String::from_utf8_lossy(&out.stderr),
+            "git merge-file failed",
+        ));
+    }
+    let merged = String::from_utf8(out.stdout).map_err(|_| "Unexpected merge output".to_string())?;
+    let mut segments = conflict::parse(&merged, size)?;
+    conflict::restore_final_newline(&mut segments, &ours, base.as_deref(), &theirs);
+    Ok(segments)
+}
+
+/// A folder in the system's temp dir that is removed when it goes out of scope.
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Stands for the state the conflict editor loaded: the three versions in the index and the working file.
+fn conflict_token(repo: &Path, entry: &Unmerged) -> String {
+    let sha = |version: &Option<StageEntry>| version.as_ref().map_or("-", |v| v.sha.as_str()).to_string();
+    let file = std::fs::metadata(repo.join(&entry.path)).ok();
+    let modified = file
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "{}:{}:{}:{}:{modified}",
+        sha(&entry.base),
+        sha(&entry.ours),
+        sha(&entry.theirs),
+        file.map_or(0, |m| m.len())
+    )
+}
+
+/// A conflicted text file split into what needs no decision and its conflicts. Refused, with the
+/// reason, for files the editor can't merge: a side without a version, binary files, files in
+/// Git LFS and very large ones.
+pub fn conflict_file(repo: &Path, path: &str) -> GitResult<ConflictFile> {
+    let entry = unmerged_file(repo, path)?;
+    let segments = merged_segments(repo, &entry)?;
+    let working = std::fs::read(repo.join(path)).unwrap_or_default();
+    let has_line = |start: &[u8]| working.split(|&b| b == b'\n').any(|line| line.starts_with(start));
+    Ok(ConflictFile {
+        token: conflict_token(repo, &entry),
+        segments,
+        markers: has_line(b"<<<<<<<") && has_line(b">>>>>>>"),
+    })
+}
+
+/// Saves `content` as the resolution of the conflicted file at `path` and stages it. The working
+/// file is written by git, as a checkout of the result would, so line-ending conversion and the
+/// file mode come out right. Refused when the conflict or the working file changed since the
+/// editor loaded them with `token`.
+pub fn save_conflict_file(repo: &Path, path: &str, token: &str, content: &str) -> GitResult<()> {
+    let entry = unmerged_file(repo, path)?;
+    if conflict_token(repo, &entry) != token {
+        return Err(conflict::STALE.into());
+    }
+    let (Some(ours), Some(theirs)) = (&entry.ours, &entry.theirs) else {
+        return Err(conflict::STALE.into());
+    };
+    let crlf = String::from_utf8_lossy(&run_bytes(repo, &["cat-file", "blob", &ours.sha])?).contains("\r\n");
+    let content = content.replace("\r\n", "\n");
+    let content = if crlf { content.replace('\n', "\r\n") } else { content };
+    let sha = exec(repo, &["hash-object", "-w", "--stdin"], Some(content.as_bytes()), &[0])?;
+    // The mode of a merge: a side that changed it wins over one that kept the base's.
+    let changed_by_ours = entry.base.as_ref().is_some_and(|base| base.mode != ours.mode);
+    let resolved = StageEntry {
+        mode: if entry.base.is_none() || changed_by_ours {
+            ours.mode.clone()
+        } else {
+            theirs.mode.clone()
+        },
+        sha: String::from_utf8_lossy(&sha).trim().to_string(),
+    };
+    stage_resolved(repo, &[(path, &resolved)])
+}
 
 /// What to do with the selected parts of a diff.
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -4262,6 +4476,213 @@ mod tests {
                 "app_REMOTE_123.ts"
             ]
         );
+    }
+
+    /// A merge of `other` into main that conflicts in f.txt, given its three versions.
+    fn conflict_of(name: &str, base: &str, ours: &str, theirs: &str) -> TestRepo {
+        let repo = TestRepo::new(name);
+        repo.write("f.txt", base);
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", theirs);
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("f.txt", ours);
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+        repo
+    }
+
+    fn common(text: &str) -> conflict::Segment {
+        conflict::Segment::Common { text: text.into() }
+    }
+
+    fn conflict(ours: &str, base: Option<&str>, theirs: &str) -> conflict::Segment {
+        conflict::Segment::Conflict {
+            ours: ours.into(),
+            base: base.map(String::from),
+            theirs: theirs.into(),
+        }
+    }
+
+    #[test]
+    fn splits_a_conflicted_file_for_the_editor() {
+        let lines = |changed: &[(usize, &str)]| {
+            let mut lines: Vec<String> = (1..=10).map(|n| format!("line {n}")).collect();
+            for (n, text) in changed {
+                lines[n - 1] = text.to_string();
+            }
+            lines.join("\n") + "\n"
+        };
+        let repo = conflict_of(
+            "editor-split",
+            &lines(&[]),
+            &lines(&[(2, "two of ours"), (9, "nine of ours")]),
+            // Line 5 is changed by one side only, which is no conflict.
+            &lines(&[(2, "two of theirs"), (5, "FIVE"), (9, "nine of theirs")]),
+        );
+
+        let file = conflict_file(&repo.dir, "f.txt").unwrap();
+        assert_eq!(
+            file.segments,
+            vec![
+                common("line 1\n"),
+                conflict("two of ours\n", Some("line 2\n"), "two of theirs\n"),
+                common("line 3\nline 4\nFIVE\nline 6\nline 7\nline 8\n"),
+                conflict("nine of ours\n", Some("line 9\n"), "nine of theirs\n"),
+                common("line 10\n"),
+            ]
+        );
+        assert!(file.markers);
+    }
+
+    #[test]
+    fn splits_a_file_both_sides_added() {
+        let repo = TestRepo::new("editor-added");
+        repo.write("other.txt", "x\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("f.txt", "shared start\ntheirs\nshared end\n");
+        repo.commit_all("theirs");
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("f.txt", "shared start\nours\nshared end\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        // Without a common ancestor only the lines that differ conflict.
+        assert_eq!(
+            conflict_file(&repo.dir, "f.txt").unwrap().segments,
+            vec![
+                common("shared start\n"),
+                conflict("ours\n", None, "theirs\n"),
+                common("shared end\n"),
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_a_conflict_at_the_end_of_a_file_without_a_final_line_break() {
+        let repo = conflict_of("editor-eof", "start\nbase", "start\nours", "start\ntheirs\n");
+        assert_eq!(
+            conflict_file(&repo.dir, "f.txt").unwrap().segments,
+            vec![common("start\n"), conflict("ours", Some("base"), "theirs\n")]
+        );
+    }
+
+    #[test]
+    fn saves_the_resolution_and_stages_it() {
+        let repo = conflict_of("editor-save", "base\n", "ours\n", "theirs\n");
+        let file = conflict_file(&repo.dir, "f.txt").unwrap();
+        save_conflict_file(&repo.dir, "f.txt", &file.token, "ours and theirs\n").unwrap();
+
+        let st = status(&repo.dir).unwrap();
+        assert!(st.conflicted.is_empty() && st.unstaged.is_empty());
+        assert_eq!(st.staged.len(), 1);
+        assert_eq!(repo.read("f.txt"), "ours and theirs\n");
+        assert_eq!(repo.git(&["show", ":f.txt"]), "ours and theirs\n");
+        // The merge can go on from here.
+        continue_operation(&repo.dir).unwrap();
+        assert_eq!(repo.git(&["show", "HEAD:f.txt"]), "ours and theirs\n");
+    }
+
+    #[test]
+    fn saving_keeps_crlf_and_the_mode() {
+        let repo = TestRepo::new("editor-crlf");
+        // The mode comes from the index alone, as on Windows.
+        repo.git(&["config", "core.fileMode", "false"]);
+        repo.write("run.sh", "echo base\r\ndone\r\n");
+        repo.commit_all("base");
+        repo.git(&["switch", "-q", "-c", "other"]);
+        repo.write("run.sh", "echo theirs\r\ndone\r\n");
+        repo.git(&["add", "run.sh"]);
+        repo.git(&["update-index", "--chmod=+x", "run.sh"]);
+        commit(&repo.dir, "theirs", false).unwrap();
+        repo.git(&["switch", "-q", "main"]);
+        repo.write("run.sh", "echo ours\r\ndone\r\n");
+        repo.commit_all("ours");
+        assert!(run(&repo.dir, &["merge", "-q", "other"]).is_err());
+
+        let file = conflict_file(&repo.dir, "run.sh").unwrap();
+        // The editor gets plain line breaks.
+        assert_eq!(
+            file.segments,
+            vec![
+                conflict("echo ours\n", Some("echo base\n"), "echo theirs\n"),
+                common("done\n"),
+            ]
+        );
+        save_conflict_file(&repo.dir, "run.sh", &file.token, "echo both\ndone\n").unwrap();
+        assert_eq!(repo.git(&["show", ":run.sh"]), "echo both\r\ndone\r\n");
+        assert_eq!(repo.read("run.sh"), "echo both\r\ndone\r\n");
+        // Only their side made the file executable, so the merged file is.
+        assert!(repo.git(&["ls-files", "-s", "run.sh"]).starts_with("100755 "));
+    }
+
+    #[test]
+    fn writes_the_working_file_as_a_checkout_would() {
+        let repo = conflict_of("editor-autocrlf", "base\n", "ours\n", "theirs\n");
+        repo.git(&["config", "core.autocrlf", "true"]);
+        let file = conflict_file(&repo.dir, "f.txt").unwrap();
+        save_conflict_file(&repo.dir, "f.txt", &file.token, "resolved\n").unwrap();
+        // Stored with plain line breaks, checked out with the ones this machine is set up for.
+        assert_eq!(repo.git(&["show", ":f.txt"]), "resolved\n");
+        assert_eq!(repo.read("f.txt"), "resolved\r\n");
+        assert!(status(&repo.dir).unwrap().unstaged.is_empty());
+    }
+
+    #[test]
+    fn refuses_to_save_a_conflict_that_changed() {
+        let repo = conflict_of("editor-stale", "base\n", "ours\n", "theirs\n");
+        let file = conflict_file(&repo.dir, "f.txt").unwrap();
+
+        // Edited in another program while the editor was open.
+        repo.write("f.txt", "resolved by hand, at length\n");
+        let err = save_conflict_file(&repo.dir, "f.txt", &file.token, "from the editor\n").unwrap_err();
+        assert_eq!(err, conflict::STALE);
+        assert_eq!(repo.read("f.txt"), "resolved by hand, at length\n");
+        assert_eq!(conflicted_paths(&repo), vec!["f.txt"]);
+
+        // Loaded again, the file says that it has no markers left, and can be saved.
+        let file = conflict_file(&repo.dir, "f.txt").unwrap();
+        assert!(!file.markers);
+        save_conflict_file(&repo.dir, "f.txt", &file.token, "from the editor\n").unwrap();
+        assert_eq!(repo.read("f.txt"), "from the editor\n");
+
+        let err = save_conflict_file(&repo.dir, "f.txt", &file.token, "again\n").unwrap_err();
+        assert!(err.contains("has no conflicts"), "{err}");
+    }
+
+    #[test]
+    fn refuses_files_the_conflict_editor_cannot_merge() {
+        let repo = conflicting_merge("editor-refuse");
+        for file in ["ours-gone.txt", "theirs-gone.txt"] {
+            let err = conflict_file(&repo.dir, file).unwrap_err();
+            assert!(err.contains("One side has no version"), "{err}");
+        }
+        let err = conflict_file(&repo.dir, "missing.txt").unwrap_err();
+        assert!(err.contains("has no conflicts"), "{err}");
+
+        let binary = TestRepo::new("editor-binary");
+        binary.write_bytes("f.bin", b"base\0");
+        binary.commit_all("base");
+        binary.git(&["switch", "-q", "-c", "other"]);
+        binary.write_bytes("f.bin", b"theirs\0");
+        binary.commit_all("theirs");
+        binary.git(&["switch", "-q", "main"]);
+        binary.write_bytes("f.bin", b"ours\0");
+        binary.commit_all("ours");
+        assert!(run(&binary.dir, &["merge", "-q", "other"]).is_err());
+        let err = conflict_file(&binary.dir, "f.bin").unwrap_err();
+        assert!(err.contains("isn't UTF-8 text"), "{err}");
+
+        let lfs = conflict_of("editor-lfs", &lfs_pointer(1), &lfs_pointer(2), &lfs_pointer(3));
+        let err = conflict_file(&lfs.dir, "f.txt").unwrap_err();
+        assert!(err.contains("Git LFS"), "{err}");
+
+        let line = "0123456789abcdef".repeat(64) + "\n";
+        let large = conflict_of("editor-large", "base\n", &line.repeat(1100), "theirs\n");
+        let err = conflict_file(&large.dir, "f.txt").unwrap_err();
+        assert!(err.contains("too large to resolve here (1.1 MB, limit 1 MB)"), "{err}");
     }
 
     #[test]

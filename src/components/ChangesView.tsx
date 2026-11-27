@@ -5,6 +5,7 @@ import {
   conflictKindLabel,
   conflictMenu,
   ConflictSides,
+  editorBlocked,
   GENERIC_SIDES,
   mergeToolBlocked,
   resolveTitle,
@@ -14,6 +15,7 @@ import { DiffHunk } from "../diff";
 import { IgnoreTarget } from "../gitignore";
 import { plural } from "../remote";
 import { ResolveSideDialog } from "./ConflictDialogs";
+import { ConflictDraft, ConflictEditor } from "./ConflictEditor";
 import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DiffView, HunkAction, LineAction } from "./DiffView";
 import { DiscardDialog } from "./DiscardDialog";
@@ -67,6 +69,12 @@ export function ChangesView({
   /** Conflicted files of a folder waiting for the confirmation to take one side. */
   const [resolving, setResolving] = useState<{ files: FileChange[]; side: ConflictSide } | null>(null);
   const [menu, setMenu] = useState<{ target: RowTarget; list: ChangeList; x: number; y: number } | null>(null);
+  /** The selected conflict is shown as its raw diff instead of in the conflict editor. */
+  const [conflictDiff, setConflictDiff] = useState(false);
+  /** Why the conflict editor couldn't show a file when it was asked to, e.g. a binary file. */
+  const [editorProblem, setEditorProblem] = useState<{ path: string; reason: string } | null>(null);
+  /** Unsaved results of the conflict editor by path, so that they survive looking at another file. */
+  const drafts = useRef(new Map<string, ConflictDraft>());
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const focusEditor = useRef(false);
 
@@ -118,10 +126,31 @@ export function ChangesView({
   const conflictFile =
     selection && !selection.staged ? conflicted.find((f) => f.path === selection.path) : undefined;
   const selectedConflict = !!conflictFile;
+  // A conflict is resolved in the conflict editor, unless that can't show the file or its diff was asked for.
+  const editorUnavailable = !conflictFile
+    ? null
+    : (editorBlocked(conflictFile.conflict) ??
+      (editorProblem?.path === conflictFile.path ? editorProblem.reason : null));
+  const showsEditor = !!conflictFile && !conflictDiff && editorUnavailable === null;
+
+  // Each conflict starts out in the editor, which is asked anew whether it can show the file.
+  const selectedPath = selection?.path;
+  useEffect(() => {
+    setConflictDiff(false);
+    setEditorProblem(null);
+  }, [selectedPath]);
+
+  // Drafts of files that are no longer conflicted have nothing left to resolve.
+  useEffect(() => {
+    if (!status) return;
+    for (const path of drafts.current.keys()) {
+      if (!status.conflicted.some((f) => f.path === path)) drafts.current.delete(path);
+    }
+  }, [status]);
 
   // Reload the diff whenever the selection or the repository status changes.
   useEffect(() => {
-    if (!selection) {
+    if (!selection || showsEditor) {
       setDiff(null);
       setDiffError(null);
       return;
@@ -141,7 +170,7 @@ export function ChangesView({
     return () => {
       cancelled = true;
     };
-  }, [repo, selection, status]);
+  }, [repo, selection, status, showsEditor]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -331,6 +360,16 @@ export function ChangesView({
           Open in merge tool
         </button>
       )}
+      {editorUnavailable === null && (
+        <button
+          className="small"
+          aria-pressed={conflictDiff}
+          title={conflictDiff ? "Resolve the conflicts in the editor" : "Show the file with its conflict markers"}
+          onClick={() => setConflictDiff(!conflictDiff)}
+        >
+          {conflictDiff ? "Show editor" : "Show diff"}
+        </button>
+      )}
     </>
   );
 
@@ -512,15 +551,29 @@ export function ChangesView({
           </section>
         </div>
 
-        <DiffView
-          diff={selection ? diff : null}
-          error={diffError}
-          title={selection ? `${selection.path}${selection.staged ? "  (staged)" : ""}` : undefined}
-          actions={conflictActions}
-          hunkActions={hunkActions}
-          lineActions={lineActions}
-          hunkActionsDisabled={busy}
-        />
+        {showsEditor && conflictFile ? (
+          <ConflictEditor
+            repo={repo}
+            file={conflictFile}
+            sides={sides}
+            actions={conflictActions}
+            drafts={drafts.current}
+            onSaved={onChanged}
+            onUnavailable={(reason) => setEditorProblem({ path: conflictFile.path, reason })}
+            onError={onError}
+          />
+        ) : (
+          <DiffView
+            diff={selection ? diff : null}
+            error={diffError}
+            title={selection ? `${selection.path}${selection.staged ? "  (staged)" : ""}` : undefined}
+            actions={conflictActions}
+            note={editorUnavailable}
+            hunkActions={hunkActions}
+            lineActions={lineActions}
+            hunkActionsDisabled={busy}
+          />
+        )}
       </Split>
       {menu && (
         <ContextMenu
