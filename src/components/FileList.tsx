@@ -16,10 +16,14 @@ const STATUS_LABEL: Record<string, string> = {
   "?": "Untracked",
 };
 
-export function StatusBadge({ status }: { status: string }) {
+/** `title` replaces the status name in the tooltip, e.g. to say what kind of conflict it is. */
+export function StatusBadge({ status, title }: { status: string; title?: string }) {
   const letter = status === "?" ? "+" : status;
   return (
-    <span className={`status-badge status-${status === "?" ? "untracked" : status}`} title={STATUS_LABEL[status]}>
+    <span
+      className={`status-badge status-${status === "?" ? "untracked" : status}`}
+      title={title ?? STATUS_LABEL[status]}
+    >
       {letter}
     </span>
   );
@@ -35,6 +39,8 @@ export interface RowAction {
   onFolder?: (files: FileChange[]) => void;
   /** Tooltip on a file row. */
   fileTitle?: (file: FileChange) => string | undefined;
+  /** Tooltip on a folder row, instead of "<label> 3 files in <folder>". */
+  folderTitle?: (files: FileChange[], path: string) => string;
 }
 
 /** What a row's context menu is about: one file, or every file in a folder. */
@@ -48,9 +54,19 @@ interface FileListProps {
   actions?: RowAction[];
   /** Right-click on a row, at viewport coordinates. */
   onContextMenu?: (target: RowTarget, x: number, y: number) => void;
+  /** Tooltip of a file's status badge, instead of the status name. */
+  badgeTitle?: (file: FileChange) => string | undefined;
 }
 
-export function FileList({ files, selectedPath, onSelect, onActivate, actions = [], onContextMenu }: FileListProps) {
+export function FileList({
+  files,
+  selectedPath,
+  onSelect,
+  onActivate,
+  actions = [],
+  onContextMenu,
+  badgeTitle,
+}: FileListProps) {
   const tree = useMemo(() => buildFileTree(files), [files]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
@@ -87,12 +103,15 @@ export function FileList({ files, selectedPath, onSelect, onActivate, actions = 
             <span className="file-name">{node.name}</span>
             {!open && <span className="dir-count">{node.fileCount}</span>}
             {actions.map(
-              ({ label, danger, onFolder }) =>
+              ({ label, danger, onFolder, folderTitle }) =>
                 onFolder && (
                   <button
                     key={label}
                     className={danger ? "row-action danger" : "row-action"}
-                    title={`${label} ${node.fileCount} file${node.fileCount === 1 ? "" : "s"} in ${node.path}`}
+                    title={
+                      folderTitle?.(filesIn(node), node.path) ??
+                      `${label} ${node.fileCount} file${node.fileCount === 1 ? "" : "s"} in ${node.path}`
+                    }
                     onClick={(e) => {
                       e.stopPropagation();
                       onFolder(filesIn(node));
@@ -124,7 +143,7 @@ export function FileList({ files, selectedPath, onSelect, onActivate, actions = 
             title={f.origPath ? `${f.origPath} → ${f.path}` : f.path}
           >
             <span className="chevron-spacer" />
-            <StatusBadge status={f.status} />
+            <StatusBadge status={f.status} title={badgeTitle?.(f)} />
             <span className="file-name">{node.name}</span>
             {actions.map(({ label, danger, onFile, fileTitle }) => (
               <button

@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { file, makeStatus, mockBackend } from "../test/tauri";
+import { ConflictSides } from "../conflict";
+import { conflictFile, file, makeStatus, mockBackend } from "../test/tauri";
 import { ChangesView } from "./ChangesView";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -12,6 +13,11 @@ const status = makeStatus({
   unstaged: [file("src/edit.ts"), file("fresh.txt", "?")],
   staged: [file("ready.rs", "A")],
 });
+
+const sides: ConflictSides = {
+  ours: { name: "main", detail: "current branch" },
+  theirs: { name: "feature", detail: "being merged" },
+};
 
 function setup(props: Partial<Parameters<typeof ChangesView>[0]> = {}) {
   const onChanged = vi.fn();
@@ -30,6 +36,7 @@ describe("ChangesView", () => {
       unstage_all: () => undefined,
       commit: () => undefined,
       discard: () => undefined,
+      resolve_conflicts: () => undefined,
       add_to_gitignore: () => undefined,
       apply_selection: () => undefined,
     });
@@ -453,6 +460,117 @@ describe("ChangesView", () => {
     await userEvent.click(screen.getByText("c.txt"));
     expect(await screen.findByText("new c.txt")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /hunk/ })).toBeNull();
+  });
+
+  it("resolves a conflicted file with one side from its row", async () => {
+    const { onChanged } = setup({
+      sides,
+      status: makeStatus({ conflicted: [conflictFile("c.txt"), conflictFile("gone.txt", "deleted-by-them")] }),
+    });
+    expect(screen.getByText("ours = main · theirs = feature")).toBeInTheDocument();
+
+    const gone = screen.getByText("gone.txt").closest("li")!;
+    expect(gone.querySelector(".status-badge")).toHaveAttribute(
+      "title",
+      "Conflict: Changed in main, deleted in feature",
+    );
+    const theirs = within(gone).getByRole("button", { name: "Use theirs" });
+    expect(theirs).toHaveAttribute("title", "feature (being merged) has no such file: resolving deletes it");
+    await userEvent.click(theirs);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_conflicts", {
+        repo: "/repo",
+        paths: ["gone.txt"],
+        side: "theirs",
+      }),
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+
+    const row = screen.getByText("c.txt").closest("li")!;
+    const ours = within(row).getByRole("button", { name: "Use ours" });
+    expect(ours).toHaveAttribute("title", "Resolve with the version of main (current branch)");
+    await userEvent.click(ours);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_conflicts", { repo: "/repo", paths: ["c.txt"], side: "ours" }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("asks before resolving a folder of conflicts with one side", async () => {
+    setup({
+      sides,
+      status: makeStatus({ conflicted: [conflictFile("src/a.ts"), conflictFile("src/lib/b.ts")] }),
+    });
+    const src = screen.getByText("src").closest("li")!;
+    const ours = within(src).getByRole("button", { name: "Use ours" });
+    expect(ours).toHaveAttribute("title", "Resolve 2 files in src/ with main (current branch)…");
+    await userEvent.click(ours);
+    expect(invokeMock).not.toHaveBeenCalledWith("resolve_conflicts", expect.anything());
+
+    const dialog = screen.getByRole("dialog", { name: "Resolve Conflicts" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Use main" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_conflicts", {
+        repo: "/repo",
+        paths: ["src/lib/b.ts", "src/a.ts"],
+        side: "ours",
+      }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("names the sides in the context menu of a conflict", async () => {
+    setup({
+      sides,
+      status: makeStatus({ conflicted: [conflictFile("src/a.ts"), conflictFile("src/b.ts")] }),
+    });
+    fireEvent.contextMenu(screen.getByText("a.ts"));
+    expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+      "Use main (current branch)",
+      "Use feature (being merged)",
+      "Mark Resolved",
+    ]);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Use feature (being merged)" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_conflicts", {
+        repo: "/repo",
+        paths: ["src/a.ts"],
+        side: "theirs",
+      }),
+    );
+
+    fireEvent.contextMenu(screen.getByText("b.ts"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Mark Resolved" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("stage", { repo: "/repo", paths: ["src/b.ts"] }));
+
+    // A folder asks first.
+    fireEvent.contextMenu(screen.getByText("src"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Use feature for Folder…" }));
+    const dialog = screen.getByRole("dialog", { name: "Resolve Conflicts" });
+    expect(within(dialog).getByRole("button", { name: "Use feature" })).toBeInTheDocument();
+  });
+
+  it("takes a side of the selected conflict from the header, then shows the next conflict", async () => {
+    const props = { repo: "/repo", sides, onChanged: () => {}, onError: () => {} };
+    const { rerender } = render(
+      <ChangesView {...props} status={makeStatus({ conflicted: [conflictFile("a.txt"), conflictFile("b.txt")] })} />,
+    );
+    await userEvent.click(screen.getByText("a.txt"));
+    await userEvent.click(await screen.findByRole("button", { name: "Use feature" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_conflicts", { repo: "/repo", paths: ["a.txt"], side: "theirs" }),
+    );
+
+    rerender(
+      <ChangesView {...props} status={makeStatus({ staged: [file("a.txt")], conflicted: [conflictFile("b.txt")] })} />,
+    );
+    expect(await screen.findByText("new b.txt")).toBeInTheDocument();
+    expect(screen.getByText("b.txt", { selector: "li *" }).closest("li")).toHaveClass("selected");
+
+    // Once the last conflict is gone, nothing is selected.
+    rerender(<ChangesView {...props} status={makeStatus({ staged: [file("a.txt"), file("b.txt")] })} />);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Use feature" })).toBeNull());
+    expect(screen.queryByText("new b.txt")).toBeNull();
   });
 
   it("reports a failed hunk action and refreshes", async () => {

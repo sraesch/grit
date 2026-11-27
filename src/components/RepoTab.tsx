@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   api,
@@ -24,6 +24,7 @@ import {
 } from "../api";
 import { switchTo, SwitchTarget, targetForCommit } from "../branches";
 import { CommitAction, commitMenu, PickKind, pickSummary } from "../commit";
+import { conflictSides } from "../conflict";
 import { mergeSummary, mergeTargets } from "../merge";
 import { hasRebaseTargets, rebaseSummary, rebaseTargets } from "../rebase";
 import {
@@ -194,6 +195,9 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     refreshStatus();
     refreshHistory();
   }, [refreshStatus, refreshHistory]);
+
+  // Who the two sides of the conflicts are, named after the branches the operation in progress involves.
+  const sides = useMemo(() => conflictSides(status, branches), [status, branches]);
 
   useEffect(() => {
     refreshAll();
@@ -1210,7 +1214,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
         />
         <main className="main">
           {view === "changes" ? (
-            <ChangesView repo={root} status={status} onChanged={refreshAll} onError={onError} />
+            <ChangesView repo={root} status={status} sides={sides} onChanged={refreshAll} onError={onError} />
           ) : view === "stash" ? (
             shownStash && (
               <StashView

@@ -46,6 +46,32 @@ describe("FileList", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("uses the given tooltips for folder actions and status badges", () => {
+    const actions = [
+      {
+        label: "Use ours",
+        onFile: () => {},
+        onFolder: () => {},
+        folderTitle: (inFolder: typeof files, path: string) => `Resolve ${inFolder.length} in ${path}`,
+      },
+    ];
+    render(
+      <FileList
+        files={[file("src/a.ts", "U"), file("src/b.ts", "U")]}
+        selectedPath={null}
+        onSelect={() => {}}
+        actions={actions}
+        badgeTitle={(f) => `Conflict in ${f.path}`}
+      />,
+    );
+    const folder = screen.getByText("src").closest("li")!;
+    expect(within(folder).getByRole("button", { name: "Use ours" })).toHaveAttribute("title", "Resolve 2 in src/");
+    expect(screen.getByText("a.ts").closest("li")!.querySelector(".status-badge")).toHaveAttribute(
+      "title",
+      "Conflict in src/a.ts",
+    );
+  });
+
   it("collapses and expands folders", async () => {
     const onSelect = vi.fn();
     render(

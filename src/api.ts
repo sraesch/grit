@@ -11,7 +11,26 @@ export interface FileChange {
   origPath: string | null;
   /** M, T, A, D, R, C, U (conflict) or ? (untracked) */
   status: string;
+  /** For a conflicted file, what the two sides did to it. */
+  conflict?: ConflictKind | null;
 }
+
+/** What the two sides of a conflict did to the file; "us" is the side of `ConflictSide` "ours". */
+export type ConflictKind =
+  | "both-modified"
+  | "both-added"
+  | "both-deleted"
+  | "added-by-us"
+  | "added-by-them"
+  | "deleted-by-us"
+  | "deleted-by-them";
+
+/**
+ * A side of a conflict. Ours is what was checked out when the operation started and theirs what is
+ * brought in, except during a rebase: there ours is the branch being rebased onto and theirs the
+ * commit being replayed.
+ */
+export type ConflictSide = "ours" | "theirs";
 
 /** "squash" is a squash merge whose changes are staged (or conflict) and wait to be committed. */
 export type OperationKind = "merge" | "rebase" | "cherry-pick" | "revert" | "squash";
@@ -29,6 +48,13 @@ export interface Operation {
   total: number | null;
   /** The prepared commit message of a merge or squash merge. */
   message: string | null;
+  /**
+   * The commit the other side of a conflict comes from: the one being merged, replayed by a rebase,
+   * cherry-picked or reverted. Unknown for a squash merge.
+   */
+  commit?: string | null;
+  /** The commit a rebase replays the branch onto. */
+  onto?: string | null;
 }
 
 export interface Status {
@@ -370,6 +396,12 @@ export const api = {
   /** Reverts the unstaged changes of `tracked` files (staged changes stay) and deletes `untracked` files. */
   discard: (repo: string, tracked: string[], untracked: string[]) =>
     invoke<void>("discard", { repo, tracked, untracked }),
+  /**
+   * Resolves conflicted files by taking one side completely, and stages them. A file that side
+   * deleted (or never had) is removed.
+   */
+  resolveConflicts: (repo: string, paths: string[], side: ConflictSide) =>
+    invoke<void>("resolve_conflicts", { repo, paths, side }),
   /**
    * Stages, unstages or discards the selected hunks or lines of a file's diff. Refused when the diff no
    * longer matches the selection.

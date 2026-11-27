@@ -1,8 +1,19 @@
 import { KeyboardEvent, useEffect, useRef, useState } from "react";
-import { api, errorMessage, FileChange, HunkSelection, PatchAction, Status } from "../api";
+import { api, ConflictSide, errorMessage, FileChange, HunkSelection, PatchAction, Status } from "../api";
+import {
+  ConflictAction,
+  conflictKindLabel,
+  conflictMenu,
+  ConflictSides,
+  GENERIC_SIDES,
+  resolveTitle,
+  sideName,
+} from "../conflict";
 import { DiffHunk } from "../diff";
 import { IgnoreTarget } from "../gitignore";
-import { ContextMenu, MenuItem } from "./ContextMenu";
+import { plural } from "../remote";
+import { ResolveSideDialog } from "./ConflictDialogs";
+import { ContextMenu, MenuEntry, SEPARATOR } from "./ContextMenu";
 import { DiffView, HunkAction, LineAction } from "./DiffView";
 import { DiscardDialog } from "./DiscardDialog";
 import { FileList, RowAction, RowTarget } from "./FileList";
@@ -10,19 +21,26 @@ import { IgnoreDialog } from "./IgnoreDialog";
 import { CommitMessage } from "./Markdown";
 import { Split } from "./Split";
 
+/** The lists of Local changes a file can be shown in. */
+type ChangeList = "conflicted" | "unstaged" | "staged";
+
 interface Selection {
   path: string;
   staged: boolean;
+  /** Selected as a conflict: once it is resolved, the next conflict takes its place. */
+  conflict: boolean;
 }
 
 interface ChangesViewProps {
   repo: string;
   status: Status | null;
+  /** Who the two sides of the current conflicts are, for naming them. */
+  sides?: ConflictSides;
   onChanged: () => void;
   onError: (message: string) => void;
 }
 
-export function ChangesView({ repo, status, onChanged, onError }: ChangesViewProps) {
+export function ChangesView({ repo, status, sides = GENERIC_SIDES, onChanged, onError }: ChangesViewProps) {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -33,7 +51,9 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   /** Files waiting for the discard confirmation. */
   const [discarding, setDiscarding] = useState<FileChange[] | null>(null);
   const [ignoring, setIgnoring] = useState<IgnoreTarget | null>(null);
-  const [menu, setMenu] = useState<{ target: RowTarget; staged: boolean; x: number; y: number } | null>(null);
+  /** Conflicted files of a folder waiting for the confirmation to take one side. */
+  const [resolving, setResolving] = useState<{ files: FileChange[]; side: ConflictSide } | null>(null);
+  const [menu, setMenu] = useState<{ target: RowTarget; list: ChangeList; x: number; y: number } | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const focusEditor = useRef(false);
 
@@ -61,11 +81,14 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     }
   }, [mergeMessage, hasStatus]);
 
-  // Drop the selection once the file no longer appears in the list it was selected from.
+  // Drop the selection once the file no longer appears in the list it was selected from. A resolved
+  // conflict makes way for the next one, so the conflicts can be worked through in a row.
   useEffect(() => {
     if (!selection || !status) return;
     const list = selection.staged ? status.staged : [...status.unstaged, ...status.conflicted];
-    if (!list.some((f) => f.path === selection.path)) setSelection(null);
+    if (list.some((f) => f.path === selection.path)) return;
+    const next = selection.conflict ? status.conflicted[0] : undefined;
+    setSelection(next ? { path: next.path, staged: false, conflict: true } : null);
   }, [status, selection]);
 
   // Return focus to the message when switching back from the preview with the Write tab.
@@ -79,7 +102,9 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   // Whether the selected file is untracked, from the current status: staging part of it makes it tracked.
   const selectedUntracked =
     !!selection && !selection.staged && unstaged.some((f) => f.path === selection.path && f.status === "?");
-  const selectedConflict = !!selection && !selection.staged && conflicted.some((f) => f.path === selection.path);
+  const conflictFile =
+    selection && !selection.staged ? conflicted.find((f) => f.path === selection.path) : undefined;
+  const selectedConflict = !!conflictFile;
 
   // Reload the diff whenever the selection or the repository status changes.
   useEffect(() => {
@@ -117,7 +142,8 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     }
   }
 
-  const select = (f: FileChange, isStaged: boolean) => setSelection({ path: f.path, staged: isStaged });
+  const select = (f: FileChange, list: ChangeList) =>
+    setSelection({ path: f.path, staged: list === "staged", conflict: list === "conflicted" });
 
   /** Applies hunks or lines of the shown diff. Refreshes even on failure, e.g. when the diff was stale. */
   async function applySelection(action: PatchAction, parts: HunkSelection[]) {
@@ -187,12 +213,55 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
   const unstageAction: RowAction = { label: "Unstage", onFile: unstageFile, onFolder: unstageFiles };
   const resolveAction: RowAction = { label: "Mark resolved", onFile: stageFile, onFolder: stageFiles };
 
-  function menuItems(target: RowTarget, isStaged: boolean): MenuItem[] {
+  /** Resolves conflicted files with one side completely. */
+  const resolveWith = (files: FileChange[], side: ConflictSide) => {
+    setResolving(null);
+    return run(() =>
+      api.resolveConflicts(
+        repo,
+        files.map((f) => f.path),
+        side,
+      ),
+    );
+  };
+  // One file is resolved right away; a folder asks first, as it can take many files at once.
+  const sideAction = (side: ConflictSide): RowAction => ({
+    label: side === "ours" ? "Use ours" : "Use theirs",
+    onFile: (f) => resolveWith([f], side),
+    onFolder: (files) => setResolving({ files, side }),
+    fileTitle: (f) => resolveTitle(f, side, sides),
+    folderTitle: (files, path) => `Resolve ${plural(files.length, "file")} in ${path} with ${sideName(sides[side])}…`,
+  });
+
+  function conflictMenuItems(target: RowTarget): MenuEntry[] {
+    const files = target.kind === "file" ? [target.file] : target.files;
+    const takeSide = (side: ConflictSide) => () =>
+      target.kind === "file" ? resolveWith(files, side) : setResolving({ files, side });
+    const actions: Record<ConflictAction, () => void> = {
+      "use-ours": takeSide("ours"),
+      "use-theirs": takeSide("theirs"),
+      "mark-resolved": () => stageFiles(files),
+    };
+    return conflictMenu(target, { sides }).map((item) =>
+      item === "separator"
+        ? SEPARATOR
+        : {
+            label: item.label,
+            disabled: item.blocked !== null,
+            title: item.blocked ?? item.title,
+            onSelect: actions[item.action],
+          },
+    );
+  }
+
+  function menuItems(target: RowTarget, list: ChangeList): MenuEntry[] {
+    if (list === "conflicted") return conflictMenuItems(target);
+    const isStaged = list === "staged";
     if (target.kind === "folder") {
       const n = target.files.length;
       const count = `${n} file${n === 1 ? "" : "s"}`;
       if (isStaged) return [{ label: "Unstage Folder", title: count, onSelect: () => unstageFiles(target.files) }];
-      const items: MenuItem[] = [
+      const items: MenuEntry[] = [
         { label: "Stage Folder", title: count, onSelect: () => stageFiles(target.files) },
         { label: "Discard Folder…", danger: true, title: count, onSelect: () => setDiscarding(target.files) },
       ];
@@ -204,7 +273,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     }
     const f = target.file;
     if (isStaged) return [{ label: "Unstage", onSelect: () => unstageFile(f) }];
-    const items: MenuItem[] = [
+    const items: MenuEntry[] = [
       { label: "Stage", onSelect: () => stageFile(f) },
       {
         label: isUntracked(f) ? "Delete File…" : "Discard Changes…",
@@ -216,8 +285,24 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
     return items;
   }
 
-  const openMenu = (isStaged: boolean) => (target: RowTarget, x: number, y: number) =>
-    setMenu({ target, staged: isStaged, x, y });
+  const openMenu = (list: ChangeList) => (target: RowTarget, x: number, y: number) => setMenu({ target, list, x, y });
+
+  // Taking one side of the selected conflict, from the header of its diff.
+  const conflictActions = conflictFile && (
+    <>
+      {(["ours", "theirs"] as const).map((side) => (
+        <button
+          key={side}
+          className="small"
+          disabled={busy}
+          title={resolveTitle(conflictFile, side, sides)}
+          onClick={() => resolveWith([conflictFile], side)}
+        >
+          Use {sides[side].name}
+        </button>
+      ))}
+    </>
+  );
 
   async function doCommit() {
     if (!message.trim()) return;
@@ -273,20 +358,30 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
             </div>
             <div className="section-scroll">
               {conflicted.length > 0 && (
-                <FileList
-                  files={conflicted}
-                  selectedPath={selection && !selection.staged ? selection.path : null}
-                  onSelect={(f) => select(f, false)}
-                  actions={[resolveAction]}
-                />
+                <>
+                  <div
+                    className="conflict-legend"
+                    title={`Ours is ${sideName(sides.ours)}, theirs is ${sideName(sides.theirs)}`}
+                  >
+                    ours = {sides.ours.name} · theirs = {sides.theirs.name}
+                  </div>
+                  <FileList
+                    files={conflicted}
+                    selectedPath={selection && !selection.staged ? selection.path : null}
+                    onSelect={(f) => select(f, "conflicted")}
+                    actions={[sideAction("ours"), sideAction("theirs"), resolveAction]}
+                    onContextMenu={openMenu("conflicted")}
+                    badgeTitle={(f) => `Conflict: ${conflictKindLabel(f.conflict, sides)}`}
+                  />
+                </>
               )}
               <FileList
                 files={unstaged}
                 selectedPath={selection && !selection.staged ? selection.path : null}
-                onSelect={(f) => select(f, false)}
+                onSelect={(f) => select(f, "unstaged")}
                 onActivate={stageFile}
                 actions={[stageAction, discardAction]}
-                onContextMenu={openMenu(false)}
+                onContextMenu={openMenu("unstaged")}
               />
               {unstaged.length + conflicted.length === 0 && <div className="empty small">Working tree clean</div>}
             </div>
@@ -308,10 +403,10 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
               <FileList
                 files={staged}
                 selectedPath={selection?.staged ? selection.path : null}
-                onSelect={(f) => select(f, true)}
+                onSelect={(f) => select(f, "staged")}
                 onActivate={unstageFile}
                 actions={[unstageAction]}
-                onContextMenu={openMenu(true)}
+                onContextMenu={openMenu("staged")}
               />
               {staged.length === 0 && <div className="empty small">Nothing staged</div>}
             </div>
@@ -391,6 +486,7 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
           diff={selection ? diff : null}
           error={diffError}
           title={selection ? `${selection.path}${selection.staged ? "  (staged)" : ""}` : undefined}
+          actions={conflictActions}
           hunkActions={hunkActions}
           lineActions={lineActions}
           hunkActionsDisabled={busy}
@@ -401,8 +497,17 @@ export function ChangesView({ repo, status, onChanged, onError }: ChangesViewPro
           x={menu.x}
           y={menu.y}
           label={menu.target.kind === "file" ? menu.target.file.path : `Folder ${menu.target.path}`}
-          items={menuItems(menu.target, menu.staged)}
+          items={menuItems(menu.target, menu.list)}
           onClose={() => setMenu(null)}
+        />
+      )}
+      {resolving && (
+        <ResolveSideDialog
+          files={resolving.files}
+          side={resolving.side}
+          sides={sides}
+          onResolve={resolveWith}
+          onClose={() => setResolving(null)}
         />
       )}
       {ignoring && <IgnoreDialog target={ignoring} onIgnore={ignore} onClose={() => setIgnoring(null)} />}
