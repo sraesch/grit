@@ -83,6 +83,8 @@ interface RepoTabProps {
   onError: (message: string) => void;
   /** Clears a previous error, e.g. after a successful branch switch. */
   onClearError: () => void;
+  /** Opens the app settings, e.g. to choose a merge tool. */
+  onOpenSettings?: () => void;
 }
 
 /** A fetch, pull, push, rebase or merge that is running; background fetches don't show progress. */
@@ -109,7 +111,7 @@ interface PushPreset {
 const NOTICE_MS = 8000;
 
 /** One open repository: its branch bar, sidebar and changes/history views. */
-export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, onClearError }: RepoTabProps) {
+export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, onClearError, onOpenSettings }: RepoTabProps) {
   const root = repo.root;
   const [view, setView] = useState<View>("changes");
   const [status, setStatus] = useState<Status | null>(null);
@@ -355,7 +357,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
     [root, runRemote, onError, onClearError],
   );
 
-  /** Opens a conflicted file in the merge tool configured in git and waits until the tool is closed. */
+  /** Opens a conflicted file in the merge tool (from the settings, else git's) and waits until it is closed. */
   const openMergeTool = useCallback(
     async (file: FileChange) => {
       try {
@@ -1033,7 +1035,7 @@ export function RepoTab({ repo, active, actionsSlot, autoFetchMinutes, onError, 
           onSkip={() => runOperation(api.skipOperation)}
         />
       )}
-      {mergeToolSetup && <MergeToolDialog onClose={closeMergeToolSetup} />}
+      {mergeToolSetup && <MergeToolDialog onOpenSettings={onOpenSettings} onClose={closeMergeToolSetup} />}
       {dialog === "fetch" && branches && (
         <FetchDialog
           remotes={branches.remotes}

@@ -6,7 +6,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GitProgress } from "../api";
-import { mockBackend } from "../test/tauri";
+import { mockBackend, NO_MERGE_TOOL } from "../test/tauri";
 import { CloneDialog } from "./CloneDialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -32,7 +32,7 @@ describe("CloneDialog", () => {
   });
 
   function setup(reposDir: string | null, cloneRepo: (args: Record<string, unknown>) => unknown) {
-    mockBackend(invokeMock, { get_settings: () => ({ reposDir, autoFetchMinutes: 10 }), clone_repo: cloneRepo });
+    mockBackend(invokeMock, { get_settings: () => ({ reposDir, autoFetchMinutes: 10, ...NO_MERGE_TOOL }), clone_repo: cloneRepo });
     const onCloned = vi.fn();
     const onClose = vi.fn();
     render(<CloneDialog onCloned={onCloned} onClose={onClose} />);

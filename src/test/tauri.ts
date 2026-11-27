@@ -66,3 +66,6 @@ export function makeCommit(sha: string, subject: string, partial: Partial<LogEnt
     ...partial,
   };
 }
+
+/** The merge tool fields of settings that leave the choice to git. */
+export const NO_MERGE_TOOL = { mergeTool: null, mergeToolPath: null, mergeToolCommand: null };

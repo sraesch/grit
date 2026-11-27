@@ -4,7 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Settings } from "../api";
-import { mockBackend } from "../test/tauri";
+import { mockBackend, NO_MERGE_TOOL } from "../test/tauri";
 import { SettingsDialog } from "./SettingsDialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -25,13 +25,14 @@ const field = () => screen.getByLabelText("Repositories folder");
 
 describe("SettingsDialog", () => {
   beforeEach(() => {
-    stored = { reposDir: "/home/ada/code", autoFetchMinutes: 10 };
+    stored = { reposDir: "/home/ada/code", autoFetchMinutes: 10, ...NO_MERGE_TOOL };
     mockBackend(invokeMock, {
       get_settings: () => stored,
       set_settings: ({ settings }) => {
         const s = settings as Settings;
         if (s.reposDir === "/missing") throw "The folder /missing does not exist";
-        stored = { reposDir: s.reposDir?.replace(/^~/, "/home/ada") ?? null, autoFetchMinutes: s.autoFetchMinutes };
+        if (s.mergeToolPath === "/nowhere/meld") throw "The merge tool /nowhere/meld does not exist";
+        stored = { ...s, reposDir: s.reposDir?.replace(/^~/, "/home/ada") ?? null };
         return stored;
       },
     });
@@ -52,8 +53,10 @@ describe("SettingsDialog", () => {
     await userEvent.type(field(), "~/projects{Enter}");
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(invokeMock).toHaveBeenCalledWith("set_settings", { settings: { reposDir: "~/projects", autoFetchMinutes: 10 } });
-    expect(onSaved).toHaveBeenCalledWith({ reposDir: "/home/ada/projects", autoFetchMinutes: 10 });
+    expect(invokeMock).toHaveBeenCalledWith("set_settings", {
+      settings: { reposDir: "~/projects", autoFetchMinutes: 10, ...NO_MERGE_TOOL },
+    });
+    expect(onSaved).toHaveBeenCalledWith({ reposDir: "/home/ada/projects", autoFetchMinutes: 10, ...NO_MERGE_TOOL });
   });
 
   it("stores an empty field as no folder", async () => {
@@ -62,7 +65,7 @@ describe("SettingsDialog", () => {
     await userEvent.clear(field());
     expect(field()).toHaveAttribute("placeholder", "Your home folder");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(stored).toEqual({ reposDir: null, autoFetchMinutes: 10 }));
+    await waitFor(() => expect(stored).toEqual({ reposDir: null, autoFetchMinutes: 10, ...NO_MERGE_TOOL }));
   });
 
   it("picks the folder with the native dialog, starting at the current one", async () => {
@@ -84,7 +87,7 @@ describe("SettingsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("The folder /missing does not exist");
     expect(field()).toHaveAttribute("aria-invalid", "true");
     expect(onClose).not.toHaveBeenCalled();
-    expect(stored).toEqual({ reposDir: "/home/ada/code", autoFetchMinutes: 10 });
+    expect(stored).toEqual({ reposDir: "/home/ada/code", autoFetchMinutes: 10, ...NO_MERGE_TOOL });
 
     // Editing clears the message.
     await userEvent.type(field(), "x");
@@ -92,7 +95,7 @@ describe("SettingsDialog", () => {
   });
 
   it("saves how often to fetch automatically", async () => {
-    stored = { reposDir: null, autoFetchMinutes: 45 };
+    stored = { reposDir: null, autoFetchMinutes: 45, ...NO_MERGE_TOOL };
     const { onSaved } = setup();
     const select = screen.getByLabelText("Fetch automatically");
     // A value set outside the usual choices is kept and shown.
@@ -101,7 +104,73 @@ describe("SettingsDialog", () => {
 
     await userEvent.selectOptions(select, "Never");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ reposDir: null, autoFetchMinutes: 0 }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ reposDir: null, autoFetchMinutes: 0, ...NO_MERGE_TOOL }));
+  });
+
+  it("follows git's merge tool until one is chosen", async () => {
+    setup();
+    const select = screen.getByLabelText("Merge tool");
+    await waitFor(() => expect(select).toHaveDisplayValue("As configured in git"));
+    expect(select).toHaveAccessibleDescription(/merge.guitool, else merge.tool/);
+    expect(screen.queryByLabelText("Program")).toBeNull();
+    expect(screen.queryByLabelText("Command")).toBeNull();
+  });
+
+  it("saves a named merge tool with the program picked in the native dialog", async () => {
+    openMock.mockResolvedValue("/opt/meld/bin/meld");
+    const { onSaved } = setup();
+    const select = screen.getByLabelText("Merge tool");
+    await waitFor(() => expect(select).toBeEnabled());
+    await userEvent.selectOptions(select, "Meld");
+    expect(screen.getByLabelText("Program")).toHaveAttribute("placeholder", "Found on the PATH");
+    expect(screen.queryByLabelText("Command")).toBeNull();
+
+    const browse = screen.getAllByRole("button", { name: "Browse…" });
+    await userEvent.click(browse[browse.length - 1]);
+    expect(openMock).toHaveBeenCalledWith(expect.objectContaining({ directory: false }));
+    expect(screen.getByLabelText("Program")).toHaveValue("/opt/meld/bin/meld");
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(
+        expect.objectContaining({ mergeTool: "meld", mergeToolPath: "/opt/meld/bin/meld", mergeToolCommand: null }),
+      ),
+    );
+  });
+
+  it("saves a custom merge command", async () => {
+    const { onSaved } = setup();
+    const select = screen.getByLabelText("Merge tool");
+    await waitFor(() => expect(select).toBeEnabled());
+    await userEvent.selectOptions(select, "Custom command");
+    const command = screen.getByLabelText("Command");
+    expect(command).toHaveAccessibleDescription(/must wait until the tool is closed/);
+    expect(screen.queryByLabelText("Program")).toBeNull();
+    // userEvent treats "[" and "{" specially; this command has neither.
+    await userEvent.type(command, ' bcomp "$LOCAL" "$REMOTE" "$BASE" "$MERGED" ');
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mergeTool: "custom",
+          mergeToolPath: null,
+          mergeToolCommand: 'bcomp "$LOCAL" "$REMOTE" "$BASE" "$MERGED"',
+        }),
+      ),
+    );
+  });
+
+  it("shows a stored tool git's list doesn't have, and merge tool errors next to it", async () => {
+    stored = { ...stored, mergeTool: "mytool", mergeToolPath: "/nowhere/meld" };
+    const { onClose } = setup();
+    const select = screen.getByLabelText("Merge tool");
+    await waitFor(() => expect(select).toHaveDisplayValue("mytool"));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The merge tool /nowhere/meld does not exist");
+    expect(screen.getByLabelText("Program")).toHaveAttribute("aria-invalid", "true");
+    expect(field()).not.toHaveAttribute("aria-invalid");
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("closes without saving on Cancel and Escape", async () => {

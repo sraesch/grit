@@ -1575,6 +1575,9 @@ body.resizing-vertical {
   margin-bottom: 5px;
   font-weight: 600;
 }
+.settings-sublabel {
+  margin-top: 12px;
+}
 .settings-row {
   display: flex;
   gap: 8px;

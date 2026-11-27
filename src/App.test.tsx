@@ -15,7 +15,7 @@ import {
   StashOptions,
   Status,
 } from "./api";
-import { conflictFile, file, makeCommit, makeOperation, makeStash, makeStatus, mockBackend } from "./test/tauri";
+import { conflictFile, file, makeCommit, makeOperation, makeStash, makeStatus, mockBackend, NO_MERGE_TOOL } from "./test/tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -1006,7 +1006,7 @@ describe("App", () => {
     });
 
     it("fetches in the background when the last fetch is older than the interval", async () => {
-      settings = { reposDir: null, autoFetchMinutes: 10 };
+      settings = { reposDir: null, autoFetchMinutes: 10, ...NO_MERGE_TOOL };
       status = makeStatus({ upstream: "origin/main", lastFetch: now() - 3600 });
       mockBackend(invokeMock, {
         ...handlers,
@@ -1033,13 +1033,13 @@ describe("App", () => {
     });
 
     it("doesn't fetch in the background when the last fetch is recent or it is turned off", async () => {
-      settings = { reposDir: null, autoFetchMinutes: 10 };
+      settings = { reposDir: null, autoFetchMinutes: 10, ...NO_MERGE_TOOL };
       const { unmount } = render(<App />);
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));
       await screen.findByRole("button", { name: "Fetch" });
       unmount();
 
-      settings = { reposDir: null, autoFetchMinutes: 0 };
+      settings = { reposDir: null, autoFetchMinutes: 0, ...NO_MERGE_TOOL };
       status = makeStatus({ lastFetch: null });
       render(<App />);
       await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_settings"));

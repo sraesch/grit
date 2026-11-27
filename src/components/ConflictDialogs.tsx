@@ -53,11 +53,13 @@ export function ResolveSideDialog({ files, side, sides, onResolve, onClose }: Re
 }
 
 interface MergeToolDialogProps {
+  /** Opens the settings, where a merge tool can be chosen. Without it, the button isn't offered. */
+  onOpenSettings?: () => void;
   onClose: () => void;
 }
 
-/** Explains how to choose a merge tool in git, shown when a file should be opened in one and none is set. */
-export function MergeToolDialog({ onClose }: MergeToolDialogProps) {
+/** Explains how to choose a merge tool, shown when a file should be opened in one and none is set. */
+export function MergeToolDialog({ onOpenSettings, onClose }: MergeToolDialogProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   // Escape closes; focus returns to whatever opened the dialog.
@@ -82,8 +84,9 @@ export function MergeToolDialog({ onClose }: MergeToolDialogProps) {
         </header>
         <div className="settings-body">
           <p className="settings-hint">
-            grit opens conflicted files in the merge tool that git is set up with, and none is set yet. Choose one in
-            a terminal, for example Meld:
+            grit opens conflicted files in the merge tool chosen in Settings or, without one, in the merge tool that
+            git is set up with, and none is set yet. Choose one in Settings, or for git in a terminal, for example
+            Meld:
           </p>
           <pre className="dialog-code selectable">git config --global merge.tool meld</pre>
           <p className="settings-hint">
@@ -97,9 +100,26 @@ export function MergeToolDialog({ onClose }: MergeToolDialogProps) {
           </p>
         </div>
         <footer className="modal-footer">
-          <button ref={closeRef} className="primary" onClick={onClose}>
-            Close
-          </button>
+          {onOpenSettings ? (
+            <>
+              <button ref={closeRef} onClick={onClose}>
+                Close
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  onClose();
+                  onOpenSettings();
+                }}
+              >
+                Open Settings
+              </button>
+            </>
+          ) : (
+            <button ref={closeRef} className="primary" onClick={onClose}>
+              Close
+            </button>
+          )}
         </footer>
       </div>
     </div>

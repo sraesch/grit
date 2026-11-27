@@ -37,7 +37,7 @@ interface ChangesViewProps {
   status: Status | null;
   /** Who the two sides of the current conflicts are, for naming them. */
   sides?: ConflictSides;
-  /** Opens a conflicted file in the merge tool configured in git. Without it, the tool isn't offered. */
+  /** Opens a conflicted file in the merge tool. Without it, the tool isn't offered. */
   onOpenMergeTool?: (file: FileChange) => void;
   /** Why no merge tool can be opened right now, e.g. one is open already; null when one can. */
   toolBusy?: string | null;
@@ -325,7 +325,7 @@ export function ChangesView({
         <button
           className="small"
           disabled={toolBlocked !== null}
-          title={toolBlocked ?? "Open the file in the merge tool configured in git and wait until it is closed"}
+          title={toolBlocked ?? "Open the file in your merge tool and wait until it is closed"}
           onClick={() => onOpenMergeTool(conflictFile)}
         >
           Open in merge tool

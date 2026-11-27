@@ -72,4 +72,15 @@ describe("MergeToolDialog", () => {
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  it("opens the settings to choose a merge tool there", async () => {
+    const onClose = vi.fn();
+    const onOpenSettings = vi.fn();
+    render(<MergeToolDialog onOpenSettings={onOpenSettings} onClose={onClose} />);
+    const dialog = screen.getByRole("dialog", { name: "No Merge Tool Configured" });
+    expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open Settings" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
 });

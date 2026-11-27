@@ -14,7 +14,17 @@ pub struct Settings {
     pub repos_dir: Option<String>,
     /// Open repositories are fetched in the background this often; 0 turns it off.
     pub auto_fetch_minutes: u32,
+    /// The merge tool to open conflicted files in: one of git's tool names (e.g. "meld"), or
+    /// [`CUSTOM_MERGE_TOOL`] for `merge_tool_command`. `None` uses the tool configured in git.
+    pub merge_tool: Option<String>,
+    /// Where the named merge tool is installed; `None` finds it on the PATH.
+    pub merge_tool_path: Option<String>,
+    /// The shell command for [`CUSTOM_MERGE_TOOL`], with `$BASE`, `$LOCAL`, `$REMOTE` and `$MERGED`.
+    pub merge_tool_command: Option<String>,
 }
+
+/// The `merge_tool` that runs `merge_tool_command` instead of one of git's tools.
+pub const CUSTOM_MERGE_TOOL: &str = "custom";
 
 /// Longest automatic fetch interval: once a day.
 pub const MAX_AUTO_FETCH_MINUTES: u32 = 24 * 60;
@@ -24,6 +34,9 @@ impl Default for Settings {
         Settings {
             repos_dir: None,
             auto_fetch_minutes: 10,
+            merge_tool: None,
+            merge_tool_path: None,
+            merge_tool_command: None,
         }
     }
 }
@@ -60,9 +73,13 @@ impl SettingsStore {
                 "Fetch automatically at most every {MAX_AUTO_FETCH_MINUTES} minutes (once a day)"
             ));
         }
+        let (merge_tool, merge_tool_path, merge_tool_command) = normalize_merge_tool(&settings, self.home.as_deref())?;
         let settings = Settings {
             repos_dir: normalize_dir(settings.repos_dir.as_deref(), self.home.as_deref())?,
             auto_fetch_minutes: settings.auto_fetch_minutes,
+            merge_tool,
+            merge_tool_path,
+            merge_tool_command,
         };
         write_atomically(
             &self.path,
@@ -73,18 +90,71 @@ impl SettingsStore {
     }
 }
 
+/// The merge tool fields that apply to the chosen tool: a path only for a named tool, a command
+/// only for a custom one. Empty means "not set".
+type MergeToolFields = (Option<String>, Option<String>, Option<String>);
+
+fn normalize_merge_tool(settings: &Settings, home: Option<&Path>) -> Result<MergeToolFields, String> {
+    let trimmed = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let Some(tool) = trimmed(&settings.merge_tool) else {
+        return Ok((None, None, None));
+    };
+    if tool == CUSTOM_MERGE_TOOL {
+        let command = trimmed(&settings.merge_tool_command)
+            .ok_or("Enter the command that opens your merge tool, or choose another merge tool")?;
+        return Ok((Some(tool), None, Some(command)));
+    }
+    // The name ends up in git config keys (mergetool.<name>.path), where these are all that's safe.
+    if !tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("\"{tool}\" is not the name of a merge tool git knows"));
+    }
+    let Some(path) = trimmed(&settings.merge_tool_path) else {
+        return Ok((Some(tool), None, None));
+    };
+    let full = expand_home(&path, home);
+    if !full.is_absolute() {
+        return Err(format!("Use a full path for the merge tool, not \"{path}\""));
+    }
+    if full.is_dir() {
+        // What a Mac's file dialog picks for an app; git needs the program inside it.
+        return Err(if full.extension().is_some_and(|ext| ext == "app") {
+            format!(
+                "{} is an app: choose the merge tool's program inside it, in Contents/MacOS",
+                full.display()
+            )
+        } else {
+            format!("{} is a folder, not a merge tool", full.display())
+        });
+    }
+    if !full.is_file() {
+        return Err(format!("The merge tool {} does not exist", full.display()));
+    }
+    Ok((Some(tool), Some(full.to_string_lossy().into_owned()), None))
+}
+
+/// `~` and `~/...` start in the home folder, when it is known.
+fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => PathBuf::from(path),
+    }
+}
+
 /// Empty means "not set"; `~` expands to the home folder; anything else must be an absolute
 /// path to an existing folder.
 fn normalize_dir(dir: Option<&str>, home: Option<&Path>) -> Result<Option<String>, String> {
     let Some(dir) = dir.map(str::trim).filter(|d| !d.is_empty()) else {
         return Ok(None);
     };
-    let path = match (dir.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
-            home.join(rest.trim_start_matches(['/', '\\']))
-        }
-        _ => PathBuf::from(dir),
-    };
+    let path = expand_home(dir, home);
     if !path.is_absolute() {
         return Err(format!("Use a full path for the repositories folder, not \"{dir}\""));
     }
@@ -224,5 +294,65 @@ mod tests {
         };
         assert!(store.update(too_long).unwrap_err().contains("once a day"));
         assert_eq!(store.get(), off);
+    }
+
+    fn tool(name: &str, path: Option<&str>, command: Option<&str>) -> Settings {
+        Settings {
+            merge_tool: Some(name.to_string()),
+            merge_tool_path: path.map(str::to_string),
+            merge_tool_command: command.map(str::to_string),
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn stores_the_merge_tool() {
+        let tmp = TempDir::new("merge-tool");
+        let path = tmp.0.join("settings.json");
+        let store = SettingsStore::load(path.clone(), Some(tmp.0.clone()));
+        std::fs::create_dir(tmp.0.join("bin")).unwrap();
+        std::fs::write(tmp.0.join("bin/meld"), "").unwrap();
+
+        // A named tool keeps its path, but not a command it doesn't use.
+        let saved = store
+            .update(tool(" meld ", Some("~/bin/meld"), Some("ignored")))
+            .unwrap();
+        let meld = tmp.0.join("bin/meld");
+        assert_eq!(saved, tool("meld", meld.to_str(), None));
+        assert_eq!(SettingsStore::load(path.clone(), None).get(), saved);
+        assert_eq!(
+            store.update(tool("meld", Some(" "), None)).unwrap(),
+            tool("meld", None, None)
+        );
+
+        // A custom tool keeps its command, but not a path.
+        let custom = store
+            .update(tool(CUSTOM_MERGE_TOOL, Some("/x"), Some(r#" merge "$MERGED" "#)))
+            .unwrap();
+        assert_eq!(custom, tool(CUSTOM_MERGE_TOOL, None, Some(r#"merge "$MERGED""#)));
+
+        // No tool follows git's configuration and forgets the rest.
+        assert_eq!(
+            store.update(tool("", Some("/x"), Some("y"))).unwrap(),
+            Settings::default()
+        );
+    }
+
+    #[test]
+    fn validates_the_merge_tool() {
+        let tmp = TempDir::new("merge-tool-validate");
+        let store = SettingsStore::load(tmp.0.join("settings.json"), None);
+        let err = |s: Settings| store.update(s).unwrap_err();
+
+        assert!(err(tool(CUSTOM_MERGE_TOOL, None, Some("  "))).contains("Enter the command"));
+        assert!(err(tool("my.tool", None, None)).contains("not the name of a merge tool"));
+        assert!(err(tool("meld", Some("bin/meld"), None)).contains("full path"));
+        let missing = tmp.0.join("meld");
+        assert!(err(tool("meld", missing.to_str(), None)).contains("does not exist"));
+        assert!(err(tool("meld", tmp.0.to_str(), None)).contains("is a folder, not a merge tool"));
+        let app = tmp.0.join("Meld.app");
+        std::fs::create_dir(&app).unwrap();
+        assert!(err(tool("meld", app.to_str(), None)).contains("in Contents/MacOS"));
+        assert_eq!(store.get(), Settings::default());
     }
 }

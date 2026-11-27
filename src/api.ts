@@ -363,6 +363,15 @@ export interface Settings {
   reposDir: string | null;
   /** Open repositories are fetched in the background this often; 0 turns it off. */
   autoFetchMinutes: number;
+  /**
+   * The merge tool for conflicted files: one of git's tool names (e.g. "meld"), or "custom" for
+   * `mergeToolCommand`. Null uses the tool configured in git.
+   */
+  mergeTool: string | null;
+  /** Where the named merge tool is installed; null finds it on the PATH. */
+  mergeToolPath: string | null;
+  /** The shell command of the "custom" merge tool, with $BASE, $LOCAL, $REMOTE and $MERGED. */
+  mergeToolCommand: string | null;
 }
 
 export interface RepoChanged {
@@ -412,10 +421,13 @@ export const api = {
    */
   resolveConflicts: (repo: string, paths: string[], side: ConflictSide) =>
     invoke<void>("resolve_conflicts", { repo, paths, side }),
-  /** The merge tool configured in git (`merge.guitool`, else `merge.tool`); null when there is none. */
+  /**
+   * The merge tool chosen in the settings, else the one configured in git (`merge.guitool`, else
+   * `merge.tool`); null when there is none.
+   */
   mergeTool: (repo: string) => invoke<string | null>("get_merge_tool", { repo }),
   /**
-   * Opens a conflicted file in the configured merge tool and resolves once the tool is closed.
+   * Opens a conflicted file in the merge tool (see `mergeTool`) and resolves once the tool is closed.
    * Rejects when the tool can't be started, and for conflicts a tool can't merge (a deleted side).
    */
   openMergeTool: (repo: string, path: string) => invoke<MergeToolResult>("open_merge_tool", { repo, path }),

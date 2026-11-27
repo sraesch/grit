@@ -235,7 +235,7 @@ export function conflictMenu(target: ConflictTarget, ctx: ConflictMenuContext): 
       action: "merge-tool",
       label: "Open in Merge Tool",
       blocked: mergeToolBlocked(file.conflict) ?? ctx.toolBusy,
-      title: "Open the file in the merge tool configured in git and wait until it is closed",
+      title: "Open the file in your merge tool and wait until it is closed",
     },
     "separator",
     { action: "mark-resolved", label: "Mark Resolved", blocked: null, title: "Stage the file as it is now" },

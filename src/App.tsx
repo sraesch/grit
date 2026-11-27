@@ -44,6 +44,7 @@ function App() {
   const clearError = useCallback(() => setError(null), []);
   const closeAbout = useCallback(() => setAboutOpen(false), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeNewRepo = useCallback(() => setNewRepo(null), []);
   const closeClone = useCallback(() => setCloneOpen(false), []);
   const closeAddMenu = useCallback(() => setAddMenu(null), []);
@@ -274,6 +275,7 @@ function App() {
           autoFetchMinutes={settings?.autoFetchMinutes ?? null}
           onError={onError}
           onClearError={clearError}
+          onOpenSettings={openSettings}
         />
       ))}
       {tabs.length === 0 && !restoring && (
